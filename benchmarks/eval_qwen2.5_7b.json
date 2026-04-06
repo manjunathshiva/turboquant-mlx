@@ -1,0 +1,98 @@
+{
+  "model": "Qwen/Qwen2.5-7B",
+  "num_samples": 256,
+  "seq_len": 512,
+  "group_size": 64,
+  "results": [
+    {
+      "config": "FP16 (baseline)",
+      "perplexity": 8.55,
+      "size_gb": 14.185,
+      "bits_per_weight": 16.0,
+      "params": 7615616512,
+      "quant_time_s": 0.0,
+      "eval_time_s": 148.7
+    },
+    {
+      "config": "TurboQuant 2-bit (eff 2.25)",
+      "perplexity": 51.81,
+      "size_gb": 2.87,
+      "bits_per_weight": 3.24,
+      "params": 7615616512,
+      "quant_time_s": 3.9,
+      "eval_time_s": 481.0
+    },
+    {
+      "config": "TurboQuant 3-bit (eff 3.25)",
+      "perplexity": 11.69,
+      "size_gb": 3.861,
+      "bits_per_weight": 4.35,
+      "params": 7615616512,
+      "quant_time_s": 3.3,
+      "eval_time_s": 1174.0
+    },
+    {
+      "config": "TurboQuant 4-bit (eff 4.25)",
+      "perplexity": 9.14,
+      "size_gb": 4.516,
+      "bits_per_weight": 5.09,
+      "params": 7615616512,
+      "quant_time_s": 4.7,
+      "eval_time_s": 457.8
+    },
+    {
+      "config": "TurboQuant 2+QJL (eff 3.50)",
+      "perplexity": 15.93,
+      "size_gb": 3.698,
+      "bits_per_weight": 4.17,
+      "params": 7615616512,
+      "quant_time_s": 17.7,
+      "eval_time_s": 1103.5
+    },
+    {
+      "config": "TurboQuant 3+QJL (eff 4.50)",
+      "perplexity": 10.21,
+      "size_gb": 4.689,
+      "bits_per_weight": 5.29,
+      "params": 7615616512,
+      "quant_time_s": 12.7,
+      "eval_time_s": 2975.4
+    },
+    {
+      "config": "TurboQuant 4+QJL (eff 5.50)",
+      "perplexity": 8.92,
+      "size_gb": 5.344,
+      "bits_per_weight": 6.03,
+      "params": 7615616512,
+      "quant_time_s": 20.6,
+      "eval_time_s": 3351.2
+    },
+    {
+      "config": "Affine 2-bit (gs=64)",
+      "perplexity": 2199.4,
+      "size_gb": 2.217,
+      "bits_per_weight": 2.5,
+      "params": 7615616512,
+      "quant_time_s": 0.1,
+      "eval_time_s": 196.9
+    },
+    {
+      "config": "Affine 3-bit (gs=64)",
+      "perplexity": 13.37,
+      "size_gb": 3.103,
+      "bits_per_weight": 3.5,
+      "params": 7615616512,
+      "quant_time_s": 0.5,
+      "eval_time_s": 209.3
+    },
+    {
+      "config": "Affine 4-bit (gs=64)",
+      "perplexity": 9.24,
+      "size_gb": 3.99,
+      "bits_per_weight": 4.5,
+      "params": 7615616512,
+      "quant_time_s": 0.2,
+      "eval_time_s": 213.4
+    }
+  ]
+}

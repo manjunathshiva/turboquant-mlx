@@ -1,0 +1,53 @@
+{
+  "model": "Qwen/Qwen1.5-MoE-A2.7B",
+  "num_samples": 64,
+  "seq_len": 512,
+  "group_size": 64,
+  "results": [
+    {
+      "config": "FP16 (baseline)",
+      "perplexity": 9.17,
+      "size_gb": 26.665,
+      "bits_per_weight": 16.0,
+      "params": 14315784192,
+      "quant_time_s": 0.0,
+      "eval_time_s": 26.6
+    },
+    {
+      "config": "TurboQuant 3-bit (eff 3.25)",
+      "perplexity": 12.54,
+      "size_gb": 6.216,
+      "bits_per_weight": 3.73,
+      "params": 14315784192,
+      "quant_time_s": 7.1,
+      "eval_time_s": 143.0
+    },
+    {
+      "config": "TurboQuant 4-bit (eff 4.25)",
+      "perplexity": 9.88,
+      "size_gb": 7.514,
+      "bits_per_weight": 4.51,
+      "params": 14315784192,
+      "quant_time_s": 7.6,
+      "eval_time_s": 132.3
+    },
+    {
+      "config": "Affine 3-bit (gs=64)",
+      "perplexity": 15.42,
+      "size_gb": 5.833,
+      "bits_per_weight": 3.5,
+      "params": 14315784192,
+      "quant_time_s": 0.8,
+      "eval_time_s": 18.7
+    },
+    {
+      "config": "Affine 4-bit (gs=64)",
+      "perplexity": 10.2,
+      "size_gb": 7.5,
+      "bits_per_weight": 4.5,
+      "params": 14315784192,
+      "quant_time_s": 0.2,
+      "eval_time_s": 19.1
+    }
+  ]
+}
