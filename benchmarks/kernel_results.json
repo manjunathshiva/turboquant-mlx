@@ -1,0 +1,82 @@
+{
+  "description": "Fused Metal kernel vs software dequant (single-token decode)",
+  "device": "Apple Silicon (M-series)",
+  "configs": [
+    {
+      "size": "512x512",
+      "bits": 3,
+      "sw_us": 243.9,
+      "fused_us": 178.1,
+      "speedup": 1.37,
+      "compressed_kb": 112,
+      "fp16_kb": 512
+    },
+    {
+      "size": "512x512",
+      "bits": 4,
+      "sw_us": 171.7,
+      "fused_us": 134.3,
+      "speedup": 1.28,
+      "compressed_kb": 136,
+      "fp16_kb": 512
+    },
+    {
+      "size": "1024x1024",
+      "bits": 3,
+      "sw_us": 192.3,
+      "fused_us": 162.1,
+      "speedup": 1.19,
+      "compressed_kb": 444,
+      "fp16_kb": 2048
+    },
+    {
+      "size": "1024x1024",
+      "bits": 4,
+      "sw_us": 192.1,
+      "fused_us": 151.3,
+      "speedup": 1.27,
+      "compressed_kb": 544,
+      "fp16_kb": 2048
+    },
+    {
+      "size": "2048x2048",
+      "bits": 3,
+      "sw_us": 347.8,
+      "fused_us": 219.3,
+      "speedup": 1.59,
+      "compressed_kb": 1768,
+      "fp16_kb": 8192
+    },
+    {
+      "size": "2048x2048",
+      "bits": 4,
+      "sw_us": 343.8,
+      "fused_us": 204.2,
+      "speedup": 1.68,
+      "compressed_kb": 2176,
+      "fp16_kb": 8192
+    },
+    {
+      "size": "4096x4096",
+      "bits": 3,
+      "sw_us": 1387.4,
+      "fused_us": 364.3,
+      "speedup": 3.81,
+      "compressed_kb": 7072,
+      "fp16_kb": 32768
+    },
+    {
+      "size": "4096x4096",
+      "bits": 4,
+      "sw_us": 1281.9,
+      "fused_us": 299.9,
+      "speedup": 4.27,
+      "compressed_kb": 8704,
+      "fp16_kb": 32768
+    }
+  ],
+  "reference": {
+    "1024x1024_fp16_dense_us": 127.5,
+    "4096x4096_fp16_dense_us": 148.9
+  }
+}

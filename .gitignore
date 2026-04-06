@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Compiled extensions (platform-specific, rebuild from csrc/)
+*.so
+*.dylib
+*.metallib
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Virtual environments
+.venv/
+venv/
+
+# Model weights (large files)
+*.safetensors
+*.bin
+*.gguf
+*.npz

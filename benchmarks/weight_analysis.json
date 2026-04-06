@@ -1,0 +1,109 @@
+{
+  "weight_analysis": [
+    {
+      "layer": "model.layers.29.self_attn.q_proj",
+      "shape": "(576, 576)",
+      "original": {
+        "mean": 0.00047472817823290825,
+        "std": 0.14872147142887115,
+        "min": -2.0,
+        "max": 2.015625,
+        "kurtosis": 5.670426845550537,
+        "outlier_channels": 1,
+        "channel_rms_ratio": 3.8245086555344923
+      },
+      "after_rotation": {
+        "mean": -0.00017987369210459292,
+        "std": 0.1487221121788025,
+        "min": -1.031119465827942,
+        "max": 0.9780557155609131,
+        "kurtosis": 4.058720111846924,
+        "channel_rms_ratio": 1.4159822359705407
+      }
+    },
+    {
+      "layer": "model.layers.15.mlp.down_proj",
+      "shape": "(576, 1536)",
+      "original": {
+        "mean": -1.2859632988693193e-05,
+        "std": 0.1842518001794815,
+        "min": -2.25,
+        "max": 3.078125,
+        "kurtosis": 4.607844352722168,
+        "outlier_channels": 0,
+        "channel_rms_ratio": 3.4303711981569163
+      },
+      "after_rotation": {
+        "mean": 0.00021672836737707257,
+        "std": 0.18425169587135315,
+        "min": -1.9330366849899292,
+        "max": 2.0923221111297607,
+        "kurtosis": 3.693493127822876,
+        "channel_rms_ratio": 1.3515941615572475
+      }
+    },
+    {
+      "layer": "model.layers.15.self_attn.q_proj",
+      "shape": "(576, 576)",
+      "original": {
+        "mean": 1.6015706933103502e-05,
+        "std": 0.1943882703781128,
+        "min": -2.09375,
+        "max": 2.375,
+        "kurtosis": 6.139339923858643,
+        "outlier_channels": 0,
+        "channel_rms_ratio": 2.133994781460411
+      },
+      "after_rotation": {
+        "mean": -0.0006896294071339071,
+        "std": 0.1943870484828949,
+        "min": -1.5617995262145996,
+        "max": 1.6425600051879883,
+        "kurtosis": 5.008164882659912,
+        "channel_rms_ratio": 1.4434869116190299
+      }
+    },
+    {
+      "layer": "model.layers.0.mlp.gate_proj",
+      "shape": "(1536, 576)",
+      "original": {
+        "mean": 0.0003521314065437764,
+        "std": 0.18355035781860352,
+        "min": -2.203125,
+        "max": 3.25,
+        "kurtosis": 3.6864280700683594,
+        "outlier_channels": 0,
+        "channel_rms_ratio": 1.669751640574317
+      },
+      "after_rotation": {
+        "mean": -0.0008901534602046013,
+        "std": 0.18354853987693787,
+        "min": -0.8717882633209229,
+        "max": 0.9524129629135132,
+        "kurtosis": 3.0566067695617676,
+        "channel_rms_ratio": 1.187716921320425
+      }
+    },
+    {
+      "layer": "model.layers.0.self_attn.q_proj",
+      "shape": "(576, 576)",
+      "original": {
+        "mean": 8.899180102162063e-05,
+        "std": 0.281864196062088,
+        "min": -4.75,
+        "max": 5.21875,
+        "kurtosis": 10.993966102600098,
+        "outlier_channels": 0,
+        "channel_rms_ratio": 20.997744737798396
+      },
+      "after_rotation": {
+        "mean": 0.0006321788532659411,
+        "std": 0.2818635106086731,
+        "min": -3.053318977355957,
+        "max": 3.006870985031128,
+        "kurtosis": 6.374148368835449,
+        "channel_rms_ratio": 3.150201967551792
+      }
+    }
+  ]
+}

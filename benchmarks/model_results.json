@@ -1,0 +1,315 @@
+{
+  "model": "HuggingFaceTB/SmolLM2-135M",
+  "params": "135M",
+  "layers": 30,
+  "hidden_dim": 576,
+  "fp16_size_mb": 256.5670166015625,
+  "fp16_predictions": {
+    "The capital of France is": [
+      " the",
+      " Paris",
+      " located",
+      " called",
+      " a"
+    ],
+    "Machine learning is a field of": [
+      " artificial",
+      " computer",
+      " machine",
+      " study",
+      " AI"
+    ],
+    "Apple Silicon processors are designed for": [
+      " high",
+      " the",
+      " single",
+      " a",
+      " use"
+    ],
+    "In 2024, the most popular programming language was": [
+      " Python",
+      " Java",
+      " C",
+      " PHP",
+      " Ruby"
+    ]
+  },
+  "methods": [
+    {
+      "method": "TurboQuant",
+      "bits": 2,
+      "group_size": 64,
+      "size_mb": 82.83082580566406,
+      "compression_ratio": 3.097482297273175,
+      "effective_bpw": 2.25,
+      "quant_time_s": 0.08234000205993652,
+      "predictions": {
+        "The capital of France is": [
+          " and",
+          ",",
+          " of",
+          " a",
+          " which"
+        ],
+        "Machine learning is a field of": [
+          ",",
+          ".",
+          " which",
+          "-",
+          " that"
+        ],
+        "Apple Silicon processors are designed for": [
+          "\u00a0",
+          ",",
+          " and",
+          " ones",
+          " those"
+        ],
+        "In 2024, the most popular programming language was": [
+          ",",
+          "\u00a0",
+          " that",
+          " i",
+          " pi"
+        ]
+      },
+      "logit_cosine": {
+        "The capital of France is": 0.1776524782180786,
+        "Machine learning is a field of": 0.844107449054718,
+        "Apple Silicon processors are designed for": 0.8627727031707764,
+        "In 2024, the most popular programming language was": 0.734535813331604
+      },
+      "avg_logit_cosine": 0.6547671109437943
+    },
+    {
+      "method": "TurboQuant",
+      "bits": 3,
+      "group_size": 64,
+      "size_mb": 98.25723266601562,
+      "compression_ratio": 2.6111769041334063,
+      "effective_bpw": 3.25,
+      "quant_time_s": 0.07151603698730469,
+      "predictions": {
+        "The capital of France is": [
+          " a",
+          " the",
+          " in",
+          " full",
+          " one"
+        ],
+        "Machine learning is a field of": [
+          " its",
+          " itself",
+          " his",
+          " their",
+          " notes"
+        ],
+        "Apple Silicon processors are designed for": [
+          " their",
+          " a",
+          " the",
+          " one",
+          " some"
+        ],
+        "In 2024, the most popular programming language was": [
+          " last",
+          " created",
+          " written",
+          " made",
+          " since"
+        ]
+      },
+      "logit_cosine": {
+        "The capital of France is": 0.44047704339027405,
+        "Machine learning is a field of": 0.8136730194091797,
+        "Apple Silicon processors are designed for": 0.9253625273704529,
+        "In 2024, the most popular programming language was": 0.31917187571525574
+      },
+      "avg_logit_cosine": 0.6246711164712906
+    },
+    {
+      "method": "TurboQuant",
+      "bits": 4,
+      "group_size": 64,
+      "size_mb": 108.14813232421875,
+      "compression_ratio": 2.3723665965159415,
+      "effective_bpw": 4.25,
+      "quant_time_s": 0.057135820388793945,
+      "predictions": {
+        "The capital of France is": [
+          " Paris",
+          " the",
+          ":",
+          " located",
+          "\n"
+        ],
+        "Machine learning is a field of": [
+          " study",
+          " machine",
+          " technology",
+          " computer",
+          " science"
+        ],
+        "Apple Silicon processors are designed for": [
+          " the",
+          " single",
+          " a",
+          " power",
+          " use"
+        ],
+        "In 2024, the most popular programming language was": [
+          " Python",
+          " Java",
+          " C",
+          " developed",
+          " the"
+        ]
+      },
+      "logit_cosine": {
+        "The capital of France is": 0.7494969964027405,
+        "Machine learning is a field of": 0.9153047800064087,
+        "Apple Silicon processors are designed for": 0.901359498500824,
+        "In 2024, the most popular programming language was": 0.8955858945846558
+      },
+      "avg_logit_cosine": 0.8654367923736572
+    },
+    {
+      "method": "MLX Affine",
+      "bits": 2,
+      "group_size": 64,
+      "size_mb": 40.1451416015625,
+      "compression_ratio": 6.390985468377987,
+      "effective_bpw": 2.5,
+      "quant_time_s": 0.016209840774536133,
+      "predictions": {
+        "The capital of France is": [
+          " veter",
+          " harv",
+          " extraord",
+          " defe",
+          " enshr"
+        ],
+        "Machine learning is a field of": [
+          ",",
+          "1",
+          " and",
+          " in",
+          " "
+        ],
+        "Apple Silicon processors are designed for": [
+          "wrights",
+          "stuffs",
+          "igsaw",
+          " POW",
+          " toget"
+        ],
+        "In 2024, the most popular programming language was": [
+          "/",
+          " (",
+          " Urugu",
+          " transist",
+          " in"
+        ]
+      },
+      "logit_cosine": {
+        "The capital of France is": 0.4609375,
+        "Machine learning is a field of": 0.267578125,
+        "Apple Silicon processors are designed for": 0.423828125,
+        "In 2024, the most popular programming language was": 0.412109375
+      },
+      "avg_logit_cosine": 0.39111328125
+    },
+    {
+      "method": "MLX Affine",
+      "bits": 3,
+      "group_size": 64,
+      "size_mb": 56.1763916015625,
+      "compression_ratio": 4.567167973715605,
+      "effective_bpw": 3.5,
+      "quant_time_s": 0.023908138275146484,
+      "predictions": {
+        "The capital of France is": [
+          " in",
+          " where",
+          " situated",
+          " not",
+          " an"
+        ],
+        "Machine learning is a field of": [
+          " artificial",
+          " science",
+          " data",
+          " sciences",
+          " computing"
+        ],
+        "Apple Silicon processors are designed for": [
+          " servers",
+          " high",
+          " fast",
+          " performing",
+          " ultra"
+        ],
+        "In 2024, the most popular programming language was": [
+          " in",
+          " C",
+          " ",
+          "\u00a0",
+          " an"
+        ]
+      },
+      "logit_cosine": {
+        "The capital of France is": -0.04833984375,
+        "Machine learning is a field of": 0.455078125,
+        "Apple Silicon processors are designed for": 0.28515625,
+        "In 2024, the most popular programming language was": 0.4765625
+      },
+      "avg_logit_cosine": 0.2921142578125
+    },
+    {
+      "method": "MLX Affine",
+      "bits": 4,
+      "group_size": 64,
+      "size_mb": 72.2076416015625,
+      "compression_ratio": 3.5531837200456446,
+      "effective_bpw": 4.5,
+      "quant_time_s": 0.020361900329589844,
+      "predictions": {
+        "The capital of France is": [
+          " the",
+          " one",
+          " a",
+          "\n",
+          " at"
+        ],
+        "Machine learning is a field of": [
+          " study",
+          " research",
+          " artificial",
+          " computer",
+          " the"
+        ],
+        "Apple Silicon processors are designed for": [
+          " the",
+          " a",
+          " single",
+          " low",
+          " specific"
+        ],
+        "In 2024, the most popular programming language was": [
+          " Java",
+          " the",
+          " Python",
+          " C",
+          " written"
+        ]
+      },
+      "logit_cosine": {
+        "The capital of France is": 0.78125,
+        "Machine learning is a field of": 0.9296875,
+        "Apple Silicon processors are designed for": 0.88671875,
+        "In 2024, the most popular programming language was": 0.95703125
+      },
+      "avg_logit_cosine": 0.888671875
+    }
+  ]
+}

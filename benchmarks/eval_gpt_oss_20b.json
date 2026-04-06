@@ -1,0 +1,20 @@
+{
+  "model": "openai/gpt-oss-20b",
+  "results": [
+    {
+      "config": "MXFP4 (baseline)",
+      "perplexity": 83.04,
+      "size_gb": 12.816
+    },
+    {
+      "config": "TurboQuant 3-bit",
+      "perplexity": 78.6,
+      "size_gb": 9.261
+    },
+    {
+      "config": "TurboQuant 4-bit",
+      "perplexity": 72.63,
+      "size_gb": 11.154
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "description": "TurboQuant (PolarQuant + QJL) quality comparison across bit-widths and layer sizes",
+  "layer_results": {
+    "1024x1024": {
+      "PolarQuant_2bit": {
+        "cos": 0.940132,
+        "mse": 0.038596,
+        "eff_bits": 2.25
+      },
+      "TurboQuant_2+1": {
+        "cos": 0.968447,
+        "mse": 0.022056,
+        "eff_bits": 3.25
+      },
+      "PolarQuant_3bit": {
+        "cos": 0.982711,
+        "mse": 0.01139,
+        "eff_bits": 3.25
+      },
+      "TurboQuant_3+1": {
+        "cos": 0.990692,
+        "mse": 0.006291,
+        "eff_bits": 4.25
+      },
+      "PolarQuant_4bit": {
+        "cos": 0.99535,
+        "mse": 0.003083,
+        "eff_bits": 4.25
+      },
+      "TurboQuant_4+1": {
+        "cos": 0.997399,
+        "mse": 0.001737,
+        "eff_bits": 5.25
+      },
+      "Affine_3bit": {
+        "cos": 0.989604,
+        "mse": 0.006934,
+        "eff_bits": 3.5
+      },
+      "Affine_4bit": {
+        "cos": 0.997758,
+        "mse": 0.001495,
+        "eff_bits": 4.5
+      }
+    }
+  },
+  "qjl_mse_reduction": {
+    "2bit": "43-44%",
+    "3bit": "43-46%",
+    "4bit": "42-44%"
+  },
+  "key_finding": "3-bit PolarQuant (3.25 eff bits) > 2-bit+QJL (3.25 eff bits) for weight quantization MSE; but QJL provides unbiased inner products important for attention scores"
+}
