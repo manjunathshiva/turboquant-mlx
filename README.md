@@ -37,14 +37,42 @@ Supports dense models (LLaMA, Qwen, Mistral) and **Mixture-of-Experts** (Qwen-Mo
 
 KV cache compression projects to ~7 GB RAM saved at 131K context on GPT-OSS-120B and ~5 GB at 262K on Qwen3.5-122B. Roundtrip cosine similarity vs FP16: 0.983 at 3-bit, 0.995 at 4-bit.
 
-## Requirements
+## Install
+
+```bash
+pip install turboquant-mlx-full
+```
+
+The package is published as `turboquant-mlx-full` on PyPI, but importable as
+`turboquant_mlx` (without the `-full` suffix) — this matches the original
+project name and the examples in the Medium articles.
+
+```python
+import turboquant_mlx
+from turboquant_mlx.layers import TurboQuantKVCache, convert_cache_to_turboquant
+```
+
+### Requirements
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
 - Python 3.10+
 - 64 GB unified memory recommended for 20B+ models
+- Xcode Command Line Tools and CMake 3.27+ (the package builds a small Metal
+  extension on install)
+
+### Install from source (for development)
 
 ```bash
-pip install mlx mlx-lm datasets transformers
+git clone https://github.com/manjunathshiva/turboquant-mlx.git
+cd turboquant-mlx
+pip install -e .
+```
+
+For evaluation utilities (perplexity benchmarking), also install the optional
+dependencies:
+
+```bash
+pip install "turboquant-mlx-full[eval]"
 ```
 
 ## Quick Start
