@@ -1,10 +1,12 @@
 # TurboQuant-MLX
 
-Extreme weight compression for LLMs on Apple Silicon. Adapts Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., 2025) from KV cache compression to **weight quantization** using MLX.
+Extreme **weight** and **KV cache** compression for LLMs on Apple Silicon. MLX implementation of Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., 2025) — Hadamard rotation + Lloyd-Max codebooks applied both to weights (compile time) and the KV cache (run time).
 
-Supports dense models (LLaMA, Qwen, Mistral) and **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE).
+Supports dense models (LLaMA, Qwen, Mistral) and **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE). Compatible with hybrid attention architectures, attention sinks, sliding-window attention, and linear attention layers.
 
-## Key Results
+**With both weight and KV cache compression at 3-bit, GPT-OSS-120B fits its full 131K context window in 50 GB on a 64 GB MacBook — and KV cache compression actually makes generation *faster* on the 120B (8.7 vs 6.4 tok/s) because the smaller cache cuts memory bandwidth more than dequant costs.**
+
+## Key Results — Weight Compression
 
 | Model | Method | Bits | PPL | Size | Gen Speed (M4 Max) |
 |-------|--------|------|-----|------|---------------------|
@@ -20,6 +22,20 @@ Supports dense models (LLaMA, Qwen, Mistral) and **Mixture-of-Experts** (Qwen-Mo
 | GPT-OSS-120B | TurboQuant | 2 | — | 32 GB | 51 tok/s (poor quality) |
 | Qwen3.5-122B-A10B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **Qwen3.5-122B-A10B** | **TurboQuant** | **3** | **—** | **~50 GB** | **26.5 tok/s** |
+
+## Key Results — KV Cache Compression
+
+| Model | KV cache config | KV size | Speed | Notes |
+|-------|----------------|---------|-------|-------|
+| GPT-OSS-20B (FP16 weights) | FP16 KV | 27.0 MB | 90.6 tok/s | baseline |
+| GPT-OSS-20B (FP16 weights) | TQ 3-bit KV | 7.79 MB | 29.9 tok/s | **3.5x cache savings** |
+| GPT-OSS-120B (TQ 3-bit weights) | FP16 KV | 45.0 MB | 6.4 tok/s | baseline |
+| **GPT-OSS-120B (TQ 3-bit weights)** | **TQ 3-bit KV** | **11.83 MB** | **8.7 tok/s** | **3.8x cache savings — and *faster* than FP16** |
+| GPT-OSS-120B (TQ 3-bit weights) | TQ 4-bit KV | 12.21 MB | 16.0 tok/s | also clean |
+| Qwen3.5-122B (TQ 3-bit weights) | FP16 KV | 161.06 MB | 5.4 tok/s | baseline |
+| **Qwen3.5-122B (TQ 3-bit weights)** | **TQ 3-bit KV** | **150.17 MB** | **5.7 tok/s** | output identical to FP16 |
+
+KV cache compression projects to ~7 GB RAM saved at 131K context on GPT-OSS-120B and ~5 GB at 262K on Qwen3.5-122B. Roundtrip cosine similarity vs FP16: 0.983 at 3-bit, 0.995 at 4-bit.
 
 ## Requirements
 
@@ -66,6 +82,79 @@ python -m turboquant_mlx.evaluate \
     --bits 2 3 4 \
     --num-samples 256 --seq-len 512
 ```
+
+### 4. Generate with KV cache compression
+
+```bash
+# Standard model + KV cache compression
+python -m turboquant_mlx.demo_kv \
+    --model openai/gpt-oss-20b \
+    --prompt "Why is the sky blue?" \
+    --max-tokens 200 --tq-bits 3
+
+# TQ-compressed model + KV cache compression (full stack)
+python -m turboquant_mlx.demo_kv \
+    --model ./gpt-oss-120b-tq3 \
+    --prompt "Why is the sky blue?" \
+    --max-tokens 200 --tq-bits 3
+
+# Side-by-side comparison: FP16 KV vs TurboQuant KV
+python -m turboquant_mlx.demo_kv \
+    --model ./gpt-oss-120b-tq3 \
+    --prompt "Why is the sky blue?" \
+    --max-tokens 200 --compare
+```
+
+---
+
+## KV Cache Compression
+
+TurboQuant KV cache compression applies the same Hadamard rotation + Lloyd-Max codebook pipeline to KV vectors at runtime. The compressed cache is dequantized to float16 only when attention needs it, so it routes through MLX's standard `scaled_dot_product_attention` and is compatible with attention sinks, sliding windows, and linear attention layers.
+
+### Programmatic usage
+
+```python
+from turboquant_mlx.layers import convert_cache_to_turboquant
+from mlx_lm.models.cache import make_prompt_cache
+
+# 1. Process the prompt with FP16 KV cache (exact)
+cache = make_prompt_cache(model)
+model(prompt_tokens, cache=cache)
+
+# 2. Convert to TurboQuant KV cache for generation
+cache = convert_cache_to_turboquant(cache, tq_bits=3, group_size=64)
+
+# 3. Continue generation — cache is now compressed
+for token in generate_loop(model, cache):
+    ...
+```
+
+### Choosing a bit-width
+
+| Weights | KV cache | Recommendation |
+|---------|----------|----------------|
+| FP16 / BF16 | TQ 3-bit | Default sweet spot at every model size |
+| TQ-compressed (~20B) | TQ 4-bit | Use 4-bit when stacking on TQ weights — small models have a tighter noise budget |
+| **TQ-compressed (100B+)** | **TQ 3-bit** | **3-bit on 3-bit works cleanly on GPT-OSS-120B and Qwen3.5-122B — 100B+ models have enough redundancy to absorb the stacked noise** |
+
+### The speed flip
+
+On small fast models (~20B), KV cache compression is a quality-vs-speed tradeoff: the dequant overhead dominates because the model is fast to begin with. On large slow models (100B+), the 4x smaller KV cache reduces memory bandwidth more than dequant adds — generation is *faster* than the FP16 baseline:
+
+| Model | FP16 KV | TQ 3-bit KV | Direction |
+|-------|---------|-------------|-----------|
+| GPT-OSS-20B | 90.6 tok/s | 29.9 tok/s | TQ is 3x **slower** |
+| GPT-OSS-120B | 6.4 tok/s | 8.7 tok/s | TQ is 1.4x **faster** |
+
+### Compatibility
+
+| Feature | Supported | Notes |
+|---------|-----------|-------|
+| Attention sinks | Yes | GPT-OSS sink vectors flow through standard SDPA |
+| Sliding window attention | Yes | `RotatingKVCache` layers are left untouched |
+| Linear attention | Yes | `ArraysCache` (Qwen3.5 GatedDeltaNet) is left untouched |
+| Hybrid architectures | Yes | Per-layer cache type is preserved |
+| Prompt-first conversion | Yes | Process prompt with FP16, convert before generation |
 
 ---
 
@@ -275,6 +364,8 @@ turboquant_mlx/
     generate.py               # Text generation with TurboQuant models
     evaluate.py               # Perplexity evaluation
     quantize_model.py         # Model traversal & layer replacement
+    demo_kv.py                # Streaming generation demo with KV cache compression
+    test_kv_cache.py          # KV cache roundtrip + integration tests
     core/
         codebook.py           # Lloyd-Max codebooks for Gaussian
         rotation.py           # Randomized Hadamard rotation
@@ -284,6 +375,7 @@ turboquant_mlx/
     layers/
         polar_linear.py       # PolarQuantizedLinear (dense)
         polar_switch_linear.py # PolarQuantizedSwitchLinear (MoE)
+        polar_kv_cache.py     # TurboQuantKVCache (runtime KV compression)
     kernels/
         polar_qmv.py          # Fused Metal kernel (dense decode)
         polar_gather_qmv.py   # Fused Metal kernel (MoE shared input)
@@ -301,9 +393,9 @@ turboquant_mlx/
 
 ```bibtex
 @misc{turboquant_mlx,
-    title={TurboQuant-MLX: Extreme Weight Compression for Apple Silicon},
+    title={TurboQuant-MLX: Extreme Weight and KV Cache Compression for Apple Silicon},
     year={2025},
-    note={Adapts TurboQuant (Zandieh et al., 2025) for weight quantization on MLX}
+    note={MLX implementation of TurboQuant (Zandieh et al., 2025) for both weight quantization and runtime KV cache compression}
 }
 ```
 
