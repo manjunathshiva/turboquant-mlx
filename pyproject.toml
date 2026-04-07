@@ -1,0 +1,86 @@
+[build-system]
+requires = [
+    "setuptools>=64",
+    "wheel",
+    "mlx>=0.20.0",
+    "nanobind>=2.0.0",
+    "cmake>=3.27",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "turboquant-mlx-full"
+version = "0.1.0"
+description = "Extreme weight and KV cache compression for LLMs on Apple Silicon (MLX implementation of Google's TurboQuant)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Manjunath Shiva"}]
+keywords = [
+    "mlx",
+    "quantization",
+    "llm",
+    "kv-cache",
+    "apple-silicon",
+    "turboquant",
+    "polarquant",
+    "moe",
+    "long-context",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "mlx>=0.20.0",
+    "mlx-lm>=0.10.0",
+    "numpy",
+]
+
+[project.optional-dependencies]
+eval = ["datasets", "transformers"]
+dev = ["pytest", "build", "twine"]
+
+[project.urls]
+Homepage = "https://github.com/manjunathshiva/turboquant-mlx"
+Repository = "https://github.com/manjunathshiva/turboquant-mlx"
+Issues = "https://github.com/manjunathshiva/turboquant-mlx/issues"
+
+[project.scripts]
+turboquant-convert = "turboquant_mlx.convert:main"
+
+# package-dir trick: the git repo root IS the importable `turboquant_mlx`
+# package, so we map the package name to the current directory and explicitly
+# enumerate subpackages.
+[tool.setuptools]
+packages = [
+    "turboquant_mlx",
+    "turboquant_mlx.core",
+    "turboquant_mlx.layers",
+    "turboquant_mlx.kernels",
+    "turboquant_mlx.integration",
+]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+"turboquant_mlx" = "."
+"turboquant_mlx.core" = "core"
+"turboquant_mlx.layers" = "layers"
+"turboquant_mlx.kernels" = "kernels"
+"turboquant_mlx.integration" = "integration"
+
+[tool.setuptools.package-data]
+"turboquant_mlx" = [
+    "csrc/*.cpp",
+    "csrc/*.h",
+    "csrc/*.metal",
+    "csrc/CMakeLists.txt",
+]
