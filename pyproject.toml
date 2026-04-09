@@ -3,14 +3,12 @@ requires = [
     "setuptools>=64",
     "wheel",
     "mlx>=0.20.0",
-    "nanobind>=2.0.0",
-    "cmake>=3.27",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboquant-mlx-full"
-version = "0.1.0"
+version = "0.1.1"
 description = "Extreme weight and KV cache compression for LLMs on Apple Silicon (MLX implementation of Google's TurboQuant)"
 readme = "README.md"
 requires-python = ">=3.10"

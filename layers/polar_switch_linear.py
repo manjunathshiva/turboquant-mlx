@@ -20,12 +20,9 @@ from turboquant_mlx.core.codebook import get_codebook
 from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
 from turboquant_mlx.core.rotation import rotate_input
 
-# Use native C++ extension if available, fall back to Python kernel
-try:
-    from turboquant_mlx._ext import polar_gather_qmv, polar_multi_gather_qmv
-except ImportError:
-    from turboquant_mlx.kernels.polar_gather_qmv import polar_gather_qmv
-    from turboquant_mlx.kernels.polar_multi_gather_qmv import polar_multi_gather_qmv
+# Use Python kernels - native C++ extension has ABI issues with MLX
+from turboquant_mlx.kernels.polar_gather_qmv import polar_gather_qmv
+from turboquant_mlx.kernels.polar_multi_gather_qmv import polar_multi_gather_qmv
 
 
 class PolarQuantizedSwitchLinear(nn.Module):

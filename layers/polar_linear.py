@@ -15,11 +15,8 @@ from turboquant_mlx.core.packing import unpack_indices
 from turboquant_mlx.core.rotation import rotate_input, rotate_weight
 from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
 from turboquant_mlx.core.qjl import qjl_quantize, qjl_correct
-# Use native C++ extension if available, fall back to Python kernel
-try:
-    from turboquant_mlx._ext import polar_qmv
-except ImportError:
-    from turboquant_mlx.kernels.polar_qmv import polar_qmv
+# Use Python kernels - native C++ extension has ABI issues with MLX
+from turboquant_mlx.kernels.polar_qmv import polar_qmv
 
 
 class PolarQuantizedLinear(nn.Module):
