@@ -1,9 +1,6 @@
 include README.md
 include LICENSE
 include pyproject.toml
-include setup.py
-
-recursive-include csrc *.cpp *.h *.metal CMakeLists.txt
 
 recursive-exclude * __pycache__
 recursive-exclude * *.pyc

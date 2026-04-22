@@ -57,8 +57,9 @@ from turboquant_mlx.layers import TurboQuantKVCache, convert_cache_to_turboquant
 - macOS with Apple Silicon (M1/M2/M3/M4)
 - Python 3.10+
 - 64 GB unified memory recommended for 20B+ models
-- Xcode Command Line Tools and CMake 3.27+ (the package builds a small Metal
-  extension on install)
+
+The Metal kernels are JIT-compiled by MLX at first use, so no Xcode / CMake
+toolchain is required to install the package.
 
 ### Install from source (for development)
 
@@ -408,11 +409,6 @@ turboquant_mlx/
         polar_qmv.py          # Fused Metal kernel (dense decode)
         polar_gather_qmv.py   # Fused Metal kernel (MoE shared input)
         polar_multi_gather_qmv.py  # Fused Metal kernel (MoE per-expert input)
-    csrc/
-        polar_kernels.metal   # Native Metal shaders (SIMD group reduction)
-        polar_ops.h/cpp       # C++ MLX Primitive classes
-        bindings.cpp          # nanobind Python bindings
-        CMakeLists.txt        # Build system
     integration/
         rotation_configs.py   # Per-architecture rotation configs
 ```
