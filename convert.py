@@ -14,6 +14,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
+import turboquant_mlx.compat  # noqa: F401 — registers upstream patches on import
 from turboquant_mlx.config import TurboQuantConfig
 from turboquant_mlx.quantize_model import turboquant_quantize
 

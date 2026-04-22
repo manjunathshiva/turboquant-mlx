@@ -22,6 +22,7 @@ from pathlib import Path
 import mlx.core as mx
 import mlx.nn as nn
 
+import turboquant_mlx.compat  # noqa: F401 — registers upstream patches on import
 from turboquant_mlx.config import TurboQuantConfig
 from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
 from turboquant_mlx.layers.polar_switch_linear import PolarQuantizedSwitchLinear
@@ -108,11 +109,22 @@ def _disable_qjl(model):
         print(f"[INFO] Fast mode: disabled QJL on {count} layers")
 
 
+def resolve_model_path(path_or_hf_repo):
+    """Return a local Path for a local directory or an HF repo ID.
+
+    Wraps mlx-lm's internal ``_download`` so that any TurboQuant entry point
+    accepts both ``./my-model`` and ``user/repo`` arguments uniformly.
+    """
+    from mlx_lm.utils import _download
+    return Path(_download(str(path_or_hf_repo)))
+
+
 def load_turboquant(model_path, lazy=False, fast=False):
     """Load a TurboQuant-compressed model.
 
     Args:
-        model_path: Path to the saved TurboQuant model directory.
+        model_path: Local directory path or HuggingFace repo ID. HF repos
+            are downloaded on first use.
         lazy: If True, don't evaluate parameters immediately.
         fast: If True, disable QJL correction for faster inference.
 
@@ -121,7 +133,7 @@ def load_turboquant(model_path, lazy=False, fast=False):
     """
     from mlx_lm.utils import load_config, load_tokenizer, _get_classes
 
-    model_path = Path(model_path)
+    model_path = resolve_model_path(model_path)
     config = load_config(model_path)
 
     # Extract TurboQuant config
@@ -195,6 +207,12 @@ def main():
         "--fast", action="store_true",
         help="Fast mode: skip QJL correction for ~25%% faster decode (slightly lower quality)",
     )
+    parser.add_argument(
+        "--min-tokens", type=int, default=0,
+        help="Mask EOS until at least this many tokens are generated. "
+             "Useful for thinking-mode models (Nemotron 3, etc.) whose chat "
+             "template primes EOS as the top-1 logit (default: 0)",
+    )
     args = parser.parse_args()
 
     mode = "fast (QJL disabled)" if args.fast else "accurate (QJL enabled)"
@@ -216,8 +234,16 @@ def main():
     # Use mlx_lm's generate function with a sampler for temperature
     from mlx_lm import generate
     from mlx_lm.sample_utils import make_sampler
+    from turboquant_mlx.sampling import (
+        eos_token_ids,
+        make_min_tokens_logits_processor,
+    )
 
     sampler = make_sampler(temp=args.temp)
+    min_tokens_proc = make_min_tokens_logits_processor(
+        args.min_tokens, eos_token_ids(tokenizer)
+    )
+    logits_processors = [min_tokens_proc] if min_tokens_proc is not None else None
 
     print(f"\nPrompt: {args.prompt}\n")
     response = generate(
@@ -225,6 +251,7 @@ def main():
         prompt=prompt,
         max_tokens=args.max_tokens,
         sampler=sampler,
+        logits_processors=logits_processors,
         verbose=True,
     )
 
