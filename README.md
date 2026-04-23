@@ -2,7 +2,7 @@
 
 Extreme **weight** and **KV cache** compression for LLMs on Apple Silicon. MLX implementation of Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., 2025) — Hadamard rotation + Lloyd-Max codebooks applied both to weights (compile time) and the KV cache (run time).
 
-Supports dense models (LLaMA, Qwen, Mistral) and **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE). Compatible with hybrid attention architectures, attention sinks, sliding-window attention, and linear attention layers.
+Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE), and **Mamba/attention hybrids** (Nemotron-3-Nano-4B, Nemotron-3-Super-120B). Compatible with hybrid attention architectures, attention sinks, sliding-window attention, and linear attention layers.
 
 **With both weight and KV cache compression at 3-bit, GPT-OSS-120B fits its full 131K context window in 50 GB on a 64 GB MacBook — and KV cache compression actually makes generation *faster* on the 120B (8.7 vs 6.4 tok/s) because the smaller cache cuts memory bandwidth more than dequant costs.**
 
@@ -22,6 +22,9 @@ Supports dense models (LLaMA, Qwen, Mistral) and **Mixture-of-Experts** (Qwen-Mo
 | GPT-OSS-120B | TurboQuant | 2 | — | 32 GB | 51 tok/s (poor quality) |
 | Qwen3.5-122B-A10B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **Qwen3.5-122B-A10B** | **TurboQuant** | **3** | **—** | **~50 GB** | **26.5 tok/s** |
+| **Nemotron-3-Nano-4B** | **TurboQuant** | **3** | **—** | **~2.2 GB** | **75.6 tok/s** |
+| Nemotron-3-Super-120B-A12B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
+| **Nemotron-3-Super-120B-A12B** | **TurboQuant** | **3** | **—** | **~50 GB** | **18.7 tok/s** |
 
 ## Key Results — KV Cache Compression
 
@@ -345,6 +348,51 @@ python -m turboquant_mlx.generate \
 
 ---
 
+### Nemotron-3 (Mamba/attention hybrid)
+
+Nemotron-3 is NVIDIA's hybrid Mamba2 + attention architecture. Two variants are tested:
+
+- **Nano-4B** — dense (Mamba + MLP + attention), 42 layers
+- **Super-120B-A12B** — hybrid MoE (Mamba + 512-expert latent-MoE + attention), 88 layers, ~12B active per token
+
+Both require **mlx-lm ≥ 0.31.3** for upstream Nemotron-H support (installed automatically).
+
+#### Convert
+
+```bash
+# Nano-4B
+python -m turboquant_mlx.convert \
+    --hf-path nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 \
+    --mlx-path ./nemotron-3-nano-4b-tq3 \
+    --bits 3 --group-size 64
+
+# Super-120B
+python -m turboquant_mlx.convert \
+    --hf-path nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \
+    --mlx-path ./nemotron-3-super-120b-tq3 \
+    --bits 3 --group-size 64
+```
+
+#### Generate
+
+Nemotron-3's chat template ends in a `<think>\n` scaffold that primes EOS as the top-1 logit at the start of the assistant turn. Pass `--min-tokens` to mask EOS for the first N tokens so the model enters the think phase:
+
+```bash
+python -m turboquant_mlx.generate \
+    --model ./nemotron-3-super-120b-tq3 \
+    --prompt "Why is the sky blue?" \
+    --max-tokens 200 --min-tokens 50
+```
+
+#### Benchmarks (M4 Max)
+
+| Model | Bits | Size | Peak RAM | Gen Speed | Quality |
+|-------|------|------|----------|-----------|---------|
+| **Nemotron-3-Nano-4B** | **3** | **~2.2 GB** | **4.3 GB** | **75.6 tok/s** | **Coherent** |
+| **Nemotron-3-Super-120B-A12B** | **3** | **~50 GB** | **54.7 GB** | **18.7 tok/s** | **Coherent with structured `<think>` reasoning (974-token answer w/ self-correction, formulas, formatted structure)** |
+
+---
+
 ## How It Works
 
 TurboQuant is a two-stage, **calibration-free** quantization pipeline:
@@ -383,6 +431,7 @@ Options:
 | Qwen1.5-MoE | `qwen2_moe` | Yes | Tested |
 | GPT-OSS | `gpt_oss` | Yes | Tested |
 | Qwen3.5-MoE | `qwen3_5_moe` | Yes (256 experts) | Tested (122B) |
+| Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
 
 ## Project Structure
 
