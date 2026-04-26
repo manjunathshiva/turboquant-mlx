@@ -197,6 +197,67 @@ for `--host`, `--temp`, `--top-p`, `--prompt-cache-size`, etc.
 > **Note**: `mlx_lm.server` is intended for development and local use, not
 > production. It does not implement authentication or rate limiting.
 
+#### Memory tuning when serving near the unified-memory ceiling
+
+Serving a 50 GB model on a 64 GB Mac (or any TQ model that fills most of
+RAM on a 48 GB / 96 GB Mac) leaves very little headroom for Metal command
+buffers and accumulating prompt caches. After 3-4 multi-turn requests the
+server can crash with:
+
+```
+libc++abi: terminating due to uncaught exception of type std::runtime_error:
+[METAL] Command buffer execution failed: Insufficient Memory
+(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+```
+
+`mlx_lm.server` keeps a **persistent prompt cache per role/conversation**
+to speed up follow-up turns. Each new prompt grows that pool, and once
+caches + model weights + decode workspace exceed Metal's wired-memory
+budget, the next allocation aborts the process.
+
+Two fixes, in order of impact:
+
+**1. Raise Metal's wired-memory ceiling** (biggest lever, requires sudo,
+resets on reboot):
+
+```bash
+# 64 GB Mac → leave ~7 GB for macOS
+sudo sysctl iogpu.wired_limit_mb=57344
+
+# 48 GB Mac → leave ~5 GB for macOS
+sudo sysctl iogpu.wired_limit_mb=43008
+```
+
+To make it permanent, append `iogpu.wired_limit_mb=57344` to
+`/etc/sysctl.conf`.
+
+**2. Cap the prompt cache** (works without sudo, evicts oldest cached
+prompts to stay under the cap):
+
+```bash
+turboquant-serve \
+    --model ./NVIDIA-Nemotron-3-Super-120B-A12B-BF16-tq3 \
+    --port 8080 \
+    --prompt-cache-bytes 2147483648    # 2 GB hard cap
+```
+
+Tighter caps (`536870912` = 512 MB, or `--prompt-cache-size 1` to keep
+only one sequence) trade follow-up prefix-cache speedup for stability.
+
+Recommended combo for **Nemotron-3-Super-120B-A12B-tq3 on a 64 GB Mac**:
+
+```bash
+sudo sysctl iogpu.wired_limit_mb=57344
+turboquant-serve \
+    --model ./NVIDIA-Nemotron-3-Super-120B-A12B-BF16-tq3 \
+    --port 8080 \
+    --prompt-cache-bytes 2147483648
+```
+
+Also close any other GPU users (Chrome/Electron apps, Final Cut, Xcode
+simulators) before launching — even an idle Chrome can be holding 1-2 GB
+of unified memory.
+
 ---
 
 ## KV Cache Compression
