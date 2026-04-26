@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboquant-mlx-full"
-version = "0.1.3"
+version = "0.1.4"
 description = "Extreme weight and KV cache compression for LLMs on Apple Silicon (MLX implementation of Google's TurboQuant)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -54,6 +54,7 @@ Issues = "https://github.com/manjunathshiva/turboquant-mlx/issues"
 
 [project.scripts]
 turboquant-convert = "turboquant_mlx.convert:main"
+turboquant-serve = "turboquant_mlx.serve:main"
 
 # package-dir trick: the git repo root IS the importable `turboquant_mlx`
 # package, so we map the package name to the current directory and explicitly

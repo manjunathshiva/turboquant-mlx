@@ -137,6 +137,66 @@ python -m turboquant_mlx.demo_kv \
     --max-tokens 200 --compare
 ```
 
+### 5. Serve a TurboQuant model over an OpenAI-compatible API
+
+`turboquant-serve` wraps `mlx_lm.server` and patches its loader so any
+TurboQuant model (`quantization.mode = "turboquant"` in `config.json`)
+loads through the PolarQuant path. Non-TurboQuant models pass through
+unchanged, so this is a drop-in replacement for `mlx_lm.server`.
+
+```bash
+# Serve a local TQ model
+turboquant-serve \
+    --model ./NVIDIA-Nemotron-3-Super-120B-A12B-BF16-tq3 \
+    --port 8080
+
+# Or serve directly from the Hugging Face Hub
+turboquant-serve \
+    --model manjunathshiva/Nemotron-3-Super-120B-A12B-tq3 \
+    --port 8080
+```
+
+Then call it like any OpenAI-compatible endpoint. The `model` field in
+the request must match the string passed to `--model`:
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "./NVIDIA-Nemotron-3-Super-120B-A12B-BF16-tq3",
+    "messages": [{"role": "user", "content": "Why is the sky blue?"}],
+    "max_tokens": 4096,
+    "temperature": 0.7
+  }'
+```
+
+For Nemotron-3 reasoning models, prefer `max_tokens >= 2048` so the
+`<think>` trace and the final answer both fit. mlx-lm splits them into
+`message.reasoning` (the thinking) and `message.content` (the answer).
+
+From Python via the OpenAI SDK:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
+resp = client.chat.completions.create(
+    model="./NVIDIA-Nemotron-3-Super-120B-A12B-BF16-tq3",
+    messages=[{"role": "user", "content": "Why is the sky blue?"}],
+    max_tokens=4096,
+    temperature=0.7,
+    stream=True,
+)
+for chunk in resp:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+All `mlx_lm.server` flags forward unchanged — see `turboquant-serve --help`
+for `--host`, `--temp`, `--top-p`, `--prompt-cache-size`, etc.
+
+> **Note**: `mlx_lm.server` is intended for development and local use, not
+> production. It does not implement authentication or rate limiting.
+
 ---
 
 ## KV Cache Compression
