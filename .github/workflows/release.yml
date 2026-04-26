@@ -1,0 +1,33 @@
+name: Release
+
+# Auto-create a GitHub Release whenever a vX.Y.Z tag is pushed.
+# Workflow: bump version -> twine upload -> git tag vX.Y.Z -> git push --tags
+# The tag push fires this workflow and the GitHub Release appears with
+# auto-generated notes from the commits since the previous tag.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag
