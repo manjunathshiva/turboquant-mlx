@@ -34,14 +34,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install runtime + test dependencies
+      - name: Install package and dependencies
+        # The repo root IS the importable `turboquant_mlx` package (via the
+        # `[tool.setuptools.package-dir]` mapping in pyproject.toml), so we
+        # need a real install for tests to import it. Build isolation pulls
+        # in setuptools>=64 + mlx per [build-system].requires automatically.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "mlx>=0.20.0" "mlx-lm>=0.10.0" numpy pytest
-
-      - name: Install package (no compiled extensions, tests only)
-        run: |
-          python -m pip install -e . --no-build-isolation || true
+          python -m pip install -e .
+          python -m pip install "mlx-lm>=0.10.0" pytest
 
       - name: Run tests
         # Skip the QJL unbiasedness test (pre-existing flake on RNG state) and
