@@ -1,0 +1,42 @@
+name: CodeQL
+
+# Static-analysis security scanning for Python sources. The C++/Metal code in
+# csrc/ is built via CMake against the user's MLX install, which CodeQL's
+# autobuild can't reproduce, so we scope this workflow to Python only.
+# Add a separate C++ job once CodeQL has a stable build path for nanobind+CMake.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run weekly on Sunday so CVE catalogs get refreshed against the codebase
+    - cron: "23 3 * * 0"
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

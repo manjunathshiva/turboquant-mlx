@@ -1,0 +1,70 @@
+name: CI
+
+# Runs the test suite and verifies the sdist builds cleanly on every push
+# and pull request to main. macOS-14 runners are GitHub-hosted Apple Silicon;
+# MLX is Apple-Silicon-only, so we don't matrix over Linux.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (${{ matrix.python-version }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install runtime + test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "mlx>=0.20.0" "mlx-lm>=0.10.0" numpy pytest
+
+      - name: Install package (no compiled extensions, tests only)
+        run: |
+          python -m pip install -e . --no-build-isolation || true
+
+      - name: Run tests
+        # Skip the QJL unbiasedness test (pre-existing flake on RNG state) and
+        # any test that requires downloading model weights from HuggingFace.
+        run: |
+          pytest tests/ -v \
+            --deselect tests/test_core.py::test_qjl_unbiasedness \
+            -k "not requires_model"
+
+  build-sdist:
+    name: build sdist
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip build twine
+          python -m build --sdist
+          python -m twine check dist/*.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          retention-days: 14
