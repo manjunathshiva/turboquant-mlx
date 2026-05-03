@@ -1,0 +1,39 @@
+TurboQuant-MLX
+Copyright 2026 Manjunath Janardhan
+
+This product includes software developed by Manjunath Janardhan.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+----------------------------------------------------------------------
+
+This software implements the TurboQuant algorithm described in:
+
+  Zandieh, A., Han, M., Dalca, A., Shin, J., Wang, B., Zhang, Y.,
+  Bordegoni, M., Tian, Y., et al. (2025).
+  "TurboQuant: Online Vector Quantization with Optimal Distortion-Rate
+  Trade-off."
+  https://arxiv.org/abs/2504.19874
+
+The original TurboQuant algorithm is research published by the authors
+above. The MLX implementation, hybrid bit-allocation strategy, KV cache
+compression integration, and fused Metal kernels in this repository are
+the original work of Manjunath Janardhan.
+
+----------------------------------------------------------------------
+
+Versions 0.1.x through 0.2.0 of this software were released under the
+MIT License. Starting with version 0.3.0, this software is released
+under the Apache License, Version 2.0. Versions previously distributed
+under MIT remain available under their original license; the relicense
+applies only to versions 0.3.0 and later. See CHANGELOG.md for details.

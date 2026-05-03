@@ -8,12 +8,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboquant-mlx-full"
-version = "0.2.0"
+version = "0.3.0"
 description = "Extreme weight and KV cache compression for LLMs on Apple Silicon (MLX implementation of Google's TurboQuant)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
-authors = [{name = "Manjunath Shiva"}]
+license = "Apache-2.0"
+license-files = ["LICENSE", "LICENSE-MIT", "NOTICE"]
+authors = [{name = "Manjunath Janardhan", email = "manjunath.shiva@gmail.com"}]
 keywords = [
     "mlx",
     "quantization",
@@ -29,7 +30,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

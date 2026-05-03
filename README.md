@@ -19,6 +19,7 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | GPT-OSS-120B | [Affine 4-bit (mlx-community)](https://huggingface.co/mlx-community/gpt-oss-120b-4bit) | 4 | — | 65.8 GB | *Doesn't fit 64GB* |
 | GPT-OSS-120B | MXFP4 (original) | 4 | — | 63.5 GB | *Doesn't fit 64GB* |
 | GPT-OSS-120B | TurboQuant | 3 | — | 48 GB | **44 tok/s** |
+| **[GPT-OSS-120B (hybrid for 48GB)](https://huggingface.co/manjunathshiva/gpt-oss-120b-tq3a-tq2e-g32)** | **TQ 3-attn / 2-experts, gs=32** | **2/3 mix** | **—** | **~35 GB** | **42–50 tok/s** |
 | GPT-OSS-120B | TurboQuant | 2 | — | 32 GB | 51 tok/s (poor quality) |
 | Qwen3.5-122B-A10B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **Qwen3.5-122B-A10B** | **TurboQuant** | **3** | **—** | **~50 GB** | **26.5 tok/s** |

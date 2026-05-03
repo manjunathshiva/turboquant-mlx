@@ -1,0 +1,57 @@
+cff-version: 1.2.0
+title: "TurboQuant-MLX: Extreme weight and KV cache compression for LLMs on Apple Silicon"
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+authors:
+  - family-names: "Janardhan"
+    given-names: "Manjunath"
+    email: "manjunath.shiva@gmail.com"
+repository-code: "https://github.com/manjunathshiva/turboquant-mlx"
+url: "https://github.com/manjunathshiva/turboquant-mlx"
+abstract: >
+  TurboQuant-MLX is an MLX implementation of Google Research's TurboQuant
+  (Zandieh et al., 2025) for Apple Silicon. It provides 2-/3-/4-bit weight
+  compression via Hadamard rotation + Lloyd-Max codebooks, KV cache
+  compression with attention-sink protection, hybrid bit allocation for
+  mixture-of-experts models, and fused Metal kernels for dense and MoE
+  decode. Validated on GPT-OSS-20B, GPT-OSS-120B, Qwen3.5-122B, and
+  Nemotron-3-Super-120B.
+keywords:
+  - mlx
+  - quantization
+  - llm
+  - kv-cache
+  - apple-silicon
+  - turboquant
+  - polarquant
+  - mixture-of-experts
+license: Apache-2.0
+preferred-citation:
+  type: software
+  title: "TurboQuant-MLX"
+  authors:
+    - family-names: "Janardhan"
+      given-names: "Manjunath"
+  url: "https://github.com/manjunathshiva/turboquant-mlx"
+references:
+  - type: article
+    title: "TurboQuant: Online Vector Quantization with Optimal Distortion-Rate Trade-off"
+    authors:
+      - family-names: "Zandieh"
+        given-names: "Amir"
+      - family-names: "Han"
+        given-names: "Minsik"
+      - family-names: "Dalca"
+        given-names: "Andre"
+      - family-names: "Shin"
+        given-names: "Jungwoo"
+      - family-names: "Wang"
+        given-names: "Brian"
+      - family-names: "Zhang"
+        given-names: "Yichao"
+      - family-names: "Bordegoni"
+        given-names: "Matteo"
+      - family-names: "Tian"
+        given-names: "Yuan"
+    year: 2025
+    url: "https://arxiv.org/abs/2504.19874"
