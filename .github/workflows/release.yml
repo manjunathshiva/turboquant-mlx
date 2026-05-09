@@ -80,7 +80,7 @@ jobs:
           echo "Tag v$TAG matches __version__ $PKG_VERSION"
 
       - name: Upload sdist artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
