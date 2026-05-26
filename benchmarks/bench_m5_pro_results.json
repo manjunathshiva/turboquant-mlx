@@ -1,0 +1,105 @@
+{
+  "hardware": {
+    "chip": "Apple M5 Pro",
+    "cores": "18 (6 Super and 12 Performance)",
+    "memory_gb": "48 GB",
+    "metal_working_set_mb": 40200.9,
+    "gpu_family": "MTLGPUFamilyApple10 / MTLGPUFamilyMetal4"
+  },
+  "software": {
+    "macos": "Darwin 25.5.0",
+    "python": "3.13.5",
+    "turboquant_mlx_full": "0.5.0",
+    "mlx": "0.31.2",
+    "mlx_metal": "0.31.2"
+  },
+  "qwen3_6_35b_a3b_tq3_g32": {
+    "mode": "fully_resident",
+    "max_tokens": 1024,
+    "prompt": "medium (190 chars)",
+    "runs_per_config": 3,
+    "configs": {
+      "fp16_baseline": {
+        "summary": {
+          "gen_tps_avg": 52.0,
+          "gen_tps_min": 51.7,
+          "gen_tps_max": 52.3,
+          "prompt_tps_avg": 47.8,
+          "peak_memory_gb": 18.131
+        }
+      },
+      "K8_V3": {
+        "summary": {
+          "gen_tps_avg": 45.7,
+          "gen_tps_min": 45.6,
+          "gen_tps_max": 45.7,
+          "prompt_tps_avg": 75.5,
+          "peak_memory_gb": 18.123
+        }
+      },
+      "K8_V3_sink128": {
+        "summary": {
+          "gen_tps_avg": 45.7,
+          "gen_tps_min": 45.2,
+          "gen_tps_max": 46.0,
+          "prompt_tps_avg": 76.1,
+          "peak_memory_gb": 18.124
+        }
+      },
+      "K3_V3": {
+        "summary": {
+          "gen_tps_avg": 45.2,
+          "gen_tps_min": 45.1,
+          "gen_tps_max": 45.2,
+          "prompt_tps_avg": 75.6,
+          "peak_memory_gb": 18.122
+        }
+      }
+    }
+  },
+  "qwen3_5_122b_a10b_tq3": {
+    "mode": "expert_streaming",
+    "cache_budget_gb": 30,
+    "max_tokens": 256,
+    "prompt": "medium (190 chars)",
+    "runs": 3,
+    "summary": {
+      "gen_tps_avg": 9.4,
+      "prompt_tps_avg": 8.5,
+      "e2e_tps_avg": 7.3,
+      "hit_rate": 0.899,
+      "peak_metal_gb": 34.24,
+      "peak_rss_gb": 32.07,
+      "disk_read_total_gb_avg": 43.1
+    },
+    "runs_detail": [
+      {
+        "prompt_tps": 7.864,
+        "gen_tps": 9.334,
+        "e2e_tps": 7.1,
+        "hit_rate": 0.899,
+        "peak_metal_gb": 34.238,
+        "peak_rss_gb": 32.07,
+        "disk_read_gb": 43.3
+      },
+      {
+        "prompt_tps": 8.811,
+        "gen_tps": 9.369,
+        "e2e_tps": 7.4,
+        "hit_rate": 0.899,
+        "peak_metal_gb": 34.238,
+        "peak_rss_gb": 32.08,
+        "disk_read_gb": 43.0
+      },
+      {
+        "prompt_tps": 8.876,
+        "gen_tps": 9.392,
+        "e2e_tps": 7.4,
+        "hit_rate": 0.899,
+        "peak_metal_gb": 34.238,
+        "peak_rss_gb": 32.07,
+        "disk_read_gb": 43.0
+      }
+    ]
+  }
+}
