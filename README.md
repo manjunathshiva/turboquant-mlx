@@ -45,6 +45,8 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 
 KV cache compression projects to ~7 GB RAM saved at 131K context on GPT-OSS-120B and ~5 GB at 262K on Qwen3.5-122B. Roundtrip cosine similarity vs FP16: 0.983 at 3-bit, 0.995 at 4-bit.
 
+> **On the Qwen3.5-122B KV rows:** these were measured with **symmetric 3-bit KV** (`demo_kv.py --tq-bits 3`, short prompt), and the rates sit well below the model's fully-resident decode. With the Metal wired cap raised so the ~50 GB model stays fully resident, decode with the recommended **mixed K8/V3** cache is ~24–25 t/s — and there **fp16 edges out compression** at short-to-moderate context, the gap widening as context grows. On this model KV compression is a *memory* win, not a speed win; the genuine decode speed-up is **GPT-OSS-120B-specific**. See the resident long-context sweep in [#19](https://github.com/manjunathshiva/turboquant-mlx/pull/19).
+
 ## Key Results — Apple M5 Pro (48 GB, Metal4)
 
 First Metal4 / `MTLGPUFamilyApple10` data point, contributed by [@sbayer2](https://github.com/sbayer2) (#14, #16) — a new 48 GB tier between the 16 GB Mac mini and the 64 GB M4 Max. Reproduce with [`benchmarks/bench_m5_pro.py`](benchmarks/bench_m5_pro.py).
@@ -404,7 +406,7 @@ The penalty also **grows with context** on small-KV models. A community long-con
 | ~63K tok | fp16 | 124.5 | 34.5 | 30.79 GB | — |
 | ~63K tok | K8/V3 (no sink) | 123.6 | 5.2 | 28.71 GB | 2.08 GB |
 
-The fp16 decode advantage *widens* with context — 1.14× at 65 tokens → 1.35× at 2.5K → 2.75× at 14.5K → **6.6× at 63K**. So on small-active MoEs, use KV compression to *fit* longer contexts in less RAM (2.08 GB saved at 63K) — not to speed them up. The flip to *faster* shows up only on models with a large per-token KV such as the 120B (whose long-context crossover still needs a 64 GB+ machine to confirm).
+The fp16 decode advantage *widens* with context — 1.14× at 65 tokens → 1.35× at 2.5K → 2.75× at 14.5K → **6.6× at 63K**. So on small-active MoEs, use KV compression to *fit* longer contexts in less RAM (2.08 GB saved at 63K) — not to speed them up. The flip to *faster* shows up only on **GPT-OSS-120B** (8.7 vs 6.4 t/s). The similarly-sized **Qwen3.5-122B does *not* flip** — run resident on a 64 GB M4 Max, fp16 KV beats mixed K8/V3 at every context (1.07× at 256 → 1.20× at 4096; [#19](https://github.com/manjunathshiva/turboquant-mlx/pull/19)) — so the speed-up isn't a general 120B-class property; it's specific to GPT-OSS-120B's KV geometry.
 
 ### Compatibility
 
