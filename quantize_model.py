@@ -124,11 +124,20 @@ def turboquant_quantize(
     model: nn.Module,
     config: dict,
     tq_config: TurboQuantConfig,
+    on_quantized=None,
 ) -> tuple[nn.Module, dict]:
     """Apply TurboQuant weight quantization to a model.
 
     Memory-efficient: replaces each layer immediately after quantization
     and releases references to original weights for garbage collection.
+
+    If ``on_quantized`` is given, it is called as ``on_quantized(path, module)``
+    right after each layer is quantized and evaluated, and that layer is then
+    replaced on the model with a paramless stub instead of the quantized module.
+    This lets a streaming converter write each layer to disk and free it, so the
+    full quantized model never has to reside in memory at once. Non-quantized
+    params (norms, embeddings, routers) stay on the model for the caller to write
+    afterward.
     """
     arch = _detect_architecture(config)
     rotation_config = None
@@ -211,7 +220,13 @@ def turboquant_quantize(
             )
             # Replace immediately and release all references
             mx.eval(pq_switch.parameters())
-            _set_nested_attr(model, path, pq_switch)
+            if on_quantized is not None:
+                # Streaming convert: write this layer to disk, then drop its
+                # params so the full quantized model never resides in memory.
+                on_quantized(path, pq_switch)
+                _set_nested_attr(model, path, nn.Identity())
+            else:
+                _set_nested_attr(model, path, pq_switch)
             del float_weight, module, bias_tensor, pq_switch
             gc.collect()
             n_switch += 1
@@ -286,7 +301,12 @@ def turboquant_quantize(
         )
 
         # Replace immediately to free original weights
-        _set_nested_attr(model, path, pq_layer)
+        if on_quantized is not None:
+            mx.eval(pq_layer.parameters())
+            on_quantized(path, pq_layer)
+            _set_nested_attr(model, path, nn.Identity())
+        else:
+            _set_nested_attr(model, path, pq_layer)
         del module, pq_layer
         n_quantized += 1
 

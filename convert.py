@@ -176,12 +176,37 @@ def configure_parser() -> argparse.ArgumentParser:
         help="Override bits for MLP and MoE expert linears. "
              "Defaults to --bits when omitted.",
     )
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Memory-bounded conversion: write each quantized layer to a shard "
+             "and free it, so the full quantized model never resides in RAM. "
+             "Use for models too big to convert in memory (e.g. 200B+ on 64 GB). "
+             "(--dtype override is not supported in this mode.)",
+    )
     return parser
 
 
 def main():
     parser = configure_parser()
     args = parser.parse_args()
+    if args.streaming:
+        if args.dtype is not None:
+            print("[WARNING] --dtype is ignored in --streaming mode")
+        from turboquant_mlx.convert_streaming import convert_streaming
+        convert_streaming(
+            hf_path=args.hf_path,
+            mlx_path=args.mlx_path,
+            bits=args.bits,
+            group_size=args.group_size,
+            rotation=args.rotation,
+            rotation_seed=args.rotation_seed,
+            fuse_rotations=args.fuse_rotations,
+            use_qjl=args.use_qjl,
+            attn_bits=args.attn_bits,
+            mlp_bits=args.mlp_bits,
+        )
+        return
     convert(
         hf_path=args.hf_path,
         mlx_path=args.mlx_path,
