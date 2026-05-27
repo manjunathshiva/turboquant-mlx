@@ -68,16 +68,22 @@ def get_hardware_info() -> dict:
             elif "Total Number of Cores:" in line:
                 info["cores"] = line.split(":", 1)[1].strip()
     except Exception:
+        # host details are best-effort; skip if system_profiler is unavailable
         pass
 
     try:
-        dinfo = mx.device_info()
-    except AttributeError:
-        dinfo = mx.metal.device_info()
-    info["metal_working_set_mb"] = round(
-        dinfo.get("recommendedMaxWorkingSetSize", 0) / 1e6, 1
-    )
-    info["gpu_family"] = dinfo.get("deviceName", "unknown")
+        try:
+            dinfo = mx.device_info()
+        except AttributeError:
+            dinfo = mx.metal.device_info()
+        info["metal_working_set_mb"] = round(
+            dinfo.get("recommendedMaxWorkingSetSize", 0) / 1e6, 1
+        )
+        info["gpu_family"] = dinfo.get("deviceName", "unknown")
+    except Exception:
+        # MLX built without Metal, or device_info API changed
+        info["metal_working_set_mb"] = 0.0
+        info["gpu_family"] = "unknown"
     return info
 
 
@@ -90,7 +96,7 @@ def run_single(model: str, prompt: str, max_tokens: int, kv_args: list,
         cmd = [python, "-m", "turboquant_mlx.stream.stream_generate",
                "--model", model, "--prompt", prompt,
                "--max-tokens", str(max_tokens)]
-        if cache_budget:
+        if cache_budget is not None:
             cmd += ["--cache-budget-gb", str(cache_budget)]
     else:
         cmd = [python, "-m", "turboquant_mlx.generate",
@@ -101,11 +107,29 @@ def run_single(model: str, prompt: str, max_tokens: int, kv_args: list,
         cmd += kv_args
 
     t0 = time.perf_counter()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    wall_time = time.perf_counter() - t0
-
-    output = result.stdout + "\n" + result.stderr
-    stats = {"wall_time_s": round(wall_time, 2), "exit_code": result.returncode}
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        wall_time = time.perf_counter() - t0
+        if result.returncode != 0:
+            return {
+                "wall_time_s": round(wall_time, 2),
+                "exit_code": result.returncode,
+                "error": f"non-zero exit code: {result.returncode}",
+            }
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        stats = {"wall_time_s": round(wall_time, 2), "exit_code": 0}
+    except subprocess.TimeoutExpired:
+        return {
+            "wall_time_s": round(time.perf_counter() - t0, 2),
+            "exit_code": -1,
+            "error": "timed out after 600s",
+        }
+    except Exception as e:  # defensive: don't let one bad run abort the suite
+        return {
+            "wall_time_s": round(time.perf_counter() - t0, 2),
+            "exit_code": -2,
+            "error": str(e),
+        }
 
     for line in output.splitlines():
         line_s = line.strip()
@@ -114,16 +138,19 @@ def run_single(model: str, prompt: str, max_tokens: int, kv_args: list,
                 try:
                     stats["prompt_tps"] = float(line_s.split(",")[1].strip().split()[0])
                 except (IndexError, ValueError):
+                    # stat line missing/unparseable this run; leave the metric unset
                     pass
             elif line_s.startswith("Generation:"):
                 try:
                     stats["gen_tps"] = float(line_s.split(",")[1].strip().split()[0])
                 except (IndexError, ValueError):
+                    # stat line missing/unparseable this run; leave the metric unset
                     pass
         elif "Peak memory:" in line_s:
             try:
                 stats["peak_memory_gb"] = float(line_s.split("Peak memory:")[1].strip().split()[0])
             except (IndexError, ValueError):
+                # stat line missing/unparseable this run; leave the metric unset
                 pass
 
     return stats
@@ -164,11 +191,14 @@ def run_benchmark(model: str, max_tokens: int, runs: int,
             stats = run_single(model, prompt, max_tokens, kv_args,
                                stream=stream, cache_budget=cache_budget)
             config_runs.append(stats)
-            gen = stats.get("gen_tps", "?")
-            prompt_tps = stats.get("prompt_tps", "?")
-            mem = stats.get("peak_memory_gb", "?")
-            print(f"prompt={prompt_tps} t/s, gen={gen} t/s, "
-                  f"mem={mem} GB, wall={stats['wall_time_s']}s")
+            if "error" in stats:
+                print(f"FAILED: {stats['error']} (wall={stats['wall_time_s']}s)")
+            else:
+                gen = stats.get("gen_tps", "?")
+                prompt_tps = stats.get("prompt_tps", "?")
+                mem = stats.get("peak_memory_gb", "?")
+                print(f"prompt={prompt_tps} t/s, gen={gen} t/s, "
+                      f"mem={mem} GB, wall={stats['wall_time_s']}s")
 
         if config_runs:
             gen_values = [r["gen_tps"] for r in config_runs if "gen_tps" in r]
