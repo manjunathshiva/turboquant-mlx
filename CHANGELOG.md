@@ -4,6 +4,23 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **DeepSeek (MLA + MoE) conversion + streaming support.** Added a rotation
+  config for the DeepSeek Multi-head Latent Attention + SwitchGLU-MoE family
+  (`deepseek_v2`, `deepseek_v3`, `deepseek_v32`). MLA's input projections
+  (`q_proj`/`q_a_proj`/`kv_a_proj_with_mqa`) fuse into `input_layernorm`; the
+  `q_b_proj`/`kv_b_proj` (nested-norm inputs) and `o_proj` use online rotation;
+  the MoE/MLP fuses exactly like `qwen3_5_moe`. Validated end-to-end on
+  DeepSeek-V2-Lite-Chat: converted to tq3 (6.6 GB) and coherent both resident
+  (~84 tok/s) and via expert streaming. V3/V3.2 reuse the same config (untested,
+  pending a conversion). The streaming loader (`turboquant_mlx.stream`) now
+  auto-detects the layer-key prefix, supporting both the multimodal
+  `language_model.model.layers` layout (qwen3_5_moe) and the text-only
+  `model.model.layers` layout (DeepSeek).
+
 ## [0.5.0] - 2026-05-26
 
 ### Added

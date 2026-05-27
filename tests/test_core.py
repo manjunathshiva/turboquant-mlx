@@ -323,6 +323,34 @@ def test_rotation_configs():
     print("test_rotation_configs: PASSED")
 
 
+def test_deepseek_rotation_config():
+    """DeepSeek MLA + MoE family resolves a config with correct MLA handling."""
+    from turboquant_mlx.integration.rotation_configs import (
+        get_rotation_config, should_fuse_rotation,
+    )
+
+    for arch in ("deepseek_v2", "deepseek_v3", "deepseek_v32"):
+        config = get_rotation_config(arch)
+
+        # MLA input projections fuse into input_layernorm
+        for proj in ("q_proj", "q_a_proj", "kv_a_proj_with_mqa"):
+            can_fuse, norm = should_fuse_rotation(f"layers.0.self_attn.{proj}", config)
+            assert can_fuse and norm == "input_layernorm", (arch, proj)
+
+        # b-projections (nested-norm inputs) and o_proj use online rotation
+        for proj in ("q_b_proj", "kv_b_proj", "o_proj"):
+            can_fuse, norm = should_fuse_rotation(f"layers.0.self_attn.{proj}", config)
+            assert not can_fuse and norm is None, (arch, proj)
+
+        # MoE/MLP fuses like qwen3_5_moe; down_proj is online
+        can_fuse, norm = should_fuse_rotation("layers.1.mlp.switch_mlp.gate_proj", config)
+        assert can_fuse and norm == "post_attention_layernorm", arch
+        can_fuse, norm = should_fuse_rotation("layers.1.mlp.switch_mlp.down_proj", config)
+        assert not can_fuse and norm is None, arch
+
+    print("test_deepseek_rotation_config: PASSED")
+
+
 def test_qjl_packing_roundtrip():
     """Verify 1-bit QJL packing is lossless."""
     from turboquant_mlx.core.qjl import pack_1bit, unpack_1bit

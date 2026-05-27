@@ -36,8 +36,15 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
         prefetch_workers=prefetch_workers,
     )
 
-    layers = model.language_model.model.layers
-    prefix = "language_model.model.layers"
+    # Locate the transformer layer stack and its weight-key prefix. Multimodal
+    # MoEs (qwen3_5_moe) nest it under `language_model.model.layers`; text-only
+    # MoEs (deepseek_v2/v3, …) use `model.model.layers`.
+    if hasattr(model, "language_model"):
+        layers = model.language_model.model.layers
+        prefix = "language_model.model.layers"
+    else:
+        layers = model.model.layers
+        prefix = "model.layers"
     swapped = 0
     for i, layer in enumerate(layers):
         sm = getattr(layer.mlp, "switch_mlp", None)

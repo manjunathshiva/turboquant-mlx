@@ -106,6 +106,29 @@ MOE_LLAMA_CONFIG = LayerRotationConfig(
 )
 
 
+# DeepSeek-V2/V3 family: MLA (Multi-head Latent Attention) + SwitchGLU MoE.
+# Block structure (pre-norm, like LLaMA):
+#   h = x + attn(input_layernorm(x))
+#   out = h + moe_or_mlp(post_attention_layernorm(h))
+# Attention is MLA, not standard QKV:
+#   q   = q_proj(x)                                  (Lite: direct)
+#       | q_b_proj(q_a_layernorm(q_a_proj(x)))       (big V2/V3: low-rank)
+#   kv  = kv_b_proj(kv_a_layernorm(kv_a_proj_with_mqa(x)))
+#   out = o_proj(attn)
+# input_layernorm feeds q_proj/q_a_proj AND kv_a_proj_with_mqa directly, so both
+# fuse into it consistently. q_b_proj/kv_b_proj read *nested* RMSNorms inside the
+# attention module (q_a_layernorm / kv_a_layernorm), which the layer-level fusion
+# path doesn't target — so they use online rotation. The MoE/dense MLP fuses
+# exactly like qwen3_5_moe (post_attention_layernorm -> gate/up; down online).
+DEEPSEEK_MLA_MOE_CONFIG = LayerRotationConfig(
+    fuse_norm_to_projs={
+        "input_layernorm": ["q_proj", "q_a_proj", "kv_a_proj_with_mqa"],
+        "post_attention_layernorm": ["gate_proj", "up_proj"],
+    },
+    online_rotation_layers=["q_b_proj", "kv_b_proj", "o_proj", "down_proj"],
+)
+
+
 # Registry mapping architecture names to rotation configs
 ROTATION_CONFIGS: dict[str, LayerRotationConfig] = {
     "llama": LLAMA_CONFIG,
@@ -128,6 +151,12 @@ ROTATION_CONFIGS: dict[str, LayerRotationConfig] = {
     "qwen2_moe": MOE_LLAMA_CONFIG,
     "qwen3_5_moe": MOE_LLAMA_CONFIG,
     "gpt_oss": MOE_LLAMA_CONFIG,
+    # DeepSeek MLA + MoE family. V2-Lite validated end-to-end (convert + resident
+    # + streaming); V3/V3.2 share the same MLA + SwitchGLU layout and reuse this
+    # config (pending a test conversion — they need ~250 GB of disk).
+    "deepseek_v2": DEEPSEEK_MLA_MOE_CONFIG,
+    "deepseek_v3": DEEPSEEK_MLA_MOE_CONFIG,
+    "deepseek_v32": DEEPSEEK_MLA_MOE_CONFIG,
 }
 
 

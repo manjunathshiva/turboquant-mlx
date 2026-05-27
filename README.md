@@ -633,7 +633,7 @@ python -m turboquant_mlx.stream.stream_generate \
 | `--cache-budget-gb 2` | ~60% | ~175 MB | ~3.0 tok/s | **3.9 GB** |
 | `--cache-budget-gb 8` *(recommended)* | **91%** | ~41 MB | **~4.5 tok/s** | 9.4 GB |
 
-A larger cache keeps more experts resident, raising the hit-rate and cutting SSD reads — the throughput limiter when streaming. `--cache-budget-gb 8` is the sweet spot on a 16 GB machine; drop to `2` if RAM is tight. Streaming currently targets the `qwen3_5_moe` expert layout.
+A larger cache keeps more experts resident, raising the hit-rate and cutting SSD reads — the throughput limiter when streaming. `--cache-budget-gb 8` is the sweet spot on a 16 GB machine; drop to `2` if RAM is tight. Streaming targets the SwitchGLU expert layout used by `qwen3_5_moe` and the DeepSeek MLA+MoE family (`deepseek_v2`/`v3`); the loader auto-detects the model's layer-key prefix.
 
 > **Note:** Qwen3.6 is a thinking-mode model — it emits a reasoning trace before the final answer, so give it a generous `--max-tokens` (512+) for tasks that need a concluding answer.
 
@@ -781,6 +781,7 @@ Options:
 | GPT-OSS | `gpt_oss` | Yes | Tested |
 | Qwen3.5-MoE / Qwen3.6-35B-A3B | `qwen3_5_moe` | Yes (256 experts) | Tested (122B, 35B-A3B); 35B streams on a 16 GB Mac mini |
 | Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
+| DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
 
 ## Project Structure
 
