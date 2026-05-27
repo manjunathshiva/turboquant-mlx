@@ -1,0 +1,70 @@
+{
+  "model": "manjunathshiva/qwen3.5-122b-tq3",
+  "gen_tokens": 64,
+  "runs": [
+    {
+      "ctx": 256,
+      "kv": "fp16",
+      "prompt_tps": 4.6,
+      "decode_tps": 24.8,
+      "gen_tokens": 64,
+      "peak_gb": 56.06
+    },
+    {
+      "ctx": 256,
+      "kv": "K8/V3",
+      "prompt_tps": 52.3,
+      "decode_tps": 23.2,
+      "gen_tokens": 64,
+      "peak_gb": 55.97
+    },
+    {
+      "ctx": 1024,
+      "kv": "fp16",
+      "prompt_tps": 55.8,
+      "decode_tps": 24.5,
+      "gen_tokens": 64,
+      "peak_gb": 57.45
+    },
+    {
+      "ctx": 1024,
+      "kv": "K8/V3",
+      "prompt_tps": 53.2,
+      "decode_tps": 22.5,
+      "gen_tokens": 64,
+      "peak_gb": 57.38
+    },
+    {
+      "ctx": 2048,
+      "kv": "fp16",
+      "prompt_tps": 54.5,
+      "decode_tps": 24.4,
+      "gen_tokens": 64,
+      "peak_gb": 59.43
+    },
+    {
+      "ctx": 2048,
+      "kv": "K8/V3",
+      "prompt_tps": 54.5,
+      "decode_tps": 21.9,
+      "gen_tokens": 64,
+      "peak_gb": 59.43
+    },
+    {
+      "ctx": 4096,
+      "kv": "fp16",
+      "prompt_tps": 48.9,
+      "decode_tps": 19.7,
+      "gen_tokens": 64,
+      "peak_gb": 60.15
+    },
+    {
+      "ctx": 4096,
+      "kv": "K8/V3",
+      "prompt_tps": 43.1,
+      "decode_tps": 16.4,
+      "gen_tokens": 64,
+      "peak_gb": 59.71
+    }
+  ]
+}
