@@ -145,6 +145,14 @@ python -m turboquant_mlx.convert \
     --hf-path openai/gpt-oss-20b \
     --mlx-path ./gpt-oss-20b-tq2 \
     --bits 2 --group-size 64
+
+# Very large model whose quantized form won't fit in RAM (200B+): --streaming
+# writes each layer to a shard and frees it, so peak memory stays ~one shard
+# (5 GB) + one layer — letting 235B/671B-class MoEs convert on a 64 GB Mac.
+python -m turboquant_mlx.convert \
+    --hf-path Qwen/Qwen3-235B-A22B-Instruct-2507 \
+    --mlx-path ./qwen3-235b-tq3 \
+    --bits 3 --group-size 64 --streaming
 ```
 
 ### 2. Generate text
@@ -501,7 +509,7 @@ python -m turboquant_mlx.convert \
 
 **Model size:** 48 GB
 
-> **Note:** Conversion requires temporarily loading the full model. With 120B parameters, peak memory during conversion may reach ~50-55 GB. On a 64 GB machine this is tight — close all other applications before running. The converter processes layers sequentially and frees memory after each expert is quantized.
+> **Note:** The default converter materializes the full quantized model in RAM before saving, so peak memory ≈ the quantized model size (~50–55 GB for a 120B). On a 64 GB machine that caps conversion at ~130B params. For anything larger, add **`--streaming`**: it writes each quantized layer to a shard and frees it, keeping peak memory to ~one 5 GB shard plus the layer being processed — so 200B+ models (Qwen3-235B, DeepSeek-V3) convert on a 64 GB Mac. Output is byte-identical to the in-memory path.
 
 #### Step 2: Generate text
 

@@ -8,6 +8,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Memory-bounded (streaming) converter — `convert --streaming`.** The default
+  converter materializes the entire quantized model in RAM before saving, which
+  caps conversion at ~130B params on a 64 GB Mac. The new path writes each
+  quantized layer to a safetensors shard and frees it during the quantization
+  loop (via a `turboquant_quantize(on_quantized=…)` callback + a
+  `StreamingShardWriter`), keeping peak memory to ~one shard (5 GB) plus the
+  single layer being processed — so 200B+ MoEs (Qwen3-235B, DeepSeek-V3) convert
+  on a 64 GB machine. Output is **byte-identical** to the in-memory converter
+  (verified on DeepSeek-V2-Lite-Chat: 1181/1181 tensors at fixed `PYTHONHASHSEED`).
 - **DeepSeek (MLA + MoE) conversion + streaming support.** Added a rotation
   config for the DeepSeek Multi-head Latent Attention + SwitchGLU-MoE family
   (`deepseek_v2`, `deepseek_v3`, `deepseek_v32`). MLA's input projections
