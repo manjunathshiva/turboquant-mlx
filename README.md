@@ -45,6 +45,27 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 
 KV cache compression projects to ~7 GB RAM saved at 131K context on GPT-OSS-120B and ~5 GB at 262K on Qwen3.5-122B. Roundtrip cosine similarity vs FP16: 0.983 at 3-bit, 0.995 at 4-bit.
 
+## Key Results — Apple M5 Pro (48 GB, Metal4)
+
+First Metal4 / `MTLGPUFamilyApple10` data point, contributed by [@sbayer2](https://github.com/sbayer2) (#14, #16) — a new 48 GB tier between the 16 GB Mac mini and the 64 GB M4 Max. Reproduce with [`benchmarks/bench_m5_pro.py`](benchmarks/bench_m5_pro.py).
+
+| Model | Mode | Gen t/s | Peak Memory | Notes |
+|-------|------|---------|-------------|-------|
+| [Qwen3.6-35B-A3B](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3-g32) tq3-g32 | resident | **52.0** | 18.1 GB | fp16 KV |
+| [Nemotron-3-Super-120B-A12B](https://huggingface.co/manjunathshiva/Nemotron-3-Super-120B-A12B-tq3a-tq2e-g32) tq3a/tq2e-g32 | resident | **20.2** | 41.1 GB | needs `sudo sysctl iogpu.wired_limit_mb=49152` |
+| [Qwen3.5-122B-A10B](https://huggingface.co/manjunathshiva/qwen3.5-122b-tq3) tq3 | streaming (30 GB cache) | **9.4** (7.3 e2e) | 34.2 GB | 89.9% expert hit-rate |
+
+**KV cache sweep on the 35B (resident, 3-run averages):**
+
+| KV config | Prompt t/s | Gen t/s | Peak |
+|-----------|-----------|---------|------|
+| fp16 baseline | 47.8 | **52.0** | 18.131 GB |
+| K8 / V3 | 75.5 | 45.7 | 18.123 GB |
+| K8 / V3 + sink128 | **76.1** | 45.7 | 18.124 GB |
+| K3 / V3 | 75.6 | 45.2 | 18.122 GB |
+
+KV compression gives a consistent **~1.6× prompt-processing speedup** for a ~12% decode cost. Expert-streaming hit-rate scales with the cache budget — **44.6% at 4 GB (16 GB mini) → 89.9% at 30 GB (48 GB)**, a ~7× throughput jump that fills the gap between the 16 GB and 64 GB tiers.
+
 ## Install
 
 ```bash
