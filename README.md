@@ -64,7 +64,9 @@ First Metal4 / `MTLGPUFamilyApple10` data point, contributed by [@sbayer2](https
 | K8 / V3 + sink128 | **76.1** | 45.7 | 18.124 GB |
 | K3 / V3 | 75.6 | 45.2 | 18.122 GB |
 
-KV compression gives a consistent **~1.6× prompt-processing speedup** for a ~12% decode cost. Expert-streaming hit-rate scales with the cache budget — **44.6% at 4 GB (16 GB mini) → 89.9% at 30 GB (48 GB)**, a ~7× throughput jump that fills the gap between the 16 GB and 64 GB tiers.
+KV compression gives a consistent **~1.6× prompt-processing speedup** for a ~12% decode cost. Expert-streaming hit-rate scales with the cache budget — **44.6% at 4 GB (16 GB mini) → 89.9% at 30 GB (48 GB)**, a ~7× throughput jump that fills the gap between the 16 GB and 64 GB tiers. The 122B hit-rate curve flattens past a **30 GB budget** (90% hit; +8 GB to 38 GB adds <1% and crowds the wired cap), so 30 GB is the sweet spot on this tier; v0.5.0 parallel prefetch (`--prefetch-workers 8`) adds a further ~1.2–1.3× on the M5 Pro SSD.
+
+> **Stability near the memory ceiling:** long-context *prompt prefill* close to the wired cap can starve the kernel watchdog (a `watchdogd` / `AppleARMWatchdogTimer` panic). A rapidly-growing KV cache makes Metal commit pages continuously, so the binding limit is allocation *rate*, not peak — a static 41 GB resident model is stable, while a growing ~30 GB KV during a 63K-token prefill can panic. Keep headroom for long-context runs near the cap. (Community reports, #14.)
 
 ## Install
 
@@ -361,12 +363,15 @@ turboquant-generate --model ./model-tq3 --prompt "..." \
 
 ### The speed flip
 
-On small fast models (~20B), KV cache compression is a quality-vs-speed tradeoff: the dequant overhead dominates because the model is fast to begin with. On large slow models (100B+), the 4x smaller KV cache reduces memory bandwidth more than dequant adds — generation is *faster* than the FP16 baseline:
+Whether KV compression speeds up or slows down decode depends on the **per-token KV cache size**, not the parameter count. When the per-token KV is large (many KV heads and/or long context), its 4x smaller footprint cuts memory bandwidth more than dequant adds, and decode is *faster* than FP16. When it is small (few active params, short context), dequant overhead dominates and compression is *slower* — a pure memory optimization.
 
 | Model | FP16 KV | TQ 3-bit KV | Direction |
 |-------|---------|-------------|-----------|
 | GPT-OSS-20B | 90.6 tok/s | 29.9 tok/s | TQ is 3x **slower** |
+| Qwen3.6-35B-A3B (3B active) | 52.0 tok/s | 45.7 tok/s | TQ is 1.1x **slower** |
 | GPT-OSS-120B | 6.4 tok/s | 8.7 tok/s | TQ is 1.4x **faster** |
+
+The penalty also **grows with context** on small-KV models: on the 35B, FP16 leads decode by 1.1x at ~65 tokens but ~6.6x at 63K (community benchmark, #14). So on small-active MoEs, use KV compression to *fit* longer contexts in less RAM — not to speed them up. The flip to *faster* shows up on models with a large per-token KV such as the 120B.
 
 ### Compatibility
 
