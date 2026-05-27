@@ -29,6 +29,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   auto-detects the layer-key prefix, supporting both the multimodal
   `language_model.model.layers` layout (qwen3_5_moe) and the text-only
   `model.model.layers` layout (DeepSeek).
+- **`qwen3_moe` rotation config registered** (standard attention + SwitchGLU, =
+  `MOE_LLAMA_CONFIG`). Enables Qwen3-MoE conversion (e.g. Qwen3-235B-A22B via
+  `--streaming`); untested pending a conversion.
 
 ## [0.5.0] - 2026-05-26
 

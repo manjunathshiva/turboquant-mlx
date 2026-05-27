@@ -149,6 +149,7 @@ ROTATION_CONFIGS: dict[str, LayerRotationConfig] = {
     "qwen3_5": LLAMA_CONFIG,
     # MoE architectures
     "qwen2_moe": MOE_LLAMA_CONFIG,
+    "qwen3_moe": MOE_LLAMA_CONFIG,       # Qwen3-MoE (e.g. Qwen3-235B-A22B, Qwen3-30B-A3B)
     "qwen3_5_moe": MOE_LLAMA_CONFIG,
     "gpt_oss": MOE_LLAMA_CONFIG,
     # DeepSeek MLA + MoE family. V2-Lite validated end-to-end (convert + resident

@@ -320,6 +320,12 @@ def test_rotation_configs():
     can_fuse, norm = should_fuse_rotation("layers.0.mlp.gate_proj", config)
     assert can_fuse and norm == "post_attention_layernorm"
 
+    # Qwen3-MoE uses the standard-attention + SwitchGLU MoE config
+    qm = get_rotation_config("qwen3_moe")
+    assert should_fuse_rotation("layers.0.self_attn.q_proj", qm) == (True, "input_layernorm")
+    assert should_fuse_rotation("layers.0.mlp.switch_mlp.gate_proj", qm) == (True, "post_attention_layernorm")
+    assert should_fuse_rotation("layers.0.mlp.switch_mlp.down_proj", qm) == (False, None)
+
     print("test_rotation_configs: PASSED")
 
 

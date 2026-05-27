@@ -790,6 +790,7 @@ Options:
 | Qwen1.5-MoE | `qwen2_moe` | Yes | Tested |
 | GPT-OSS | `gpt_oss` | Yes | Tested |
 | Qwen3.5-MoE / Qwen3.6-35B-A3B | `qwen3_5_moe` | Yes (256 experts) | Tested (122B, 35B-A3B); 35B streams on a 16 GB Mac mini |
+| Qwen3-MoE | `qwen3_moe` | Yes (SwitchGLU experts) | Config registered (same as the Qwen-MoE siblings); 235B-A22B convertible via `--streaming` (untested pending a conversion) |
 | Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
 | DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
 
