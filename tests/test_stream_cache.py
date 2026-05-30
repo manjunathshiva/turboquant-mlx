@@ -31,6 +31,15 @@ class FakeReader:
         self.read_calls += 1
         return self._content(key, expert)
 
+    def read_range_np(self, key: str, e_start: int, count: int):
+        # Coalesced read of `count` consecutive experts in one call — mirrors
+        # SafetensorsExpertReader.read_range_np: returns (count, *rest), dtype.
+        # Stacking _content keeps it byte-identical to the per-expert path.
+        self.read_calls += 1
+        rows = [self._content(key, e_start + i)[0] for i in range(count)]
+        _, mlx_dt = self._content(key, e_start)
+        return np.stack(rows), mlx_dt
+
     def read_expert(self, key: str, expert: int):
         buf, dt = self._content(key, expert)
         return mx.array(buf, dtype=dt)
