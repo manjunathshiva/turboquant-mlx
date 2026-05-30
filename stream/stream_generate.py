@@ -44,6 +44,15 @@ def main():
                    help="Max resident expert memory (LRU-evicted). Lower = less RAM, more disk reads.")
     p.add_argument("--prefetch-workers", type=int, default=8,
                    help="Threads for parallel per-layer expert reads. 1 = serial baseline.")
+    p.add_argument("--prefetch-ahead", type=int, default=0,
+                   help="Speculatively prefetch this many upcoming layers' experts "
+                        "(predicted from the previous token's routing). 0 = off (default; "
+                        "helps only on fast NVMe with spare bandwidth, ~neutral on a "
+                        "saturated USB bus). Set 1 to enable; it self-disables if the "
+                        "storage proves bandwidth-bound.")
+    p.add_argument("--pin-file", default=None,
+                   help="JSON {'pin': [[layer, expert], ...]} of hot experts to keep "
+                        "permanently resident (from calibrate_experts.py).")
     p.add_argument("--fast", action="store_true", help="Disable QJL correction for faster decode.")
     p.add_argument("--no-chat-template", action="store_true")
     args = p.parse_args()
@@ -51,7 +60,8 @@ def main():
     t0 = time.time()
     model, tok, cache = load_streaming(
         args.model, cache_budget_gb=args.cache_budget_gb, fast=args.fast,
-        prefetch_workers=args.prefetch_workers,
+        prefetch_workers=args.prefetch_workers, prefetch_ahead=args.prefetch_ahead,
+        pin_file=args.pin_file,
     )
     print(f"[stream] loaded in {time.time() - t0:.1f}s | resident RSS={_rss_gb():.2f} GB")
 
@@ -74,8 +84,14 @@ def main():
     print(f"[stream] {n} generated tok in {dt:.1f}s = {n / dt:.1f} tok/s (end-to-end) | "
           f"peak RSS={_rss_gb():.2f} GB | mlx_peak={mx.get_peak_memory() / 1e9:.2f} GB")
     s = cache.stats()
-    print(f"[stream] expert cache: hit_rate={s['hit_rate']:.1%} resident={s['resident_gb']:.2f} GB "
-          f"disk_read={s['bytes_read_gb']:.1f} GB")
+    print(f"[stream] expert cache: hit_rate={s['hit_rate']:.1%} "
+          f"(resident {s['cache_hit_rate']:.1%} + prefetch {s['prefetch_hit_rate']:.1%}) "
+          f"resident={s['resident_gb']:.2f} GB")
+    print(f"[stream] disk: critical_read={s['bytes_read_gb']:.1f} GB "
+          f"prefetched={s['bytes_prefetched_gb']:.1f} GB total={s['bytes_total_gb']:.1f} GB "
+          f"| prefetched_experts={s['prefetched']} dropped_unused={s['prefetch_dropped']}")
+    print(f"[stream] coalescing: {s['expert_reads']} expert-loads in {s['read_runs']} "
+          f"range-reads = {s['experts_per_read']:.2f} experts/read")
 
 
 if __name__ == "__main__":

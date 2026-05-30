@@ -122,6 +122,26 @@ class SafetensorsExpertReader:
         buf = np.frombuffer(raw, dtype=np_dt, count=per_expert).reshape(loc.shape[1:])
         return buf, mlx_dt
 
+    def read_range_np(self, key: str, e_start: int, count: int):
+        """Read ``count`` *consecutive* experts [e_start, e_start+count) in ONE
+        positional ``pread`` and return ``(numpy_array, mlx_dtype)`` of shape
+        ``(count, d0, d1, ...)``. Coalescing adjacent experts into a single
+        larger read is the win behind the co-activation on-disk layout (#3):
+        the streaming cache calls this once per contiguous run instead of once
+        per expert, cutting syscalls and turning random reads into sequential.
+        """
+        loc = self._index[key]
+        np_dt, itemsize, mlx_dt = _DTYPES[loc.dtype]
+        per_expert = 1
+        for d in loc.shape[1:]:
+            per_expert *= d
+        each = per_expert * itemsize
+        start = loc.abs_begin + e_start * each
+        raw = os.pread(self._fds[loc.file_idx], each * count, start)
+        buf = np.frombuffer(raw, dtype=np_dt, count=per_expert * count).reshape(
+            (count, *loc.shape[1:]))
+        return buf, mlx_dt
+
     def read_expert(self, key: str, expert: int) -> mx.array:
         """Return slice ``[expert]`` of a stacked tensor as an mx.array.
 
