@@ -127,7 +127,8 @@ def _greedy_order(experts, coact: Counter):
 
 
 def analyze(args):
-    trace = json.load(open(args.trace))
+    with open(args.trace) as f:
+        trace = json.load(f)
     freq = defaultdict(Counter)              # layer -> Counter(expert -> count)
     coact = defaultdict(Counter)             # layer -> Counter((e<f) -> count)
     seen_experts = defaultdict(set)
@@ -154,7 +155,8 @@ def analyze(args):
             break
         pin.append([int(l), int(e)])
         used += cost
-    json.dump({"pin": pin}, open(args.pin_out, "w"))
+    with open(args.pin_out, "w") as f:
+        json.dump({"pin": pin}, f)
     total_sel = sum(freq[l][e] for l in freq for e in freq[l])
     covered = sum(_cnt for _cnt, _l, _e in ranked[:len(pin)])
     print(f"[analyze] pin {len(pin)} experts (~{used / 1e9:.1f} GB, cost "
@@ -169,7 +171,8 @@ def analyze(args):
         order = _greedy_order(seen_experts[l], coact[l])
         order += [e for e in range(num_experts) if e not in seen_experts[l]]
         perm[str(int(l))] = order
-    json.dump({"perm": perm}, open(args.perm_out, "w"))
+    with open(args.perm_out, "w") as f:
+        json.dump({"perm": perm}, f)
     print(f"[analyze] co-activation ordering for {len(perm)} layers -> {args.perm_out}")
 
     # ---- #3 ceiling pre-check: contiguous read-runs per token, identity vs

@@ -79,3 +79,17 @@ def test_eviction_respects_budget():
         cache.gather("k.weight", "k.scales", [e])
     # never grows unbounded: resident bytes stay within ~one entry of budget.
     assert cache.cur <= 200 + 48
+
+
+def test_prefetch_staging_hit():
+    # A staged expert (weight+scales held under one key) is served from the
+    # staging area without a critical-path miss, and its content matches a
+    # direct read. Guards the single-key staging structure (no orphaned halves).
+    cache = ExpertCache(FakeReader(), budget_bytes=10**9,
+                        prefetch_workers=1, prefetch_ahead=1)
+    cache._prefetch_one("L0.gate.weight", "L0.gate.scales", 2)
+    assert ("L0.gate.weight", 2) in cache._staging  # one entry, not two
+    w, _ = cache.gather("L0.gate.weight", "L0.gate.scales", [2])
+    assert cache.prefetch_hits == 1 and cache.misses == 0
+    assert int(np.array(w)[0][0]) == 20  # expert 2 -> 2*10 at column 0
+    assert cache._staging_bytes == 0  # claimed, not orphaned

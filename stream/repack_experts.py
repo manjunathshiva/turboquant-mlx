@@ -69,7 +69,8 @@ def main():
     src = str(resolve_model_path(args.model))
     os.makedirs(args.out, exist_ok=True)
 
-    perm = {int(k): v for k, v in json.load(open(args.perm))["perm"].items()}
+    with open(args.perm) as f:
+        perm = {int(k): v for k, v in json.load(f)["perm"].items()}
     perm_idx = {l: mx.array(order, dtype=mx.uint32) for l, order in perm.items()}
 
     shards = sorted(glob.glob(os.path.join(src, "model*.safetensors")))

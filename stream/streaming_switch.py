@@ -169,15 +169,16 @@ class ExpertCache:
             nb = wbuf[0].nbytes + sbuf[0].nbytes
             with self._lock:
                 self._inflight.discard((wkey, e))
-                self._staging[(wkey, e)] = wbuf
-                self._staging[(skey, e)] = sbuf
+                # Store both projections under one key so eviction can never
+                # orphan half a pair (drop the weight but keep its scales).
+                self._staging[(wkey, e)] = (wbuf, sbuf)
                 self._staging_bytes += nb
                 self.bytes_prefetched += nb
                 self.prefetched += 1
                 # bound staging: drop oldest (mispredicted) entries FIFO
-                while self._staging_bytes > self._staging_cap and len(self._staging) > 2:
-                    _, v = self._staging.popitem(last=False)
-                    self._staging_bytes -= v[0].nbytes
+                while self._staging_bytes > self._staging_cap and len(self._staging) > 1:
+                    _, (wb, sb) = self._staging.popitem(last=False)
+                    self._staging_bytes -= (wb[0].nbytes + sb[0].nbytes)
                     self.prefetch_dropped += 1
         except Exception:
             with self._lock:
@@ -270,10 +271,8 @@ class ExpertCache:
                 if ck in self._od:
                     self.hits += 1
                     continue
-                wk, sk = (wkey, e), (skey, e)
-                if wk in self._staging and sk in self._staging:
-                    wbuf = self._staging.pop(wk)
-                    sbuf = self._staging.pop(sk)
+                if ck in self._staging:
+                    wbuf, sbuf = self._staging.pop(ck)
                     self._staging_bytes -= (wbuf[0].nbytes + sbuf[0].nbytes)
                     staged.append((e, wbuf, sbuf))
                     self.prefetch_hits += 1
