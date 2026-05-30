@@ -649,6 +649,18 @@ A larger cache keeps more experts resident, raising the hit-rate and cutting SSD
 
 > **Note:** Qwen3.6 is a thinking-mode model — it emits a reasoning trace before the final answer, so give it a generous `--max-tokens` (512+) for tasks that need a concluding answer.
 
+#### Tuning the streaming reader (`v0.6.1`)
+
+Once the cache policy is reasonable, **disk bandwidth is the wall** — for MoE decode the LRU + 8-worker parallel-read pool is already near-optimal, so the big levers are faster storage (Thunderbolt/NVMe) and fewer bytes/token (a hybrid build, a bigger `--cache-budget-gb`), not the read algorithm. A few knobs squeeze the rest:
+
+| Knob | Default | What it does |
+|------|---------|--------------|
+| read-coalescing | **on** | Merges contiguous missed experts into one `os.pread`. Bit-identical, free, ~5% faster when disk-bound. No flag. |
+| `--prefetch-ahead N` | `0` (off) | Speculatively prefetch the next *N* layers' experts (predicted from the previous token's routing) on a background thread. ~+6% on fast NVMe with spare bandwidth; **self-disables** if the drive proves bandwidth-bound (e.g. a saturated USB bus), so it's safe to set `1`. |
+| `--pin-file pin.json` | none | Keep a calibrated hot-expert set permanently resident. **Experimental** — measured net-negative vs pure LRU on a 122B (static pinning costs LRU's adaptivity). For experimentation only. |
+
+Generate `pin.json` (and a co-activation `perm.json` for the optional `stream/repack_experts.py` relayout) with `python -m turboquant_mlx.stream.calibrate_experts`.
+
 ---
 
 ### Qwen3-235B-A22B-Instruct-2507 — a 235B MoE that converts on a 16 GB Mac (hybrid + streaming)
@@ -869,10 +881,12 @@ turboquant_mlx/
     integration/
         rotation_configs.py   # Per-architecture rotation configs
     stream/                   # Expert streaming — run MoE models beyond RAM (v0.4.0)
-        safetensors_reader.py # Per-expert disk slice reads (os.pread + F_NOCACHE)
-        streaming_switch.py   # StreamingSwitchLinear + byte-budgeted LRU ExpertCache
+        safetensors_reader.py # Per-expert disk slice reads (os.pread + F_NOCACHE; coalesced ranges)
+        streaming_switch.py   # StreamingSwitchLinear + byte-budgeted LRU ExpertCache (+ prefetch/pin)
         loader.py             # load_streaming(): swap experts to streaming after lazy load
-        stream_generate.py    # CLI: stream-generate (--cache-budget-gb)
+        stream_generate.py    # CLI: stream-generate (--cache-budget-gb, --prefetch-ahead, --pin-file)
+        calibrate_experts.py  # Routing trace → pin.json (hot experts) + perm.json (co-activation)
+        repack_experts.py     # Optional co-activation on-disk relayout (byte-identical)
 ```
 
 ## Citation

@@ -6,6 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-30
+
+### Added
+
+- **Read-coalescing for the expert-streaming reader (default-on).** When a token
+  routes to several experts that sit at *contiguous* positions in a shard, the
+  streaming cache now merges them into a single `os.pread` (`read_range_np` +
+  `_load_coalesced`) instead of one syscall per expert. Bit-identical to the
+  per-expert path; cuts read syscalls by up to ~22% and lifts throughput ~5% in
+  the disk-bound regime (low cache budget on fast storage), ~0 when cache-warm.
+  No flag — every streaming run benefits automatically.
+- **Cross-layer speculative prefetch — `--prefetch-ahead N` (opt-in, default 0).**
+  Predicts an upcoming layer's experts from the previous token's routing and
+  reads them on a background thread into a staging buffer, claiming them on the
+  main thread (MLX is never touched off-thread) → bit-identical. Helps only when
+  the storage has spare bandwidth (~+6% on fast NVMe); it **self-disables** after
+  a warmup window if the measured rescue rate shows the drive is bandwidth-bound
+  (e.g. a saturated USB bus), so it is safe to leave on.
+- **Hot-expert pinning + calibration tooling — `--pin-file` (experimental).**
+  `stream/calibrate_experts.py` records a routing trace and emits `pin.json`
+  (hottest experts) and `perm.json` (co-activation order); `--pin-file` keeps the
+  hot set permanently resident. **Not recommended as a default** — measured
+  net-negative vs pure LRU on a 122B (static pinning removes LRU's adaptivity).
+  Shipped as opt-in tooling for experimentation only.
+- **Co-activation on-disk relayout — `stream/repack_experts.py` (optional).**
+  Reorders the expert axis of `switch_mlp.{gate,up,down}_proj.{weight,scales}`
+  and the matching router rows by co-activation order so co-selected experts land
+  adjacent (feeding the coalescing reader). Pure relabeling → byte-identical
+  output; benefit is fast-storage + low-budget only.
+
+> **Finding (2026-05-30):** for MoE expert streaming the LRU + parallel-read cache
+> is already near-optimal on the policy axis; the dominant limiter is raw disk
+> bandwidth (a USB SSD bus saturates at ~0.6 GB/s under the 8-worker read pool).
+> The genuine levers are hardware (Thunderbolt/NVMe) and fewer bytes/token
+> (hybrid models, larger cache budget), not the read algorithm. These knobs are
+> the squeeze that remains once the bus is the wall.
+
 ## [0.6.0] - 2026-05-28
 
 ### Added
