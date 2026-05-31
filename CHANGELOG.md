@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-31
+
+### Fixed
+
+- **Convert no longer hits the Metal GPU watchdog when quantizing a lazily-mmap'd
+  checkpoint off slow storage (e.g. a USB HDD).** Symptom: `convert` (in-memory
+  *and* `--streaming`) aborted with
+  `[METAL] ... kIOGPUCommandBufferCallbackErrorTimeout` shortly after start.
+  Root cause: MLX fused the multi-second weight *read* from the slow disk into
+  the same GPU command buffer as the rotate/quantize, and the watchdog kills any
+  command buffer that stalls on I/O that long — it was **not** tensor size or a
+  slow kernel (rotating a resident 1.3B `lm_head` is ~0.2 s). Fix in
+  `core/polar_quantize.py`: (1) `mx.eval(weight)` at the top of
+  `polar_quantize_weight` forces the disk read as its own step before any GPU
+  compute, keeping the kernels pure-compute; (2) the output-row axis is quantized
+  in ≤64M-element blocks (`_MAX_QUANT_BLOCK_ELEMS`) as a secondary bound on
+  per-command-buffer work. **Bit-identical** to the previous single-pass
+  quantization (each output row quantizes independently; validated 4-block vs
+  1-block exact match). Fast storage never tripped this, which is why prior
+  large-model converts succeeded. Helps any dense / big-vocab model converted
+  off slow storage (validated converting Qwen3.6-27B tq3 g32).
+
 ## [0.6.1] - 2026-05-30
 
 ### Added
