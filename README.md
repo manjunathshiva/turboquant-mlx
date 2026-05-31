@@ -8,6 +8,8 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 
 **Expert streaming (v0.4.0)** runs MoE models whose weights exceed available RAM by paging only the router-selected experts from disk per token — e.g. the 35B-parameter Qwen3.6-35B-A3B runs on a **16 GB Mac mini** in under 4 GB of RAM, with output bit-identical to the fully-resident model. See [Qwen3.6-35B-A3B on a 16 GB Mac mini](#qwen36-35b-a3b-on-a-16-gb-mac-mini-expert-streaming).
 
+**Local coding** — [Qwen3.6-27B](https://huggingface.co/manjunathshiva/Qwen3.6-27B-tq3-g32), a dense SWE-bench-grade coder, runs **fully resident on a 48 GB Mac** at 3-bit (~13 GB on disk, ~17.5 GB at runtime) and serves to Cursor / VS Code over an OpenAI-compatible endpoint. See [Qwen3.6-27B](#qwen36-27b-dense-coding-model-for-a-48-gb-mac).
+
 ## Key Results — Weight Compression
 
 | Model | Method | Bits | PPL | Size | Gen Speed (M4 Max) |
@@ -26,6 +28,7 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | Qwen3.5-122B-A10B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **Qwen3.5-122B-A10B** | **TurboQuant** | **3** | **—** | **~50 GB** | **26.5 tok/s (64 GB) · streams on a 16 GB Mac mini** |
 | **[Qwen3.6-35B-A3B](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **~16 GB** | **~60 tok/s (resident) · runs in <4 GB via streaming** |
+| **[Qwen3.6-27B (dense coder)](https://huggingface.co/manjunathshiva/Qwen3.6-27B-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **~13 GB** | **~14 tok/s (resident) · fits 48 GB, SWE-bench coder** |
 | **[Qwen3-235B-A22B-Instruct-2507 (hybrid)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3a-tq2e-g32)** | **TQ 3-attn / 2-experts, gs=32** | **2/3 mix** | **—** | **70.5 GB** | **~4–6 tok/s (64 GB, 40 GB cache) · converts + streams on a 16 GB Mac mini** |
 | **[Qwen3-235B-A22B-Instruct-2507 (full 3-bit)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **103 GB** | **~1.3 tok/s (64 GB, 40 GB cache) · recall-critical sibling, passes 6/6 stress** |
 | **Nemotron-3-Nano-4B** | **TurboQuant** | **3** | **—** | **~2.2 GB** | **75.6 tok/s** |
@@ -660,6 +663,44 @@ Once the cache policy is reasonable, **disk bandwidth is the wall** — for MoE 
 | `--pin-file pin.json` | none | Keep a calibrated hot-expert set permanently resident. **Experimental** — measured net-negative vs pure LRU on a 122B (static pinning costs LRU's adaptivity). For experimentation only. |
 
 Generate `pin.json` (and a co-activation `perm.json` for the optional `stream/repack_experts.py` relayout) with `python -m turboquant_mlx.stream.calibrate_experts`.
+
+---
+
+### Qwen3.6-27B (dense coding model for a 48 GB Mac)
+
+**Hardware:** converts on a 64 GB Mac — or off slow USB storage with `v0.6.2+`, which forces the disk read ahead of GPU compute so conversion doesn't trip the Metal GPU watchdog — and runs **fully resident** on a **48 GB** Mac with headroom to spare. [Qwen/Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B) is a **dense** (`qwen3_5`) long-context coder — 64 layers, hybrid attention (**48 GatedDeltaNet linear-attention + 16 full-attention** layers), head_dim 256, 262K context — that Qwen positions as competitive on SWE-bench Verified / SWE-bench Pro. Being dense, it has **no experts to stream**: it loads once and stays in RAM, so storage only matters for load time.
+
+A pre-converted 3-bit (group-size 32) build is on the Hub:
+
+→ [`manjunathshiva/Qwen3.6-27B-tq3-g32`](https://huggingface.co/manjunathshiva/Qwen3.6-27B-tq3-g32) — **~13 GB on disk**, **~17.5 GB peak** at runtime (fits 48 GB with ~30 GB free for KV), ~14 tok/s decode.
+
+#### Run it
+
+```bash
+turboquant-generate \
+    --model manjunathshiva/Qwen3.6-27B-tq3-g32 \
+    --prompt "Write a Python function that merges overlapping intervals." \
+    --max-tokens 512 --temp 0.7
+```
+
+#### Serve it to Cursor / VS Code (OpenAI-compatible)
+
+```bash
+turboquant-serve --model manjunathshiva/Qwen3.6-27B-tq3-g32 --port 8080
+```
+
+Point the IDE's custom OpenAI base URL at `http://localhost:8080/v1`. Stock `mlx_lm.server` **can't** load a TurboQuant model (`KeyError: 'turboquant'`) — `turboquant-serve` patches the loader so the weights load through the PolarQuant path.
+
+#### Convert it yourself
+
+```bash
+python -m turboquant_mlx.convert \
+    --hf-path Qwen/Qwen3.6-27B \
+    --mlx-path ./Qwen3.6-27B-tq3-g32 \
+    --bits 3 --group-size 32 --streaming
+```
+
+> **Note:** Qwen3.6 is a thinking-mode model — it emits a reasoning trace before the answer, so give it a generous `--max-tokens` (512+). Only the **16 full-attention layers** keep a growing KV cache (the 48 linear-attention layers use a fixed-size state), so it stays KV-light for long coding context; compress further with `--kv-k-bits 8 --kv-v-bits 3`.
 
 ---
 
