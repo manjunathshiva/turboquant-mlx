@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-06-12
+
+### Added
+
+- **`kernels/polar_gather_qmm.py`** — tiled batched gather-GEMM that runs
+  expert-routed matmuls **directly on packed TurboQuant weights** (no fp16
+  materialization). Sorted routings are grouped host-side into single-expert
+  16-token tiles (vectorized mx ops, no sync); each threadgroup stages the
+  x tile in threadgroup memory and unpacks each weight word once for 16
+  fully-unrolled per-token FMAs. ~5.8x faster than the per-row gather kernel
+  at diffusion-canvas scale (gate_up 5.7 ms vs 33 ms at 2048 routings).
+
+### Changed
+
+- `PolarQuantizedSwitchLinear` large-batch routing now prefers
+  `polar_gather_qmm` for sorted routings (any expert count — nothing is
+  materialized), keeping fused dequant + `mx.gather_mm` only as the unsorted
+  fallback under the 2 GiB cap. End-to-end on DiffusionGemma-26B-A4B tq3-g32:
+  **1.6 -> 4.6 tok/s** (2.9x), peak memory **23.3 -> 17.8 GB**.
+
 ## [0.7.0] - 2026-06-12
 
 ### Added

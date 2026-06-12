@@ -24,17 +24,22 @@ from turboquant_mlx.core.rotation import rotate_input
 from turboquant_mlx.kernels.polar_gather_qmv import polar_gather_qmv
 from turboquant_mlx.kernels.polar_multi_gather_qmv import polar_multi_gather_qmv
 from turboquant_mlx.kernels.polar_dequant_experts import polar_dequant_experts
+from turboquant_mlx.kernels.polar_gather_qmm import (
+    polar_gather_qmm, supports as _gather_qmm_supports,
+)
 
-# Above this many (token, expert) routings, materializing fp16 expert weights
-# once (fused dequant + mx.gather_mm) beats the per-row gather kernels, which
-# re-read the activation vector from global memory per output row. Diffusion
-# canvas forwards (e.g. DiffusionGemma: 256 tokens x top-8 = 2048 routings)
-# sit far above this; autoregressive decode sits far below.
+# Above this many (token, expert) routings, the per-row gather kernels lose
+# badly: they re-read the activation vector from global memory per output
+# row. Diffusion canvas forwards (e.g. DiffusionGemma: 256 tokens x top-8 =
+# 2048 routings) sit far above this; autoregressive decode sits far below.
+# Sorted large batches go to polar_gather_qmm (tiled GEMM on packed weights,
+# no materialization); unsorted ones to fused dequant + mx.gather_mm.
 _GATHER_MM_MIN_ROUTINGS = 512
 
-# ... but only when the full dequantized expert tensor stays small. Models
-# with hundreds of large experts (e.g. 512-expert LatentMoE) would OOM on the
-# materialization (issue #1), so they keep the gather kernels at any k.
+# The dequant+gather_mm fallback materializes the full fp16 expert tensor,
+# so it only engages when that stays small. Models with hundreds of large
+# experts (e.g. 512-expert LatentMoE) would OOM on the materialization
+# (issue #1) and keep the gather kernels at any k.
 _GATHER_MM_MAX_DEQUANT_BYTES = 2 << 30
 
 
@@ -148,21 +153,33 @@ class PolarQuantizedSwitchLinear(nn.Module):
         if n_tokens == k:
             # Large batched routing (diffusion canvas / big prefill via
             # SwitchMLP's do_sort): the per-row gather kernel re-reads x per
-            # output row, so past _GATHER_MM_MIN_ROUTINGS it loses to a fused
-            # dequant + native gather_mm — but only when the materialized
-            # fp16 expert tensor stays small (512-expert models would OOM).
-            if (k >= _GATHER_MM_MIN_ROUTINGS
-                    and self._dequant_bytes() <= _GATHER_MM_MAX_DEQUANT_BYTES):
-                w_deq = self._dequantize_all()
-                y = mx.gather_mm(
-                    x,
-                    w_deq.swapaxes(-1, -2),
-                    rhs_indices=indices,
-                    sorted_indices=sorted_indices,
-                )
-                if "bias" in self:
-                    y = y + mx.expand_dims(self["bias"][indices], -2)
-                return y
+            # output row, so past _GATHER_MM_MIN_ROUTINGS it loses badly.
+            if k >= _GATHER_MM_MIN_ROUTINGS:
+                # Preferred: tiled GEMM directly on packed weights — fastest
+                # and materializes nothing (safe at any expert count).
+                if sorted_indices and _gather_qmm_supports(self.output_dims):
+                    y = polar_gather_qmm(
+                        self.weight, self.scales, self.codebook,
+                        x.reshape(k, self.input_dims), indices.reshape(-1),
+                        self.bits, self.group_size,
+                    )
+                    y = y.reshape(list(indices.shape) + [1, self.output_dims])
+                    if "bias" in self:
+                        y = y + mx.expand_dims(self["bias"][indices], -2)
+                    return y
+                # Fallback: fused dequant + native gather_mm, capped so
+                # many-large-expert models can't OOM on the materialization.
+                if self._dequant_bytes() <= _GATHER_MM_MAX_DEQUANT_BYTES:
+                    w_deq = self._dequantize_all()
+                    y = mx.gather_mm(
+                        x,
+                        w_deq.swapaxes(-1, -2),
+                        rhs_indices=indices,
+                        sorted_indices=sorted_indices,
+                    )
+                    if "bias" in self:
+                        y = y + mx.expand_dims(self["bias"][indices], -2)
+                    return y
 
             # Multi-input decode: k expert vectors (down_proj path)
             # x shape: (..., k, 1, input_dims) — one vector per expert
