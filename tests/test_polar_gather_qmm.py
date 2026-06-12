@@ -78,6 +78,23 @@ def test_supports_gate():
     assert not supports(96)  # not a multiple of the 64-row block
 
 
+def test_output_dims_not_multiple_of_block():
+    """Direct kernel call with O % 64 != 0: the tail block's extra threads
+    clamp their address row and must not corrupt results or read OOB."""
+    layer = _make_layer(output_dims=96)
+    n = 640
+    mx.random.seed(4)
+    x = mx.random.normal((n, layer.input_dims)).astype(mx.float16)
+    idx = mx.sort(mx.random.randint(0, layer.num_experts, (n,)).astype(mx.uint32))
+    got = polar_gather_qmm(layer.weight, layer.scales, layer.codebook,
+                           x, idx, 3, 32)
+    ref = polar_multi_gather_qmv(layer.weight, layer.scales, layer.codebook,
+                                 x, idx, 3, 32)
+    mx.eval(got, ref)
+    assert got.shape == (n, 96)
+    assert _rel(got, ref) < 1e-4
+
+
 def test_switch_layer_routes_sorted_large_batch():
     """Layer output via the new kernel must match per-chunk gather-kernel calls."""
     layer = _make_layer()

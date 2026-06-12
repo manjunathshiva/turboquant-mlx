@@ -65,21 +65,30 @@ def _build_source(bits: int, group_size: int) -> str:
     #pragma unroll
     for (uint t = 0; t < {TT}u; t++) acc[t] = 0.0f;
 
-    uint pw_base = (e * O + o) * pw_cols;
-    uint sc_base = (e * O + o) * n_groups;
+    // Clamp the row used for ADDRESS computation: when O is not a multiple
+    // of {OB}, threads with o >= O must keep participating in the barriers
+    // below, so they compute on row O-1 and the o < O write guard discards
+    // their result. Without the clamp they would read out of bounds.
+    uint safe_o = min(o, O - 1u);
+    uint pw_base = (e * O + safe_o) * pw_cols;
+    uint sc_base = (e * O + safe_o) * n_groups;
     uint n_chunks = (K + {kc}u - 1u) / {kc}u;
 
     for (uint c = 0u; c < n_chunks; c++) {{
         uint k0 = c * {kc}u;
         uint cols = min((uint){kc}, K - k0);
 
-        // cooperative stage of the x chunk: xs[kk][t]
+        // cooperative stage of the x chunk: xs[kk][t]. Clamp the address
+        // operands so padding tokens (tok = -1) and tail columns can never
+        // form an out-of-bounds address even under predicated execution.
         for (uint i = tid; i < {kc}u * {TT}u; i += {NT}u) {{
             uint kk = i / {TT}u;
             uint tt = i % {TT}u;
             int tok = toks[tt];
+            uint safe_tok = tok >= 0 ? uint(tok) : 0u;
+            uint safe_kk = kk < cols ? kk : 0u;
             xs[kk][tt] = (kk < cols && tok >= 0)
-                ? x[uint(tok) * K + k0 + kk] : half(0.0f);
+                ? x[safe_tok * K + k0 + safe_kk] : half(0.0f);
         }}
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
