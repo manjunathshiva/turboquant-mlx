@@ -375,6 +375,9 @@ def test_qjl_unbiasedness():
     """Verify QJL correction is unbiased (mean error ≈ 0)."""
     from turboquant_mlx.core.qjl import qjl_quantize, qjl_correct
 
+    # Fixed seed: this is a 100-trial statistical bias estimate, and with
+    # unseeded draws it crosses the 0.1 threshold roughly 1 run in 5.
+    mx.random.seed(1234)
     d = 256
     total_error = 0.0
     total_abs = 0.0
