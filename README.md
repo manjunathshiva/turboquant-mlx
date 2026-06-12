@@ -893,6 +893,26 @@ Options:
 | Qwen3-MoE | `qwen3_moe` | Yes (128 experts, top-8) | Tested — Qwen3-235B-A22B converted to a hybrid **tq3a-tq2e** build (70.5 GB) on a 16 GB Mac mini via `--streaming`; streams and passes 5/6 quality probes on a 64 GB Mac |
 | Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
 | DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
+| DiffusionGemma (block-diffusion MoE, via **mlx-vlm**) | `diffusion_gemma` | Yes (128 experts, top-8) | Tested (26B-A4B: convert + block-diffusion sampler, coherent at 3-bit — [HF](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)). **Experimental**: decode is much slower than native 4-bit until a batched codebook gather-GEMM kernel lands |
+
+### mlx-vlm architectures (multimodal / diffusion)
+
+Architectures that live in [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) rather
+than mlx-lm convert and run through dedicated entry points (v0.7.0+):
+
+```bash
+pip install "turboquant-mlx-full[vlm]"   # adds mlx-vlm >= 0.6.3
+
+# Convert (vision towers, routers, and known quant-sensitive blocks stay full precision)
+python -m turboquant_mlx.convert_vlm \
+    --hf-path google/diffusiongemma-26B-A4B-it \
+    --mlx-path ./diffusiongemma-26B-A4B-it-tq3-g32 --bits 3 -g 32
+
+# Generate (runs mlx-vlm's sampler — block-diffusion denoising for DiffusionGemma)
+python -m turboquant_mlx.generate_vlm \
+    --model ./diffusiongemma-26B-A4B-it-tq3-g32 \
+    --prompt "Write a short paragraph about the ocean." --max-tokens 256
+```
 
 ## Project Structure
 

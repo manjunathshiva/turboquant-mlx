@@ -6,6 +6,41 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-12
+
+### Added
+
+- **mlx-vlm architecture support (multimodal / diffusion LLMs)** — first
+  target: Google **DiffusionGemma-26B-A4B** (`model_type: diffusion_gemma`,
+  block-diffusion MoE, 25.2B total / 3.8B active). New optional dependency:
+  `pip install "turboquant-mlx-full[vlm]"` (mlx-vlm >= 0.6.3).
+  - `python -m turboquant_mlx.convert_vlm` — converts architectures that live
+    in mlx-vlm rather than mlx-lm. Reuses the model-agnostic
+    `turboquant_quantize` core; applies per-arch full-precision skips
+    (`integration/vlm.py::VLM_SKIP_PATTERNS`): vision/audio towers, MoE
+    routers, and for `diffusion_gemma` the dense per-layer MLP and
+    self-conditioning block (quant-sensitive per the upstream
+    `quant_predicate`).
+  - `python -m turboquant_mlx.generate_vlm` — loads TurboQuant checkpoints
+    through mlx-vlm (`integration/vlm.py::load_turboquant_vlm`; the stock
+    mlx-vlm loader would mis-apply affine `nn.quantize`) and runs mlx-vlm's
+    generation dispatch, including the block-diffusion denoising sampler.
+  - `diffusion_gemma` rotation-config registry entry.
+- **`kernels/polar_dequant_experts.py`** — fused Metal kernel that
+  dequantizes all experts of a `PolarQuantizedSwitchLinear` in one pass
+  (unpack + codebook + group scales). Bit-identical to the previous multi-op
+  Python path and ~11x faster at MoE shapes; now backs `_dequantize_all`.
+
+### Changed
+
+- `PolarQuantizedSwitchLinear` routes **large batched expert calls** (>= 512
+  token-expert routings, e.g. diffusion canvas forwards and large sorted
+  prefills) through fused dequant + `mx.gather_mm` instead of the per-row
+  gather kernel, which re-reads activations per output row at that scale
+  (~2x end-to-end on DiffusionGemma denoising). Guarded by a 2 GiB cap on
+  the materialized expert tensor so many-large-expert models (e.g.
+  512-expert LatentMoE) keep the memory-safe gather kernels (issue #1).
+
 ## [0.6.2] - 2026-05-31
 
 ### Fixed

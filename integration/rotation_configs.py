@@ -158,6 +158,10 @@ ROTATION_CONFIGS: dict[str, LayerRotationConfig] = {
     "deepseek_v2": DEEPSEEK_MLA_MOE_CONFIG,
     "deepseek_v3": DEEPSEEK_MLA_MOE_CONFIG,
     "deepseek_v32": DEEPSEEK_MLA_MOE_CONFIG,
+    # DiffusionGemma (block-diffusion MoE, lives in mlx-vlm — see convert_vlm).
+    # Same pre-norm attn + SwitchGLU-style expert layout as MoE LLaMA; only
+    # consulted when fuse_rotations=True (production uses online rotation).
+    "diffusion_gemma": MOE_LLAMA_CONFIG,
 }
 
 
