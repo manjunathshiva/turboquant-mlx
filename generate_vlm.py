@@ -36,6 +36,13 @@ def main():
                         help="Sampling temperature (default: 0.0)")
     parser.add_argument("--image", type=str, default=None,
                         help="Optional image path/URL for multimodal prompts")
+    parser.add_argument("--max-denoising-steps", type=int, default=None,
+                        help="Cap diffusion denoising steps (model default 48)."
+                             " Lower = faster, mild quality cost (try 24)")
+    parser.add_argument("--max-canvas-length", type=int, default=None,
+                        help="Cap the diffusion canvas length (model default "
+                             "256). Lower = smaller activation memory, useful "
+                             "on 16 GB machines (try 128)")
     args = parser.parse_args()
 
     _require_mlx_vlm()
@@ -51,12 +58,18 @@ def main():
     num_images = 1 if args.image else 0
     formatted = apply_chat_template(processor, config, args.prompt,
                                     num_images=num_images)
+    gen_kwargs = {}
+    if args.max_denoising_steps is not None:
+        gen_kwargs["max_denoising_steps"] = args.max_denoising_steps
+    if args.max_canvas_length is not None:
+        gen_kwargs["diffusion_max_canvas_length"] = args.max_canvas_length
     generate(
         model, processor, formatted,
         image=[args.image] if args.image else None,
         max_tokens=args.max_tokens,
         temperature=args.temp,
         verbose=True,
+        **gen_kwargs,
     )
     print(f"peak memory: {mx.get_peak_memory() / 1024**3:.2f} GB")
 

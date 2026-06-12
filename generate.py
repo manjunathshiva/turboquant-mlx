@@ -68,7 +68,13 @@ def _prepare_polar_layers(model, weights, tq_config):
         has_bias = f"{path}.bias" in weights
         has_qjl = f"{path}.qjl_packed" in weights
 
-        layer_bits = tq_config.bits_for_path(path)
+        # Authoritative per-layer bit width: the saved codebook has 2^bits
+        # entries. This survives any per-layer bit assignment the converter
+        # used (hybrids, layer protection) without re-deriving path rules.
+        cb_size = int(weights[f"{path}.codebook"].shape[-1])
+        layer_bits = max(1, cb_size.bit_length() - 1)
+        if (1 << layer_bits) != cb_size:  # non-power-of-two: fall back
+            layer_bits = tq_config.bits_for_path(path)
 
         if has_switch and isinstance(module, SwitchLinear):
             num_experts, output_dims, input_dims = module.weight.shape

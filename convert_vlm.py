@@ -17,8 +17,10 @@ Requires:  pip install "turboquant-mlx-full[vlm]"
 """
 
 import argparse
+import re
 import shutil
 import time
+import types
 from pathlib import Path
 
 import mlx.core as mx
@@ -35,6 +37,10 @@ _AUX_FILES = (
     "preprocessor_config.json", "special_tokens_map.json",
 )
 
+# --quantize-extras: affine quantization for the non-TurboQuant remainder.
+_EXTRAS_BITS = 8
+_EXTRAS_GROUP = 64
+
 
 def convert_vlm(
     hf_path: str,
@@ -45,6 +51,9 @@ def convert_vlm(
     rotation_seed: int = 42,
     attn_bits: int = None,
     mlp_bits: int = None,
+    quantize_extras: bool = False,
+    protect_expert_layers: list = None,
+    protect_bits: int = 3,
 ):
     """Convert an mlx-vlm model to TurboQuant format. See module docstring."""
     _require_mlx_vlm()
@@ -72,6 +81,27 @@ def convert_vlm(
         mlp_bits=mlp_bits,
     )
 
+    if protect_expert_layers:
+        # Layer protection: keep the experts of the listed layers at
+        # `protect_bits` while the rest use the default `bits`. The cheapest
+        # quality lift for 2-bit experts — the first/last layers carry the
+        # most quant-sensitive expert work. The loader needs no knowledge of
+        # this: per-layer bits are inferred from each saved codebook's size.
+        protected = set(int(i) for i in protect_expert_layers)
+        layer_rx = re.compile(r"\.layers\.(\d+)\.")
+        base_bfp = tq_config.bits_for_path
+
+        def _bits_for_path(self, path):
+            if ".experts." in path:
+                m = layer_rx.search(path)
+                if m and int(m.group(1)) in protected:
+                    return protect_bits
+            return base_bfp(path)
+
+        tq_config.bits_for_path = types.MethodType(_bits_for_path, tq_config)
+        print(f"[INFO] Expert layer protection: layers {sorted(protected)} "
+              f"-> {protect_bits}b")
+
     print(f"[INFO] Loading {hf_path} via mlx-vlm (lazy)")
     config = load_config(hf_path)
     model = load_model(hf_path, lazy=True)
@@ -90,6 +120,40 @@ def convert_vlm(
         print(f"[INFO] Quantization completed in {time.time() - t0:.1f}s")
     finally:
         _qm._should_quantize = orig_should_quantize
+
+    if quantize_extras:
+        # Memory-constrained targets (e.g. 16 GB Mac mini): quantize the
+        # remaining bf16 modules (embeddings, dense MLP, vision tower) to
+        # mlx 8-bit affine. Polar layers are untouched (no `to_quantized`);
+        # routers and self-conditioning stay full precision — both are tiny
+        # and routing/conditioning fidelity matters more than their bytes.
+        import mlx.nn as nn
+
+        n_extra = [0]
+
+        def _extras_predicate(p, m):
+            if not hasattr(m, "to_quantized"):
+                return False
+            if "router" in p or "self_conditioning" in p:
+                return False
+            if hasattr(m, "weight") and m.weight.shape[-1] % _EXTRAS_GROUP != 0:
+                return False  # e.g. vision MLP down (4304-wide) stays bf16
+            n_extra[0] += 1
+            return True
+
+        nn.quantize(model, group_size=_EXTRAS_GROUP, bits=_EXTRAS_BITS,
+                    class_predicate=_extras_predicate)
+        mx.eval(model.parameters())
+        config["quantization"]["affine_extras"] = {
+            "bits": _EXTRAS_BITS, "group_size": _EXTRAS_GROUP,
+        }
+        print(f"[INFO] Quantized {n_extra[0]} extra modules to "
+              f"{_EXTRAS_BITS}-bit affine (embeddings/dense MLP/vision)")
+
+    if protect_expert_layers:
+        config["quantization"]["protected_expert_layers"] = sorted(
+            int(i) for i in protect_expert_layers)
+        config["quantization"]["protect_bits"] = protect_bits
 
     print(f"[INFO] Saving to {mlx_path}")
     save_weights(mlx_path, model, donate_weights=True)
@@ -123,6 +187,17 @@ def main():
                         help="Override bits for attention-block linears")
     parser.add_argument("--mlp-bits", type=int, default=None, choices=[2, 3, 4],
                         help="Override bits for MLP / MoE expert linears")
+    parser.add_argument("--quantize-extras", action="store_true",
+                        help="Also quantize embeddings, dense MLP and vision "
+                             "tower to 8-bit affine (for memory-constrained "
+                             "machines, e.g. 16 GB Macs)")
+    parser.add_argument("--protect-expert-layers", type=str, default=None,
+                        help="Comma-separated layer indices whose EXPERTS keep "
+                             "--protect-bits instead of --bits (quality lift "
+                             "for 2-bit experts, e.g. '0,1,2,27,28,29')")
+    parser.add_argument("--protect-bits", type=int, default=3,
+                        choices=[3, 4],
+                        help="Bit width for protected expert layers (default 3)")
     args = parser.parse_args()
 
     convert_vlm(
@@ -134,6 +209,11 @@ def main():
         rotation_seed=args.rotation_seed,
         attn_bits=args.attn_bits,
         mlp_bits=args.mlp_bits,
+        quantize_extras=args.quantize_extras,
+        protect_expert_layers=(
+            [int(i) for i in args.protect_expert_layers.split(",")]
+            if args.protect_expert_layers else None),
+        protect_bits=args.protect_bits,
     )
 
 

@@ -108,6 +108,25 @@ def load_turboquant_vlm(model_path, lazy=False):
     # TurboQuant checkpoints are saved from the model tree (mlx format),
     # so no weight sanitization is needed before loading.
     _prepare_polar_layers(model, weights, tq_config)
+
+    # Checkpoints converted with --quantize-extras also carry 8-bit affine
+    # modules (embeddings, dense MLP, vision tower). Affine layers have
+    # `.scales` but no `.codebook` in the saved weights.
+    affine = tq_dict.get("affine_extras")
+    if affine:
+        import mlx.nn as nn
+
+        nn.quantize(
+            model,
+            group_size=int(affine["group_size"]),
+            bits=int(affine["bits"]),
+            class_predicate=lambda p, m: (
+                hasattr(m, "to_quantized")
+                and f"{p}.scales" in weights
+                and f"{p}.codebook" not in weights
+            ),
+        )
+
     model.load_weights(list(weights.items()), strict=False)
 
     if not lazy:

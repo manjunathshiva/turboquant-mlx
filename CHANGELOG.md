@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-12
+
+### Added — 16 GB Mac support for VLM/diffusion models
+
+- **`convert_vlm --protect-expert-layers 0,1,2,27,28,29 --protect-bits 3`** —
+  expert layer protection: keep the listed layers' experts at 3-bit while the
+  rest drop to `--bits` (e.g. 2-bit). On DiffusionGemma-26B-A4B, unprotected
+  2-bit experts break arithmetic entirely (17×23 → "3"); protecting the
+  first/last three layers restores it (391, correct multi-step chains) for
+  +0.2 GB.
+- **`convert_vlm --quantize-extras`** — quantizes the remaining bf16 modules
+  (embeddings, dense per-layer MLP, vision tower) to 8-bit affine; routers
+  and self-conditioning stay full precision. `load_turboquant_vlm` applies
+  the matching `nn.quantize` on load (affine modules are recognized by
+  having `.scales` without `.codebook`). Mini build of DiffusionGemma:
+  **9.79 GB** on disk, ~12.4 GB peak at `--max-tokens 120` — vs 13.84 GB /
+  OOM before.
+- **`generate_vlm --max-denoising-steps / --max-canvas-length`** — speed and
+  memory knobs for diffusion sampling (quantized models need more denoise
+  steps to converge; capping trades quality for speed).
+
+### Changed
+
+- `_prepare_polar_layers` now infers each layer's bit width from its saved
+  **codebook size** (2^bits entries) instead of re-deriving it from path
+  rules — required for per-layer bit assignments (layer protection) and
+  immune to config/path drift.
+
 ## [0.7.1] - 2026-06-12
 
 ### Added
