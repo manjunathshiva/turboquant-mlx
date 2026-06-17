@@ -326,6 +326,42 @@ Also close any other GPU users (Chrome/Electron apps, Final Cut, Xcode
 simulators) before launching — even an idle Chrome can be holding 1-2 GB
 of unified memory.
 
+#### Compress the KV cache while serving
+
+`--prompt-cache-bytes` caps how much the *reuse pool* across requests can
+grow, but each in-flight request still holds an **fp16** KV cache that
+scales with context length. On a memory-constrained box — e.g. a streaming
+120B on 16 GB driven by an agentic loop (Aider, Claude Code) whose prompts
+grow every turn — that per-request cache is usually what runs you out of
+memory first. `turboquant-serve` adds the same KV-quant flags as
+`turboquant-generate` to shrink it ~4x in place:
+
+```bash
+turboquant-serve \
+    --model manjunathshiva/Nemotron-3-Super-120B-A12B-tq3 \
+    --port 8080 \
+    --kv-k-bits 8 --kv-v-bits 3 \   # mixed-precision KV (recommended default)
+    --kv-min-tokens 128 \           # keep first 128 tokens fp16 (attention sinks)
+    --prompt-concurrency 1
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--kv-k-bits N` / `--kv-v-bits M` | Mixed-precision KV; K8/V3 is the recommended default |
+| `--kv-bits N` | Symmetric K=V=N (legacy; not recommended below 3) |
+| `--kv-min-tokens N` | Keep first N cached tokens in fp16 (sink protection) |
+| `--kv-group-size G` | Hadamard rotation group size (default 64) |
+
+These are processed by `turboquant-serve` and stripped before the remaining
+flags forward to `mlx_lm.server`. See [KV Cache Compression](#kv-cache-compression)
+below for how to choose bit-widths and the speed/quality trade-offs.
+
+> **Single-stream when KV-quant is on.** TurboQuant KV caches don't support
+> the cross-request `merge` that `mlx_lm.server`'s batch generator needs, so
+> enabling any `--kv-*` flag makes the server serve requests sequentially.
+> That's the right trade-off for a single-user setup; for a multi-client
+> server it means concurrent requests queue rather than batch.
+
 ---
 
 ## KV Cache Compression

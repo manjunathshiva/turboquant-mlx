@@ -11,15 +11,36 @@ Non-TurboQuant models pass straight through to the standard mlx-lm
 loader, so this server works as a drop-in replacement for
 `mlx_lm.server` regardless of model type.
 
+TurboQuant KV-cache compression
+--------------------------------
+`mlx_lm.server` has no native KV-quantization flags, so this wrapper adds
+its own (`--kv-bits`, `--kv-k-bits`/`--kv-v-bits`, `--kv-min-tokens`,
+`--kv-group-size`) — the same set exposed by `turboquant-generate`. When
+enabled, every per-request prompt cache has its standard ``KVCache`` layers
+swapped for ``TurboQuantKVCache`` (other cache types — RotatingKVCache for
+sliding-window / Mamba layers — are left untouched, so hybrid models like
+GPT-OSS and Nemotron-H keep working). This shrinks each request's KV
+footprint ~4x, which is the real lever on memory-constrained boxes (e.g. a
+streaming 120B on 16 GB) where Aider-style agentic loops grow context fast.
+
+Note: enabling KV quantization forces single-stream (non-batched) serving,
+because TurboQuant caches do not support the cross-request ``merge`` the
+batch generator needs. That is the right trade-off for single-user setups;
+pair it with ``--prompt-concurrency 1`` for a multi-client server.
+
 Usage:
     turboquant-serve --model manjunathshiva/Nemotron-3-Super-120B-A12B-tq3
     turboquant-serve --model <path> --host 0.0.0.0 --port 8080
+    # K8/V3 mixed-precision KV (recommended default), sink-protect first 128:
+    turboquant-serve --model <tq-path> --kv-k-bits 8 --kv-v-bits 3 \
+        --kv-min-tokens 128 --prompt-concurrency 1
 
-All flags forward to `mlx_lm.server`; see `--help`.
+All other flags forward to `mlx_lm.server`; see `--help`.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 _MIN_MLX_LM = (0, 31, 3)
@@ -114,9 +135,87 @@ def _patch_loader() -> None:
     _utils_mod.load = _tq_aware_load
 
 
+def _extract_kv_args(argv):
+    """Peel TurboQuant KV-cache flags off ``argv`` before mlx_lm.server sees it.
+
+    `mlx_lm.server`'s argparse would reject these as unknown, so we parse
+    them here with a permissive pre-parser and hand the *remaining* args back
+    to the server unchanged.
+
+    Returns ``(kv_config | None, remaining_argv)``. ``kv_config`` is ``None``
+    when no KV flag was given (KV quantization stays off), otherwise a kwargs
+    dict for ``convert_cache_to_turboquant``.
+    """
+    # add_help=False: let -h/--help fall through to mlx_lm.server's parser.
+    # allow_abbrev=False: never consume a server flag via prefix matching.
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--kv-bits", type=int, default=None)
+    parser.add_argument("--kv-k-bits", type=int, default=None)
+    parser.add_argument("--kv-v-bits", type=int, default=None)
+    parser.add_argument("--kv-min-tokens", type=int, default=0)
+    parser.add_argument("--kv-group-size", type=int, default=64)
+    ns, remaining = parser.parse_known_args(argv)
+
+    if ns.kv_bits is not None and (
+        ns.kv_k_bits is not None or ns.kv_v_bits is not None
+    ):
+        sys.stderr.write(
+            "ERROR: --kv-bits is mutually exclusive with "
+            "--kv-k-bits/--kv-v-bits\n"
+        )
+        sys.exit(2)
+    if (ns.kv_k_bits is None) != (ns.kv_v_bits is None):
+        sys.stderr.write(
+            "ERROR: --kv-k-bits and --kv-v-bits must be set together\n"
+        )
+        sys.exit(2)
+
+    if ns.kv_bits is None and ns.kv_k_bits is None:
+        return None, remaining
+
+    kv_config = dict(
+        tq_bits=ns.kv_bits,
+        k_bits=ns.kv_k_bits,
+        v_bits=ns.kv_v_bits,
+        group_size=ns.kv_group_size,
+        min_tokens_before_quant=ns.kv_min_tokens,
+    )
+    return kv_config, remaining
+
+
+def _patch_kv_cache(kv_config) -> None:
+    """Wrap `mlx_lm.server.make_prompt_cache` to emit TurboQuant KV caches.
+
+    Both the batchability probe and the per-request cache build call the bare
+    name `make_prompt_cache(model)` inside `mlx_lm.server`, so patching that
+    binding is sufficient. Standard ``KVCache`` layers become
+    ``TurboQuantKVCache``; other cache types are left as-is. Because the
+    converted caches lack ``merge``, the server's batchability probe sees them
+    and falls back to sequential serving automatically.
+    """
+    import mlx_lm.server as _server_mod
+    from turboquant_mlx.layers.polar_kv_cache import (
+        convert_cache_to_turboquant,
+    )
+
+    _orig_make = _server_mod.make_prompt_cache
+
+    def _tq_make_prompt_cache(model, *args, **kwargs):
+        cache = _orig_make(model, *args, **kwargs)
+        return convert_cache_to_turboquant(cache, **kv_config)
+
+    _server_mod.make_prompt_cache = _tq_make_prompt_cache
+
+
 def main() -> None:
     _check_mlx_lm_version()
     _patch_loader()
+
+    kv_config, remaining = _extract_kv_args(sys.argv[1:])
+    if kv_config is not None:
+        _patch_kv_cache(kv_config)
+    # Hand mlx_lm.server only the args it understands.
+    sys.argv = [sys.argv[0], *remaining]
 
     from mlx_lm.server import main as _mlx_lm_server_main
 
@@ -124,6 +223,17 @@ def main() -> None:
         "TurboQuant-MLX serve  ·  OpenAI-compatible HTTP server "
         "(backend: mlx_lm.server, TurboQuant-aware loader)\n"
     )
+    if kv_config is not None:
+        if kv_config["tq_bits"] is not None:
+            desc = f"K=V={kv_config['tq_bits']}-bit"
+        else:
+            desc = f"K={kv_config['k_bits']}-bit, V={kv_config['v_bits']}-bit"
+        sys.stderr.write(
+            f"[turboquant-serve] TurboQuant KV cache: {desc}, "
+            f"group={kv_config['group_size']}, "
+            f"sink={kv_config['min_tokens_before_quant']} "
+            "(forces single-stream serving)\n"
+        )
     _mlx_lm_server_main()
 
 

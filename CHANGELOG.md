@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`turboquant-serve` KV-cache quantization** — the server now accepts the
+  same KV-quant flags as `turboquant-generate` (`--kv-bits`, `--kv-k-bits` /
+  `--kv-v-bits`, `--kv-min-tokens`, `--kv-group-size`). `mlx_lm.server` has no
+  native KV-quant option, so these are parsed by the wrapper and stripped
+  before the remaining flags forward on; when set, every per-request prompt
+  cache has its standard `KVCache` layers swapped for `TurboQuantKVCache`
+  (other cache types — sliding-window / Mamba — pass through untouched, so
+  hybrid models like GPT-OSS and Nemotron-H keep working). This shrinks each
+  in-flight request's KV ~4x, which is the dominant memory lever for agentic
+  loops (Aider, Claude Code) on memory-constrained boxes — distinct from
+  `--prompt-cache-bytes`, which only bounds the cross-request reuse pool.
+  Enabling KV-quant forces single-stream serving (TurboQuant caches lack the
+  `merge` the batch generator needs).
+
 ## [0.8.0] - 2026-06-12
 
 ### Added — 16 GB Mac support for VLM/diffusion models
