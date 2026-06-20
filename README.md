@@ -694,9 +694,13 @@ Once the cache policy is reasonable, **disk bandwidth is the wall** — for MoE 
 
 | Knob | Default | What it does |
 |------|---------|--------------|
+| `--max-active-experts K` | `4` | **K-reduction** — caps router `top_k` to `min(native, K)` per MoE block, so the switch streams fewer experts/token. `argpartition` selects fewer and `norm_topk_prob` renormalizes the gates, so it stays a clean reduced-K MoE. On Qwen3.6-35B-A3B (native top-8) **K=8→4 is byte-identical** on the 6-test stress harness and cuts streamed disk reads **~2.09×** (1.4× faster decode in the disk-bound regime); K=2 collapses (broken JSON). `4` = safe floor; `0` = native routing. |
+| `--use-page-cache` / `--no-page-cache` | **auto** | **Trust-OS** — whether expert reads use the OS page cache (vs `F_NOCACHE`). On a roomy machine where the model fits in free RAM, leaving the page cache on returns LRU-eviction re-reads from warm RAM instead of disk: **2.44× faster decode** on the 35B at a small budget (7.58 → 18.50 tok/s), same hit-rate/RSS. Auto-enables only when model files are `< 0.6× total RAM`, so a 16 GB mini on a 70 GB MoE keeps `F_NOCACHE` and never thrashes. |
 | read-coalescing | **on** | Merges contiguous missed experts into one `os.pread`. Bit-identical, free, ~5% faster when disk-bound. No flag. |
 | `--prefetch-ahead N` | `0` (off) | Speculatively prefetch the next *N* layers' experts (predicted from the previous token's routing) on a background thread. ~+6% on fast NVMe with spare bandwidth; **self-disables** if the drive proves bandwidth-bound (e.g. a saturated USB bus), so it's safe to set `1`. |
 | `--pin-file pin.json` | none | Keep a calibrated hot-expert set permanently resident. **Experimental** — measured net-negative vs pure LRU on a 122B (static pinning costs LRU's adaptivity). For experimentation only. |
+
+The `--max-active-experts` and page-cache levers are ports of [Flash-MoE](https://github.com/danveloper/flash-moe)'s K-reduction and "trust the OS" findings (blueprint: Apple [*LLM in a Flash*](https://arxiv.org/abs/2312.11514)), measured on the TurboQuant streaming path.
 
 Generate `pin.json` (and a co-activation `perm.json` for the optional `stream/repack_experts.py` relayout) with `python -m turboquant_mlx.stream.calibrate_experts`.
 
