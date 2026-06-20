@@ -55,10 +55,19 @@ class SafetensorsExpertReader:
     ----------
     model_path : str
         Directory holding ``model*.safetensors``.
+    use_page_cache : bool
+        If False (default), set ``F_NOCACHE`` so expert reads bypass the OS
+        unified buffer cache — correct when the model is much larger than RAM
+        (16 GB mini streaming a big MoE), where letting the page cache grow
+        would thrash. If True ("trust the OS", Flash-MoE's finding), leave the
+        page cache enabled so LRU-eviction re-reads come back from warm RAM
+        instead of disk — a win on roomy machines where the model file fits in
+        free RAM. See ``trust_os_ab.py`` for the measured tradeoff.
     """
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, use_page_cache: bool = False):
         self.model_path = model_path
+        self.use_page_cache = use_page_cache
         files = sorted(glob.glob(os.path.join(model_path, "model*.safetensors")))
         if not files:
             raise FileNotFoundError(f"No model*.safetensors in {model_path}")
@@ -68,10 +77,11 @@ class SafetensorsExpertReader:
 
         for fi, f in enumerate(files):
             fd = os.open(f, os.O_RDONLY)
-            try:
-                fcntl.fcntl(fd, _F_NOCACHE, 1)
-            except OSError:
-                pass  # F_NOCACHE is best-effort
+            if not use_page_cache:
+                try:
+                    fcntl.fcntl(fd, _F_NOCACHE, 1)
+                except OSError:
+                    pass  # F_NOCACHE is best-effort
             self._fds.append(fd)
             header_len = struct.unpack("<Q", os.pread(fd, 8, 0))[0]
             header = json.loads(os.pread(fd, header_len, 8))

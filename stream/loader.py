@@ -10,6 +10,9 @@ shared expert) stays resident as usual.
 
 from __future__ import annotations
 
+import glob
+import os
+
 import mlx.core as mx
 
 from turboquant_mlx.generate import load_turboquant, resolve_model_path
@@ -20,10 +23,71 @@ from .streaming_switch import ExpertCache, StreamingSwitchLinear
 
 _PROJS = ("gate_proj", "up_proj", "down_proj")
 
+# When the model file fits comfortably in RAM, trusting the OS page cache makes
+# LRU-eviction re-reads come back from warm RAM instead of disk — measured 2.44x
+# faster decode on a streamed 35B-A3B (scripts/flash_moe/trust_os_ab.py). When
+# the model is larger than RAM (16 GB mini on a 70 GB MoE), the page cache would
+# thrash and F_NOCACHE is correct. This fraction is the "comfortably fits" line.
+_PAGE_CACHE_RAM_FRACTION = 0.6
+
+
+def _total_ram_bytes() -> int:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError):
+        import subprocess
+        return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]))
+
+
+def _auto_page_cache(model_path: str) -> bool:
+    """True iff the model's safetensors fit comfortably in RAM (page cache helps)."""
+    try:
+        model_bytes = sum(os.path.getsize(f)
+                          for f in glob.glob(os.path.join(model_path, "model*.safetensors")))
+        ram = _total_ram_bytes()
+    except Exception:
+        return False  # any uncertainty -> the always-safe F_NOCACHE path
+    fits = model_bytes < _PAGE_CACHE_RAM_FRACTION * ram
+    print(f"[stream] page-cache auto: model {model_bytes/1e9:.1f} GB vs RAM {ram/1e9:.1f} GB "
+          f"-> {'trust-OS (F_NOCACHE off)' if fits else 'F_NOCACHE on'} "
+          f"(override with use_page_cache=/--use-page-cache)")
+    return fits
+
+
+def _cap_active_experts(layers, max_active: int) -> None:
+    """Cap router top_k on every MoE block to ``min(native, max_active)``.
+
+    The "K-reduction" lever (Flash-MoE): when experts stream from disk, per-token
+    disk I/O scales with the number of *active* experts, not the total. Lowering
+    top_k is mechanically clean — ``argpartition`` then selects fewer experts and
+    ``norm_topk_prob`` renormalizes the gate weights over them — and the streaming
+    switch loads only the selected experts. Measured on Qwen3.6-35B-A3B-tq3-g32
+    (256 experts, native top_k=8): 8->4 is byte-identical on the 6-test stress
+    harness and cuts streamed disk reads ~2x (78.9->37.8 GB) for ~1.4x decode in
+    the disk-bound regime; K=2 collapses (broken JSON). Caps only — never raises.
+    """
+    if not max_active or max_active <= 0:
+        return
+    changed = []
+    for layer in layers:
+        mlp = getattr(layer, "mlp", None)
+        if mlp is None or not hasattr(mlp, "top_k") or not hasattr(mlp, "switch_mlp"):
+            continue
+        native = int(mlp.top_k)
+        new_k = min(native, max_active)
+        if new_k != native:
+            mlp.top_k = new_k
+            changed.append(native)
+    if changed:
+        print(f"[stream] K-reduction: capped router top_k {changed[0]}->{min(changed[0], max_active)} "
+              f"on {len(changed)} MoE blocks (~2x less disk I/O; pass "
+              f"max_active_experts=0 / --max-active-experts 0 to use native routing)")
+
 
 def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
                    prefetch_workers: int = 8, prefetch_ahead: int = 0,
-                   pin_file: str | None = None):
+                   pin_file: str | None = None, max_active_experts: int = 4,
+                   use_page_cache: bool | None = None):
     """Returns (model, tokenizer, cache).
 
     cache_budget_gb bounds total resident expert memory (LRU-evicted).
@@ -32,10 +96,20 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
     (predicted from the previous token's routing); 0 disables prefetch.
     pin_file is an optional JSON {"pin": [[layer, expert], ...]} of hot experts
     to keep permanently resident (never LRU-evicted) — see calibrate_experts.py.
+    max_active_experts caps router top_k to min(native, this) on every MoE block
+    (the Flash-MoE K-reduction lever: ~2x less streamed disk I/O at no quality
+    cost up to K=4 on validated models). Default 4; set 0 to use native routing.
+    use_page_cache controls the OS page cache for expert reads. None (default)
+    auto-decides by model-size-vs-RAM: trust the OS (page cache on) when the
+    model fits comfortably in RAM (~2.4x faster decode), F_NOCACHE when it does
+    not (avoids page-cache thrash on a memory-constrained machine). True/False
+    force it.
     """
     local_path = str(resolve_model_path(model_path))
+    if use_page_cache is None:
+        use_page_cache = _auto_page_cache(local_path)
     model, tok = load_turboquant(local_path, lazy=True, fast=fast)
-    reader = SafetensorsExpertReader(local_path)
+    reader = SafetensorsExpertReader(local_path, use_page_cache=use_page_cache)
     cache = ExpertCache(
         reader, int(cache_budget_gb * 1e9),
         prefetch_workers=prefetch_workers,
@@ -104,4 +178,5 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
     pin_note = f", pinned {len(pin_keys)} hot expert-projections" if pin_keys else ""
     print(f"[stream] swapped {swapped} expert projections to streaming "
           f"(budget {cache_budget_gb:.1f} GB{pin_note})")
+    _cap_active_experts(layers, max_active_experts)
     return model, tok, cache

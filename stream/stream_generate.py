@@ -53,6 +53,17 @@ def main():
     p.add_argument("--pin-file", default=None,
                    help="JSON {'pin': [[layer, expert], ...]} of hot experts to keep "
                         "permanently resident (from calibrate_experts.py).")
+    p.add_argument("--max-active-experts", type=int, default=4,
+                   help="Cap router top_k to min(native, this) on every MoE block "
+                        "(Flash-MoE K-reduction: ~2x less streamed disk I/O at no quality "
+                        "cost up to K=4 on validated models). Default 4; 0 = native routing.")
+    p.add_argument("--use-page-cache", dest="use_page_cache", action="store_true",
+                   default=None,
+                   help="Force the OS page cache ON for expert reads ('trust the OS'; "
+                        "~2.4x faster decode when the model fits in RAM). Default: auto "
+                        "by model-size-vs-RAM.")
+    p.add_argument("--no-page-cache", dest="use_page_cache", action="store_false",
+                   help="Force F_NOCACHE (page cache off). Default: auto by model-size-vs-RAM.")
     p.add_argument("--fast", action="store_true", help="Disable QJL correction for faster decode.")
     p.add_argument("--no-chat-template", action="store_true")
     args = p.parse_args()
@@ -61,7 +72,8 @@ def main():
     model, tok, cache = load_streaming(
         args.model, cache_budget_gb=args.cache_budget_gb, fast=args.fast,
         prefetch_workers=args.prefetch_workers, prefetch_ahead=args.prefetch_ahead,
-        pin_file=args.pin_file,
+        pin_file=args.pin_file, max_active_experts=args.max_active_experts,
+        use_page_cache=args.use_page_cache,
     )
     print(f"[stream] loaded in {time.time() - t0:.1f}s | resident RSS={_rss_gb():.2f} GB")
 
