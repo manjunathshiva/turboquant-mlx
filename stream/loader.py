@@ -32,9 +32,9 @@ _PAGE_CACHE_RAM_FRACTION = 0.6
 
 
 def _total_ram_bytes() -> int:
-    try:
+    try:  # AttributeError too: os.sysconf is absent on some platforms (Windows)
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (ValueError, OSError):
+    except (ValueError, OSError, AttributeError):
         import subprocess
         return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]))
 
@@ -42,8 +42,12 @@ def _total_ram_bytes() -> int:
 def _auto_page_cache(model_path: str) -> bool:
     """True iff the model's safetensors fit comfortably in RAM (page cache helps)."""
     try:
-        model_bytes = sum(os.path.getsize(f)
-                          for f in glob.glob(os.path.join(model_path, "model*.safetensors")))
+        # glob.escape so a model_path with [ ] etc. still matches; no files ->
+        # we can't size the model, so fail safe to F_NOCACHE rather than 0 bytes.
+        files = glob.glob(os.path.join(glob.escape(model_path), "model*.safetensors"))
+        if not files:
+            return False
+        model_bytes = sum(os.path.getsize(f) for f in files)
         ram = _total_ram_bytes()
     except Exception:
         return False  # any uncertainty -> the always-safe F_NOCACHE path

@@ -68,7 +68,8 @@ class SafetensorsExpertReader:
     def __init__(self, model_path: str, use_page_cache: bool = False):
         self.model_path = model_path
         self.use_page_cache = use_page_cache
-        files = sorted(glob.glob(os.path.join(model_path, "model*.safetensors")))
+        # glob.escape so a model_path containing [ ] etc. still matches literally.
+        files = sorted(glob.glob(os.path.join(glob.escape(model_path), "model*.safetensors")))
         if not files:
             raise FileNotFoundError(f"No model*.safetensors in {model_path}")
         self._files = files

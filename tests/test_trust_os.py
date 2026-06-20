@@ -36,6 +36,13 @@ def test_just_over_fraction_uses_nocache(monkeypatch):
     assert loader._auto_page_cache("x") is False
 
 
+def test_no_files_fails_safe(monkeypatch):
+    # special-char path / missing shards -> empty glob -> must NOT trust-OS on 0 bytes
+    monkeypatch.setattr(loader, "_total_ram_bytes", lambda: 64 * 10**9)
+    monkeypatch.setattr(loader.glob, "glob", lambda pat: [])
+    assert loader._auto_page_cache("/weird/[path]") is False
+
+
 def test_ram_probe_failure_fails_safe(monkeypatch):
     def boom():
         raise OSError("no ram info")
