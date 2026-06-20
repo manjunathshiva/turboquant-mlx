@@ -6,6 +6,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-20
+
+### Added — Flash-MoE streaming levers
+
+- **`load_streaming(max_active_experts=4)` / `stream_generate --max-active-experts`**
+  — K-reduction: caps router `top_k` to `min(native, K)` on every MoE block so
+  the streaming switch pages fewer experts per token. `argpartition` selects
+  fewer experts and `norm_topk_prob` renormalizes the gates, so it stays a clean
+  reduced-K MoE. On streamed Qwen3.6-35B-A3B (256 experts, native top-8),
+  **K=8→4 is byte-identical** on the 6-test stress harness and cuts streamed
+  disk reads **~2.09×** (1.4× faster decode in the disk-bound regime); K=2
+  collapses (broken JSON). Default `4` is a safe floor; `0` restores native
+  routing. Ported from [Flash-MoE](https://github.com/danveloper/flash-moe).
+- **`load_streaming(use_page_cache=…)` / `stream_generate --use-page-cache` /
+  `--no-page-cache`** — "trust the OS": the reader's `F_NOCACHE` flag is now
+  optional. On a machine where the model fits in free RAM, leaving the OS page
+  cache on returns LRU-eviction re-reads from warm RAM instead of disk —
+  measured **2.44× faster decode** on the 35B at a small cache budget (7.58 →
+  18.50 tok/s), same hit-rate and RSS. The default auto-enables it only when the
+  model's safetensors are `< 0.6×` total RAM, so a 16 GB mini streaming a 70 GB
+  MoE keeps `F_NOCACHE` and never thrashes.
+
+### Changed
+
+- Streaming now defaults to `max_active_experts=4` (K-reduction on) and
+  size-aware page-cache selection. Both are quality-neutral on validated models
+  and overridable; pass `max_active_experts=0` / `--no-page-cache` for the prior
+  behavior.
+
 ## [0.9.0] - 2026-06-17
 
 ### Added
