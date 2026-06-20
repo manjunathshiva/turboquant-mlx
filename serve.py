@@ -28,12 +28,27 @@ because TurboQuant caches do not support the cross-request ``merge`` the
 batch generator needs. That is the right trade-off for single-user setups;
 pair it with ``--prompt-concurrency 1`` for a multi-client server.
 
+Expert streaming
+----------------
+Passing ``--cache-budget-gb`` routes the loader through
+``turboquant_mlx.stream.load_streaming`` instead of the resident loader, so a
+MoE whose weights exceed RAM (e.g. a 122B on a 16 GB Mac mini) can be *served*
+over the OpenAI API — only the router-selected experts are paged from disk per
+token. The Flash-MoE streaming levers come with it: ``--max-active-experts``
+(K-reduction, default 4 → ~2x less disk I/O) and ``--use-page-cache`` /
+``--no-page-cache`` (auto by model-size-vs-RAM; trust-OS is ~2.4x faster decode
+when the model fits free RAM, F_NOCACHE otherwise). Streaming is a single-user
+path — pair with ``--prompt-concurrency 1``.
+
 Usage:
     turboquant-serve --model manjunathshiva/Nemotron-3-Super-120B-A12B-tq3
     turboquant-serve --model <path> --host 0.0.0.0 --port 8080
     # K8/V3 mixed-precision KV (recommended default), sink-protect first 128:
     turboquant-serve --model <tq-path> --kv-k-bits 8 --kv-v-bits 3 \
         --kv-min-tokens 128 --prompt-concurrency 1
+    # Stream a 122B on a 16 GB mini (+ KV-quant for long agentic context):
+    turboquant-serve --model manjunathshiva/qwen3.5-122b-tq3 \
+        --cache-budget-gb 4 --kv-k-bits 8 --kv-v-bits 3 --prompt-concurrency 1
 
 All other flags forward to `mlx_lm.server`; see `--help`.
 """
@@ -74,13 +89,17 @@ def _check_mlx_lm_version() -> None:
         sys.exit(1)
 
 
-def _patch_loader() -> None:
+def _patch_loader(stream_config=None) -> None:
     """Replace `mlx_lm.server.load` with a TurboQuant-aware wrapper.
 
     The server calls the bare name `load(...)` after `from .utils import
     load`, so patching the binding inside `mlx_lm.server` is what we need.
     We also patch `mlx_lm.utils.load` for any other callers that import
     from utils directly.
+
+    When ``stream_config`` is given, TurboQuant models are loaded through
+    ``load_streaming`` (experts paged from disk) instead of the resident
+    ``load_turboquant``; non-TurboQuant models always pass through to mlx-lm.
     """
     import mlx_lm.server as _server_mod
     import mlx_lm.utils as _utils_mod
@@ -92,6 +111,8 @@ def _patch_loader() -> None:
     # NemotronHConfig MLP-block-type patch) before any model loads.
     import turboquant_mlx.compat  # noqa: F401
     from turboquant_mlx.generate import load_turboquant
+    if stream_config is not None:
+        from turboquant_mlx.stream.loader import load_streaming
 
     def _tq_aware_load(
         path_or_hf_repo,
@@ -123,10 +144,19 @@ def _patch_loader() -> None:
                 "models; ignoring.\n"
             )
 
-        sys.stderr.write(
-            f"[turboquant-serve] Loading TurboQuant model from {model_path}\n"
-        )
-        model, tokenizer = load_turboquant(model_path, lazy=lazy)
+        if stream_config is not None:
+            sys.stderr.write(
+                f"[turboquant-serve] Streaming TurboQuant model from {model_path} "
+                f"(cache_budget={stream_config['cache_budget_gb']} GB)\n"
+            )
+            # load_streaming returns (model, tok, cache); the cache stays alive
+            # via the StreamingSwitchLinear modules that reference it.
+            model, tokenizer, _cache = load_streaming(model_path, **stream_config)
+        else:
+            sys.stderr.write(
+                f"[turboquant-serve] Loading TurboQuant model from {model_path}\n"
+            )
+            model, tokenizer = load_turboquant(model_path, lazy=lazy)
         if return_config:
             return model, tokenizer, cfg
         return model, tokenizer
@@ -183,6 +213,40 @@ def _extract_kv_args(argv):
     return kv_config, remaining
 
 
+def _extract_stream_args(argv):
+    """Peel expert-streaming flags off ``argv`` before mlx_lm.server sees them.
+
+    ``--cache-budget-gb`` is the trigger: when present, TurboQuant models load
+    through ``load_streaming`` with the given budget and Flash-MoE levers.
+    Returns ``(stream_config | None, remaining_argv)``. The other streaming
+    flags are no-ops without a budget (and are documented as such).
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--cache-budget-gb", type=float, default=None)
+    parser.add_argument("--max-active-experts", type=int, default=4)
+    parser.add_argument("--prefetch-workers", type=int, default=8)
+    parser.add_argument("--prefetch-ahead", type=int, default=0)
+    parser.add_argument("--pin-file", default=None)
+    parser.add_argument("--use-page-cache", dest="use_page_cache",
+                        action="store_true", default=None)
+    parser.add_argument("--no-page-cache", dest="use_page_cache",
+                        action="store_false")
+    ns, remaining = parser.parse_known_args(argv)
+
+    if ns.cache_budget_gb is None:
+        return None, remaining
+
+    stream_config = dict(
+        cache_budget_gb=ns.cache_budget_gb,
+        max_active_experts=ns.max_active_experts,
+        use_page_cache=ns.use_page_cache,
+        prefetch_workers=ns.prefetch_workers,
+        prefetch_ahead=ns.prefetch_ahead,
+        pin_file=ns.pin_file,
+    )
+    return stream_config, remaining
+
+
 def _patch_kv_cache(kv_config) -> None:
     """Wrap `mlx_lm.server.make_prompt_cache` to emit TurboQuant KV caches.
 
@@ -209,9 +273,10 @@ def _patch_kv_cache(kv_config) -> None:
 
 def main() -> None:
     _check_mlx_lm_version()
-    _patch_loader()
 
     kv_config, remaining = _extract_kv_args(sys.argv[1:])
+    stream_config, remaining = _extract_stream_args(remaining)
+    _patch_loader(stream_config)
     if kv_config is not None:
         _patch_kv_cache(kv_config)
     # Hand mlx_lm.server only the args it understands.
@@ -223,6 +288,15 @@ def main() -> None:
         "TurboQuant-MLX serve  ·  OpenAI-compatible HTTP server "
         "(backend: mlx_lm.server, TurboQuant-aware loader)\n"
     )
+    if stream_config is not None:
+        pc = "auto" if stream_config["use_page_cache"] is None else (
+            "on" if stream_config["use_page_cache"] else "off")
+        sys.stderr.write(
+            f"[turboquant-serve] Expert streaming: cache_budget="
+            f"{stream_config['cache_budget_gb']} GB, "
+            f"max_active_experts={stream_config['max_active_experts']}, "
+            f"page_cache={pc} (single-user; use --prompt-concurrency 1)\n"
+        )
     if kv_config is not None:
         if kv_config["tq_bits"] is not None:
             desc = f"K=V={kv_config['tq_bits']}-bit"

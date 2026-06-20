@@ -262,6 +262,28 @@ for chunk in resp:
 All `mlx_lm.server` flags forward unchanged — see `turboquant-serve --help`
 for `--host`, `--temp`, `--top-p`, `--prompt-cache-size`, etc.
 
+#### Serve a model bigger than RAM (expert streaming)
+
+Passing `--cache-budget-gb` routes the loader through the streaming path, so a
+MoE whose weights exceed RAM can be **served** over the OpenAI API — only the
+router-selected experts are paged from disk per token. This is how you put a
+~50 GB **122B on a 16 GB Mac mini** behind Claude Code / Aider:
+
+```bash
+turboquant-serve \
+    --model manjunathshiva/qwen3.5-122b-tq3 \
+    --cache-budget-gb 4 \
+    --kv-k-bits 8 --kv-v-bits 3 --kv-min-tokens 128 \
+    --prompt-concurrency 1 --port 8080
+```
+
+The [Flash-MoE streaming levers](#tuning-the-streaming-reader-v061) ride along:
+`--max-active-experts` (K-reduction, default `4` → ~2× less disk I/O) and
+`--use-page-cache` / `--no-page-cache` (auto by model-size-vs-RAM — trust-OS is
+~2.4× faster decode when the model fits free RAM, `F_NOCACHE` otherwise). Pair
+with `--kv-*` to compress the growing KV cache of long agentic loops, and
+`--prompt-concurrency 1` since streaming is a single-user path.
+
 > **Note**: `mlx_lm.server` is intended for development and local use, not
 > production. It does not implement authentication or rate limiting.
 

@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-20
+
+### Added — expert streaming in `turboquant-serve`
+
+- **`turboquant-serve --cache-budget-gb N`** routes the OpenAI-compatible server
+  through `load_streaming`, so a MoE whose weights exceed RAM can be *served*
+  over the API — only router-selected experts are paged from disk per token.
+  This puts a ~50 GB **122B on a 16 GB Mac mini** behind Claude Code / Aider.
+  The Flash-MoE levers from 0.10.0 ride along: **`--max-active-experts`**
+  (K-reduction, default 4) and **`--use-page-cache` / `--no-page-cache`**
+  (auto by model-size-vs-RAM). Composes with the `--kv-*` KV-quant flags;
+  streaming is single-user, so pair with `--prompt-concurrency 1`. Verified
+  end-to-end: the streamed model serves coherent completions over
+  `/v1/chat/completions`.
+
 ## [0.10.0] - 2026-06-20
 
 ### Added — Flash-MoE streaming levers
