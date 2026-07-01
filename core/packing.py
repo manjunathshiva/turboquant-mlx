@@ -39,10 +39,10 @@ def pack_trits(indices: mx.array) -> mx.array:
     n_packed = n // TRITS_PER_U32
     idx = indices.astype(mx.uint32).reshape(*batch_shape, n_packed, TRITS_PER_U32)
 
-    packed = mx.zeros((*batch_shape, n_packed), dtype=mx.uint32)
-    for i in range(TRITS_PER_U32):
-        packed = packed + idx[..., i] * mx.array(_POW3[i], dtype=mx.uint32)
-    return packed
+    # packed[..., j] = sum_i idx[..., j, i] * 3**i, vectorized over the 20 trits.
+    # Max sum is 3**20 - 1 = 3,486,784,400 < 2**32, so uint32 never overflows.
+    pow3 = mx.array(_POW3, dtype=mx.uint32)  # (20,)
+    return mx.sum(idx * pow3, axis=-1)  # (..., n_packed)
 
 
 def unpack_trits(packed: mx.array, count: int) -> mx.array:
@@ -55,7 +55,7 @@ def unpack_trits(packed: mx.array, count: int) -> mx.array:
     Returns:
         Unpacked indices of shape (..., count), dtype uint8, values in {0,1,2}.
     """
-    *batch_shape, m = packed.shape
+    *batch_shape, _ = packed.shape
     pe = mx.expand_dims(packed, axis=-1)  # (..., M, 1)
     pow3 = mx.array(_POW3, dtype=mx.uint32)  # (20,)
     trits = (pe // pow3) % mx.array(3, dtype=mx.uint32)  # (..., M, 20)

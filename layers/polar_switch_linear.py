@@ -277,6 +277,13 @@ class PolarQuantizedSwitchLinear(nn.Module):
                 f"group_size ({group_size})"
             )
 
+        # Ternary experts are stored in the 2-bit slot regardless of the
+        # requested attention bit-width, so force bits=2: polar_quantize_weight
+        # rejects ternary with any other storage width, and a caller leaving the
+        # default bits=3 would otherwise raise mid-quantization.
+        if ternary:
+            bits = 2
+
         # Pre-allocate output arrays to avoid accumulating large lists
         n_groups = input_dims // group_size
         if ternary:

@@ -148,6 +148,18 @@ def test_quantize_emits_trit_format():
     assert float(mx.abs(ref - deq).max()) == 0.0
 
 
+def test_from_switch_linear_ternary_forces_bits_2():
+    """ternary=True with the default bits=3 must not raise (bits forced to 2)."""
+    mx.random.seed(9)
+    fw = mx.random.normal((8, 64, 128)).astype(mx.float16)
+    layer = PolarQuantizedSwitchLinear.from_switch_linear(
+        None, group_size=32, seed=1, float_weight=fw, ternary=True,  # bits defaults to 3
+    )
+    assert layer.trit is True
+    assert layer.bits == 2
+    assert layer.codebook.shape == (3,)
+
+
 def test_switch_layer_trit_dispatch():
     mx.random.seed(4)
     E, out_dims, in_dims, gs, k = 16, 128, 256, 32, 4

@@ -90,7 +90,10 @@ def _prepare_polar_layers(model, weights, tq_config):
                 num_experts=num_experts,
                 bias=has_bias,
                 bits=layer_bits,
-                group_size=tq_config.group_size,
+                # Match the convert side, which quantizes experts at
+                # group_size_for_path — so a model built with a finer
+                # --mlp-group-size loads with the correct scale shape.
+                group_size=tq_config.group_size_for_path(path),
                 trit=is_trit,
             )
             updates[path] = pq
