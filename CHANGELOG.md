@@ -6,6 +6,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — ternary (1.58-bit) experts with base-3 trit packing
+
+- **`convert --ternary-experts`** quantizes routed MoE experts to the data-free
+  ternary `{-c, 0, +c}` codebook (optimal Lloyd-Max for N(0,1): c≈1.224) and
+  packs the `{0,1,2}` indices as **genuine base-3 trits — 20 per uint32 (3²⁰ <
+  2³²) = ~1.6 bpw**, vs 2.0 for the bit-packed 2-bit slot. Attention and
+  `lm_head` stay at `--bits`; only the experts go sub-2-bit. The 3-entry
+  codebook is self-describing: the loader decodes base-3 automatically (no new
+  config field). All four expert Metal kernels (`polar_gather_qmv`,
+  `polar_multi_gather_qmv`, `polar_dequant_experts`, `polar_gather_qmm`) decode
+  trits inline, so the weight stays ~1.6 bpw in memory — never unpacked to a
+  wider format. Needs expert redundancy: strong on 128-expert models
+  (Qwen3-235B → **53 GB, fully resident on a 64 GB Mac at ~5.6 tok/s**, vs
+  ~2 tok/s streaming the 70.5 GB hybrid), tq2e-class on 64 experts.
+- Non-streaming `convert()` now honors **`--ternary-experts`** and
+  **`--mlp-group-size`** (previously wired only on the `--streaming` path).
+
 ## [0.11.0] - 2026-06-20
 
 ### Added — expert streaming in `turboquant-serve`

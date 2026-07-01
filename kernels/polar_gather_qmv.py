@@ -11,6 +11,13 @@ For single-token decode with k=4 experts (GPT-OSS), this avoids
 dequantizing all 32 experts and instead only touches the 4 selected ones.
 
 Memory savings: reads k/N of expert weights vs dequantize-all.
+
+trit=True decodes the base-3 (ternary) packing produced by
+``core.packing.pack_trits``: 20 trits per uint32, a 3-entry codebook
+{-c, 0, +c}. Only the per-weight index extraction differs from the
+bit-packed path — scales, codebook lookup, reduction and matmul are
+identical — so the kernel keeps the packed weight at ~1.6 bpw in VRAM
+instead of unpacking to the 2-bit slot (2.0 bpw) first.
 """
 
 import math
@@ -18,21 +25,40 @@ from typing import Optional
 
 import mlx.core as mx
 
-_kernel_cache: dict[tuple[int, int], object] = {}
+_kernel_cache: dict[tuple[int, int, bool], object] = {}
 
 THREADS_PER_ROW = 32
 
 
-def _build_kernel_source(bits: int, group_size: int) -> str:
+def _build_kernel_source(bits: int, group_size: int, trit: bool = False) -> str:
     """Generate Metal shader for fused expert-routed polar QMV with
     threadgroup parallel reduction.
 
     Each threadgroup handles one (expert, row) pair.
     Grid: (k * output_dims, 1, 1) threadgroups.
     """
-    n_codes = 1 << bits
-    elems_per_u32 = 32 // bits
-    mask = (1 << bits) - 1
+    if trit:
+        n_codes = 3
+        pow3_init = ", ".join(f"{3 ** i}u" for i in range(20))
+        # base-3 place values, declared once per threadgroup (hoisted out of
+        # the inner element loop) so the array is not rebuilt per weight.
+        pow3_decl = f"    const uint pw3[20] = {{{pow3_init}}};\n"
+        # base-3 digit at position (col % 20): (word / 3**slot) % 3
+        extract = """
+            uint packed_col = col / 20u;
+            uint slot = col % 20u;
+            uint packed_val = packed_weight[pw_base + packed_col];
+            uint code_idx = (packed_val / pw3[slot]) % 3u;"""
+    else:
+        n_codes = 1 << bits
+        elems_per_u32 = 32 // bits
+        mask = (1 << bits) - 1
+        pow3_decl = ""
+        extract = f"""
+            uint packed_col = col / {elems_per_u32}u;
+            uint bit_pos = (col % {elems_per_u32}u) * {bits}u;
+            uint packed_val = packed_weight[pw_base + packed_col];
+            uint code_idx = (packed_val >> bit_pos) & {mask}u;"""
 
     return f"""
     // Each threadgroup handles one (expert_local, row) pair.
@@ -58,7 +84,7 @@ def _build_kernel_source(bits: int, group_size: int) -> str:
     for (uint i = 0; i < {n_codes}u; i++) {{
         cb[i] = float(codebook[i]);
     }}
-
+{pow3_decl}
     uint n_groups = scales_shape[2];
     uint pw_cols = packed_weight_shape[2];
 
@@ -75,13 +101,7 @@ def _build_kernel_source(bits: int, group_size: int) -> str:
         float group_accum = 0.0f;
 
         for (uint e = 0; e < {group_size}u; e++) {{
-            uint col = base_col + e;
-            uint packed_col = col / {elems_per_u32}u;
-            uint bit_pos = (col % {elems_per_u32}u) * {bits}u;
-
-            uint packed_val = packed_weight[pw_base + packed_col];
-            uint code_idx = (packed_val >> bit_pos) & {mask}u;
-
+            uint col = base_col + e;{extract}
             group_accum += cb[code_idx] * float(x[col]);
         }}
 
@@ -107,13 +127,18 @@ def _build_kernel_source(bits: int, group_size: int) -> str:
 """
 
 
-def _get_kernel(bits: int, group_size: int):
+def _get_kernel(bits: int, group_size: int, trit: bool = False):
     """Get (or compile and cache) the Metal kernel for given parameters."""
-    key = (bits, group_size)
+    key = (bits, group_size, trit)
     if key not in _kernel_cache:
-        source = _build_kernel_source(bits, group_size)
+        source = _build_kernel_source(bits, group_size, trit)
+        name = (
+            f"polar_gather_qmv_trit_gs{group_size}"
+            if trit
+            else f"polar_gather_qmv_{bits}bit_gs{group_size}"
+        )
         _kernel_cache[key] = mx.fast.metal_kernel(
-            name=f"polar_gather_qmv_{bits}bit_gs{group_size}",
+            name=name,
             input_names=["packed_weight", "scales", "codebook", "x", "indices"],
             output_names=["out"],
             source=source,
@@ -130,6 +155,7 @@ def polar_gather_qmv(
     indices: mx.array,
     bits: int,
     group_size: int,
+    trit: bool = False,
 ) -> mx.array:
     """Fused expert-routed quantized matrix-vector product via Metal kernel.
 
@@ -142,11 +168,12 @@ def polar_gather_qmv(
     Args:
         packed_weight: (num_experts, output_dims, packed_cols) uint32.
         scales: (num_experts, output_dims, n_groups) float16.
-        codebook: (n_codes,) float16 — Lloyd-Max centroids.
+        codebook: (n_codes,) float16 — Lloyd-Max centroids (3 entries if trit).
         x: (input_dims,) float16 — input vector (single token).
         indices: (k,) or (1, k) uint32 — selected expert indices.
-        bits: Quantization bit-width (2, 3, or 4).
+        bits: Quantization bit-width (2, 3, or 4); ignored when trit=True.
         group_size: Elements per quantization group.
+        trit: If True, decode base-3 (ternary) packing — 20 trits/uint32.
 
     Returns:
         (k, output_dims) float16 — output for each selected expert.
@@ -158,7 +185,7 @@ def polar_gather_qmv(
     k = indices.shape[0]
     output_dims = packed_weight.shape[1]
 
-    kernel = _get_kernel(bits, group_size)
+    kernel = _get_kernel(bits, group_size, trit)
 
     total_work = k * output_dims
     # grid = total threads, so multiply by THREADS_PER_ROW to get

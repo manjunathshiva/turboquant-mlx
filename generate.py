@@ -71,10 +71,16 @@ def _prepare_polar_layers(model, weights, tq_config):
         # Authoritative per-layer bit width: the saved codebook has 2^bits
         # entries. This survives any per-layer bit assignment the converter
         # used (hybrids, layer protection) without re-deriving path rules.
+        # A 3-entry codebook is the self-describing marker for ternary experts
+        # packed as base-3 trits (20/uint32, ~1.6 bpw): decode base-3 inline.
         cb_size = int(weights[f"{path}.codebook"].shape[-1])
-        layer_bits = max(1, cb_size.bit_length() - 1)
-        if (1 << layer_bits) != cb_size:  # non-power-of-two: fall back
-            layer_bits = tq_config.bits_for_path(path)
+        is_trit = cb_size == 3
+        if is_trit:
+            layer_bits = 2  # storage semantics only; kernels decode base-3
+        else:
+            layer_bits = max(1, cb_size.bit_length() - 1)
+            if (1 << layer_bits) != cb_size:  # non-power-of-two: fall back
+                layer_bits = tq_config.bits_for_path(path)
 
         if has_switch and isinstance(module, SwitchLinear):
             num_experts, output_dims, input_dims = module.weight.shape
@@ -85,6 +91,7 @@ def _prepare_polar_layers(model, weights, tq_config):
                 bias=has_bias,
                 bits=layer_bits,
                 group_size=tq_config.group_size,
+                trit=is_trit,
             )
             updates[path] = pq
         elif isinstance(module, nn.Linear):

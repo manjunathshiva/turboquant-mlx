@@ -31,6 +31,7 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | **[Qwen3.6-27B (dense coder)](https://huggingface.co/manjunathshiva/Qwen3.6-27B-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **~13 GB** | **~14 tok/s (resident) · fits 48 GB, SWE-bench coder** |
 | **[Qwen3-235B-A22B-Instruct-2507 (hybrid)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3a-tq2e-g32)** | **TQ 3-attn / 2-experts, gs=32** | **2/3 mix** | **—** | **70.5 GB** | **~4–6 tok/s (64 GB, 40 GB cache) · converts + streams on a 16 GB Mac mini** |
 | **[Qwen3-235B-A22B-Instruct-2507 (full 3-bit)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **103 GB** | **~1.3 tok/s (64 GB, 40 GB cache) · recall-critical sibling, passes 6/6 stress** |
+| **Qwen3-235B-A22B-Instruct-2507 (ternary experts, 1.58-bit)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **53 GB** | **5.6 tok/s (64 GB) · fully resident, no streaming** |
 | **Nemotron-3-Nano-4B** | **TurboQuant** | **3** | **—** | **~2.2 GB** | **75.6 tok/s** |
 | Nemotron-3-Super-120B-A12B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **Nemotron-3-Super-120B-A12B** | **TurboQuant** | **3** | **—** | **~50 GB** | **18.7 tok/s** |
@@ -158,6 +159,19 @@ python -m turboquant_mlx.convert \
     --hf-path Qwen/Qwen3-235B-A22B-Instruct-2507 \
     --mlx-path ./qwen3-235b-tq3 \
     --bits 3 --group-size 64 --streaming
+
+# Ternary (1.58-bit) experts — sub-2-bit MoE experts on the data-free {-c, 0, +c}
+# codebook, packed as genuine base-3 trits (20 per uint32, ~1.6 bpw vs 2.0 for the
+# 2-bit slot). Attention + lm_head stay at --bits; only the routed experts go
+# ternary. On a 128-expert model this shrinks Qwen3-235B to 53 GB (from 70.5 GB),
+# so it runs FULLY RESIDENT on a 64 GB Mac at ~5.6 tok/s (vs ~2 tok/s streaming).
+# Needs enough expert redundancy — great on 128 experts, breaks below ~64.
+python -m turboquant_mlx.convert \
+    --hf-path Qwen/Qwen3-235B-A22B-Instruct-2507 \
+    --mlx-path ./qwen3-235b-tq3a-tqTe-g64 \
+    --bits 3 --group-size 64 --ternary-experts --streaming
+# Resident load of a ~53 GB model needs a wired-memory bump on a 64 GB Mac:
+#   sudo sysctl -w iogpu.wired_limit_mb=60416
 ```
 
 ### 2. Generate text

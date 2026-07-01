@@ -9,9 +9,14 @@ Orchestrates the full Stage 1 quantization:
 
 import mlx.core as mx
 
-from turboquant_mlx.core.codebook import get_codebook, quantize_scalar, dequantize_scalar
+from turboquant_mlx.core.codebook import (
+    get_codebook,
+    get_trit_codebook,
+    quantize_scalar,
+    dequantize_scalar,
+)
 from turboquant_mlx.core.rotation import generate_random_signs, rotate_weight
-from turboquant_mlx.core.packing import pack_indices, unpack_indices
+from turboquant_mlx.core.packing import pack_indices, unpack_indices, pack_trits, unpack_trits
 
 
 # Cap on the number of weight elements quantized in a single MLX graph. Large
@@ -30,6 +35,7 @@ def polar_quantize_weight(
     bits: int = 3,
     group_size: int = 64,
     seed: int = 42,
+    ternary: bool = False,
 ) -> dict:
     """Quantize a weight matrix using the PolarQuant pipeline.
 
@@ -38,6 +44,12 @@ def polar_quantize_weight(
         bits: Quantization bit-width (2, 3, or 4).
         group_size: Number of elements per quantization group.
         seed: Random seed for Hadamard rotation signs.
+        ternary: If True, quantize to the ternary {-c, 0, +c} codebook instead
+            of the ``bits``-bit Gaussian codebook, and pack the {0,1,2} indices
+            as base-3 trits (20 per uint32, ~1.6 bpw) with a 3-entry codebook.
+            The 3-entry codebook is the self-describing marker the loader uses to
+            select the trit decode path. ``bits`` is ignored for packing (kept 2
+            for scale/group semantics).
 
     Returns:
         Dict with keys:
@@ -70,7 +82,12 @@ def polar_quantize_weight(
     signs = generate_random_signs(input_dims, seed=seed)
     signs_f32 = signs.astype(mx.float32)
 
-    centroids, boundaries = get_codebook(bits, dtype=mx.float32)
+    if ternary:
+        if bits != 2:
+            raise ValueError(f"ternary quantization must use bits=2 storage, got {bits}")
+        centroids, boundaries = get_trit_codebook(dtype=mx.float32)
+    else:
+        centroids, boundaries = get_codebook(bits, dtype=mx.float32)
     # Clip threshold to prevent extreme outliers from saturating the codebook
     max_centroid = mx.max(mx.abs(centroids))
 
@@ -98,10 +115,11 @@ def polar_quantize_weight(
         w_normalized = w_grouped / rms
         w_normalized = mx.clip(w_normalized, -max_centroid * 1.5, max_centroid * 1.5)
 
-        # 4. Lloyd-Max codebook quantization, then 5. pack indices into uint32
+        # 4. Lloyd-Max codebook quantization, then 5. pack indices into uint32.
+        # Ternary packs {0,1,2} as base-3 trits (20/uint32); otherwise bit-pack.
         indices = quantize_scalar(w_normalized, boundaries)
         indices_flat = indices.reshape(rows, input_dims)
-        packed = pack_indices(indices_flat, bits)
+        packed = pack_trits(indices_flat) if ternary else pack_indices(indices_flat, bits)
         scales_b = rms.squeeze(-1).astype(mx.float16)  # (rows, n_groups)
 
         # Force this block out as its own command buffer (bounds GPU work).
@@ -136,6 +154,7 @@ def polar_dequantize_weight(
     bits: int,
     group_size: int,
     input_dims: int,
+    trit: bool = False,
 ) -> mx.array:
     """Dequantize packed weight back to float values (without un-rotating).
 
@@ -146,10 +165,11 @@ def polar_dequantize_weight(
     Args:
         packed_weight: uint32 packed indices, shape (out, packed_in).
         scales: float16 per-group scales, shape (out, n_groups).
-        codebook: float16 centroids, shape (2^bits,).
-        bits: Quantization bit-width.
+        codebook: float16 centroids, shape (2^bits,) or (3,) if trit.
+        bits: Quantization bit-width; ignored when trit=True.
         group_size: Elements per group.
         input_dims: Original input dimension (for unpack count).
+        trit: If True, unpack base-3 (ternary) trits — 20 per uint32.
 
     Returns:
         Dequantized weight in rotated domain, shape (out, input_dims), float16.
@@ -158,7 +178,10 @@ def polar_dequantize_weight(
     n_groups = input_dims // group_size
 
     # Unpack indices
-    indices = unpack_indices(packed_weight, bits, input_dims)  # (out, input_dims)
+    if trit:
+        indices = unpack_trits(packed_weight, input_dims)
+    else:
+        indices = unpack_indices(packed_weight, bits, input_dims)  # (out, input_dims)
     indices = indices.reshape(output_dims, input_dims)
 
     # Dequantize via codebook lookup

@@ -26,10 +26,19 @@ WC = 32    # packed words per K-chunk
 _kernel_cache: dict[tuple, object] = {}
 
 
-def _build_source(bits: int, group_size: int) -> str:
-    n_codes = 1 << bits
-    epu = 32 // bits          # codes per packed word
-    mask = (1 << bits) - 1
+def _build_source(bits: int, group_size: int, trit: bool = False) -> str:
+    if trit:
+        n_codes = 3
+        epu = 20              # trits per packed word
+        pow3_init = ", ".join(f"{3 ** i}u" for i in range(20))
+        pow3_decl = f"    const uint pw3[20] = {{{pow3_init}}};\n"
+        code_expr = "(word / pw3[j]) % 3u"   # base-3 digit at slot j
+    else:
+        n_codes = 1 << bits
+        epu = 32 // bits          # codes per packed word
+        mask = (1 << bits) - 1
+        pow3_decl = ""
+        code_expr = f"(word >> (j * {bits}u)) & {mask}u"
     kc = WC * epu             # cols per chunk
 
     return f"""
@@ -60,7 +69,7 @@ def _build_source(bits: int, group_size: int) -> str:
     float cb[{n_codes}];
     #pragma unroll
     for (uint i = 0; i < {n_codes}u; i++) cb[i] = float(codebook[i]);
-
+{pow3_decl}
     float acc[{TT}];
     #pragma unroll
     for (uint t = 0; t < {TT}u; t++) acc[t] = 0.0f;
@@ -101,7 +110,7 @@ def _build_source(bits: int, group_size: int) -> str:
             for (uint j = 0; j < {epu}u; j++) {{
                 uint col = col0 + j;
                 if (col >= cols) break;
-                uint code = (word >> (j * {bits}u)) & {mask}u;
+                uint code = {code_expr};
                 float w = cb[code]
                     * float(scales[sc_base + (k0 + col) / {group_size}u]);
                 #pragma unroll
@@ -127,15 +136,20 @@ def _build_source(bits: int, group_size: int) -> str:
 """
 
 
-def _get_kernel(bits: int, group_size: int):
-    key = (bits, group_size)
+def _get_kernel(bits: int, group_size: int, trit: bool = False):
+    key = (bits, group_size, trit)
     if key not in _kernel_cache:
+        name = (
+            f"polar_gather_qmm_trit_gs{group_size}"
+            if trit
+            else f"polar_gather_qmm_{bits}b_gs{group_size}"
+        )
         _kernel_cache[key] = mx.fast.metal_kernel(
-            name=f"polar_gather_qmm_{bits}b_gs{group_size}",
+            name=name,
             input_names=["packed_weight", "scales", "codebook", "x", "indices",
                          "tile_token"],
             output_names=["out"],
-            source=_build_source(bits, group_size),
+            source=_build_source(bits, group_size, trit),
             ensure_row_contiguous=True,
         )
     return _kernel_cache[key]
@@ -163,14 +177,18 @@ def supports(output_dims: int) -> bool:
 
 
 def polar_gather_qmm(packed_weight, scales, codebook, x, indices,
-                     bits, group_size):
-    """x: (N, K) f16, indices: (N,) u32 SORTED. Returns (N, O) f16."""
+                     bits, group_size, trit=False):
+    """x: (N, K) f16, indices: (N,) u32 SORTED. Returns (N, O) f16.
+
+    trit=True decodes base-3 (ternary) packing (20 trits/uint32, 3-entry
+    codebook); bits is ignored in that case.
+    """
     N = int(x.shape[0])
     O = int(packed_weight.shape[1])
     E = int(packed_weight.shape[0])
     tile_token = _build_tiles(indices.astype(mx.int32), E)
     n_tiles = tile_token.shape[0] // TT
-    kernel = _get_kernel(bits, group_size)
+    kernel = _get_kernel(bits, group_size, trit)
     return kernel(
         inputs=[packed_weight, scales, codebook, x,
                 indices.astype(mx.uint32), tile_token],

@@ -31,6 +31,8 @@ def convert(
     dtype: str = None,
     attn_bits: int = None,
     mlp_bits: int = None,
+    mlp_group_size: int = None,
+    ternary_experts: bool = False,
 ):
     """Convert a HuggingFace model to TurboQuant-compressed MLX format.
 
@@ -44,6 +46,9 @@ def convert(
         fuse_rotations: Whether to fuse rotations into norm weights.
         use_qjl: Whether to enable QJL residual correction.
         dtype: Optional dtype override ("float16", "bfloat16", "float32").
+        mlp_group_size: Optional finer group size for MoE expert tensors.
+        ternary_experts: If True, quantize routed MoE experts to the ternary
+            {-c,0,+c} codebook packed as base-3 trits (~1.6 bpw).
     """
     from mlx_lm.utils import load, save
 
@@ -63,6 +68,8 @@ def convert(
         use_qjl=use_qjl,
         attn_bits=attn_bits,
         mlp_bits=mlp_bits,
+        mlp_group_size=mlp_group_size,
+        ternary_experts=ternary_experts,
     )
 
     # Load model
@@ -177,6 +184,21 @@ def configure_parser() -> argparse.ArgumentParser:
              "Defaults to --bits when omitted.",
     )
     parser.add_argument(
+        "--mlp-group-size",
+        type=int, default=None, choices=[16, 32, 64, 128],
+        help="Override group size (block-scale granularity) for MLP/MoE expert "
+             "linears, so a sub-2-bit expert tier can carry a finer scale than "
+             "attention. Defaults to --group-size when omitted.",
+    )
+    parser.add_argument(
+        "--ternary-experts",
+        action="store_true",
+        help="Quantize MoE expert weights to the ternary {-c,0,+c} codebook "
+             "(1.58-bit), stored in the 2-bit slot. The zero level clears the "
+             "1-bit cardinality wall; data-free sub-2-bit expert tier (tq2a-tqTe). "
+             "Attention stays at --attn-bits/--bits.",
+    )
+    parser.add_argument(
         "--streaming",
         action="store_true",
         help="Memory-bounded conversion: write each quantized layer to a shard "
@@ -205,6 +227,8 @@ def main():
             use_qjl=args.use_qjl,
             attn_bits=args.attn_bits,
             mlp_bits=args.mlp_bits,
+            mlp_group_size=args.mlp_group_size,
+            ternary_experts=args.ternary_experts,
         )
         return
     convert(
@@ -219,6 +243,8 @@ def main():
         dtype=args.dtype,
         attn_bits=args.attn_bits,
         mlp_bits=args.mlp_bits,
+        mlp_group_size=args.mlp_group_size,
+        ternary_experts=args.ternary_experts,
     )
 
 

@@ -16,9 +16,10 @@ import math
 import mlx.core as mx
 import mlx.nn as nn
 
-from turboquant_mlx.core.codebook import get_codebook
+from turboquant_mlx.core.codebook import get_codebook, get_trit_codebook
 from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
 from turboquant_mlx.core.rotation import rotate_input
+from turboquant_mlx.core.packing import TRITS_PER_U32
 
 # Use Python kernels - native C++ extension has ABI issues with MLX
 from turboquant_mlx.kernels.polar_gather_qmv import polar_gather_qmv
@@ -68,6 +69,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
         bits: int = 3,
         group_size: int = 64,
         needs_rotation: bool = True,
+        trit: bool = False,
     ):
         super().__init__()
         self.input_dims = input_dims
@@ -76,12 +78,19 @@ class PolarQuantizedSwitchLinear(nn.Module):
         self.bits = bits
         self.group_size = group_size
         self._needs_rotation = needs_rotation
+        # Ternary experts packed as base-3 trits (20/uint32, ~1.6 bpw). The
+        # 3-entry codebook is the on-disk marker; kernels decode base-3 inline.
+        self.trit = trit
 
-        # Placeholder weights (replaced by from_switch_linear)
-        codebook, _ = get_codebook(bits, dtype=mx.float16)
+        # Placeholder weights (replaced by from_switch_linear / loaded weights)
         n_groups = input_dims // group_size
-        elems_per_u32 = 32 // bits
-        packed_cols = math.ceil(input_dims / elems_per_u32)
+        if trit:
+            codebook, _ = get_trit_codebook(dtype=mx.float16)
+            packed_cols = math.ceil(input_dims / TRITS_PER_U32)
+        else:
+            codebook, _ = get_codebook(bits, dtype=mx.float16)
+            elems_per_u32 = 32 // bits
+            packed_cols = math.ceil(input_dims / elems_per_u32)
 
         self.weight = mx.zeros((num_experts, output_dims, packed_cols), dtype=mx.uint32)
         self.scales = mx.ones((num_experts, output_dims, n_groups), dtype=mx.float16)
@@ -104,7 +113,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
         """
         return polar_dequant_experts(
             self.weight, self.scales, self.codebook,
-            self.bits, self.group_size,
+            self.bits, self.group_size, trit=self.trit,
         )
 
     def _dequant_bytes(self) -> int:
@@ -139,7 +148,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
             y = polar_gather_qmv(
                 self.weight, self.scales, self.codebook,
                 x_flat, idx_flat,
-                self.bits, self.group_size,
+                self.bits, self.group_size, trit=self.trit,
             )  # (k, output_dims)
 
             # Reshape to match gather_mm output: (..., k, 1, output_dims)
@@ -161,7 +170,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
                     y = polar_gather_qmm(
                         self.weight, self.scales, self.codebook,
                         x.reshape(k, self.input_dims), indices.reshape(-1),
-                        self.bits, self.group_size,
+                        self.bits, self.group_size, trit=self.trit,
                     )
                     y = y.reshape(list(indices.shape) + [1, self.output_dims])
                     if "bias" in self:
@@ -191,7 +200,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
             y = polar_multi_gather_qmv(
                 self.weight, self.scales, self.codebook,
                 x_2d, idx_flat,
-                self.bits, self.group_size,
+                self.bits, self.group_size, trit=self.trit,
             )  # (k, output_dims)
 
             # Reshape to match gather_mm output: (..., k, 1, output_dims)
@@ -215,10 +224,11 @@ class PolarQuantizedSwitchLinear(nn.Module):
         return y
 
     def _extra_repr(self):
+        precision = "ternary(trit,1.6bpw)" if self.trit else f"bits={self.bits}"
         return (
             f"input_dims={self.input_dims}, output_dims={self.output_dims}, "
             f"num_experts={self.num_experts}, bias={'bias' in self}, "
-            f"bits={self.bits}, group_size={self.group_size}, "
+            f"{precision}, group_size={self.group_size}, "
             f"rotation={'online' if self._needs_rotation else 'fused'}"
         )
 
@@ -232,6 +242,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
         needs_rotation: bool = True,
         float_weight: mx.array = None,
         bias: mx.array = None,
+        ternary: bool = False,
     ) -> "PolarQuantizedSwitchLinear":
         """Create from an existing SwitchLinear with FP16/BF16 weights.
 
@@ -267,10 +278,12 @@ class PolarQuantizedSwitchLinear(nn.Module):
             )
 
         # Pre-allocate output arrays to avoid accumulating large lists
-        from turboquant_mlx.core.packing import pack_indices as _pack
         n_groups = input_dims // group_size
-        elems_per_u32 = 32 // bits
-        packed_cols = math.ceil(input_dims / elems_per_u32)
+        if ternary:
+            packed_cols = math.ceil(input_dims / TRITS_PER_U32)
+        else:
+            elems_per_u32 = 32 // bits
+            packed_cols = math.ceil(input_dims / elems_per_u32)
 
         packed_3d = mx.zeros((num_experts, output_dims, packed_cols), dtype=mx.uint32)
         scales_3d = mx.zeros((num_experts, output_dims, n_groups), dtype=mx.float16)
@@ -285,6 +298,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
                 bits=bits,
                 group_size=group_size,
                 seed=seed,
+                ternary=ternary,
             )
             packed_3d[e] = result["packed_weight"]
             scales_3d[e] = result["scales"]
@@ -302,7 +316,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
         layer = cls(
             input_dims, output_dims, num_experts,
             bias=has_bias, bits=bits, group_size=group_size,
-            needs_rotation=needs_rotation,
+            needs_rotation=needs_rotation, trit=ternary,
         )
         layer.weight = packed_3d
         layer.scales = scales_3d

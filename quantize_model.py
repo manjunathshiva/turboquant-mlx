@@ -191,8 +191,9 @@ def turboquant_quantize(
                 output_dims = module.weight.shape[1]
                 has_bias = "bias" in module
 
-            if input_dims % tq_config.group_size != 0:
-                print(f"[WARNING] Skipping SwitchLinear {path}: input_dims={input_dims} not divisible by group_size={tq_config.group_size}")
+            expert_group_size = tq_config.group_size_for_path(path)
+            if input_dims % expert_group_size != 0:
+                print(f"[WARNING] Skipping SwitchLinear {path}: input_dims={input_dims} not divisible by group_size={expert_group_size}")
                 n_skipped += 1
                 del module, float_weight
                 continue
@@ -205,18 +206,23 @@ def turboquant_quantize(
                     needs_rotation = False
 
             seed = _get_layer_seed(tq_config.rotation_seed, path)
-            layer_bits = tq_config.bits_for_path(path)
-            print(f"[INFO] Quantizing SwitchLinear {path} ({num_experts} experts, {input_dims}d, {layer_bits}b)")
+            use_ternary = tq_config.ternary_experts
+            # Ternary experts pack as base-3 trits (3-entry codebook, 20/uint32,
+            # ~1.6 bpw); bits=2 is storage/scale semantics only.
+            layer_bits = 2 if use_ternary else tq_config.bits_for_path(path)
+            label = "ternary" if use_ternary else f"{layer_bits}b"
+            print(f"[INFO] Quantizing SwitchLinear {path} ({num_experts} experts, {input_dims}d, {label} g{expert_group_size})")
 
             bias_tensor = module.bias if has_bias else None
             pq_switch = PolarQuantizedSwitchLinear.from_switch_linear(
                 None,
                 bits=layer_bits,
-                group_size=tq_config.group_size,
+                group_size=expert_group_size,
                 seed=seed,
                 needs_rotation=needs_rotation,
                 float_weight=float_weight,
                 bias=bias_tensor,
+                ternary=use_ternary,
             )
             # Replace immediately and release all references
             mx.eval(pq_switch.parameters())

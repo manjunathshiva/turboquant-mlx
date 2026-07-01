@@ -91,6 +91,7 @@ BOUNDARIES = {
 
 # MSE distortion for each bit-width (for unit-variance Gaussian)
 MSE = {
+    1: 0.3633802276,  # 1 - 2/pi, optimal 1-bit (sign + single magnitude)
     2: 0.1174818198,
     3: 0.0345477324,
     4: 0.0095009960,
@@ -101,7 +102,7 @@ _centroids_cache: dict[tuple[int, mx.Dtype], mx.array] = {}
 _boundaries_cache: dict[tuple[int, mx.Dtype], mx.array] = {}
 
 
-_SUPPORTED_BITS = range(2, 9)  # 2..8 inclusive
+_SUPPORTED_BITS = range(1, 9)  # 1..8 inclusive (1-bit = sign codebook for sub-2bit tiers)
 _SQRT_2 = math.sqrt(2.0)
 _SQRT_2PI = math.sqrt(2.0 * math.pi)
 
@@ -201,6 +202,49 @@ def get_codebook(bits: int, dtype: mx.Dtype = mx.float16) -> tuple[mx.array, mx.
         _boundaries_cache[c_key] = mx.array(BOUNDARIES[bits], dtype=dtype)
 
     return _centroids_cache[c_key], _boundaries_cache[c_key]
+
+
+# Ternary (1.58-bit) codebook: {-c, 0, +c}, padded to 4 entries so it rides the
+# existing 2-bit storage / packing / kernel / load paths unchanged (emitted
+# indices are only ever in {0, 1, 2}). Optimal Lloyd-Max levels for N(0,1):
+# c = 1.22401, decision threshold c/2, normalized MSE 0.1898 -- half of 1-bit's
+# 0.363. The zero level is what clears the 1-bit (2-centroid) cardinality wall.
+_TERNARY_C = 1.22401
+
+
+def get_ternary_codebook(dtype: mx.Dtype = mx.float16) -> tuple[mx.array, mx.array]:
+    """Ternary {-c, 0, +c} codebook stored in a 2-bit (4-entry) slot.
+
+    Returns a 4-entry centroid array ``[-c, 0, +c, +c]`` and 3 boundaries
+    ``[-c/2, +c/2, BIG]``. Quantization emits only indices {0, 1, 2}; the 4th
+    centroid is padding (a duplicate of +c, so even a stray index 3 is harmless)
+    and its boundary is far above the clip range so it is never selected. Because
+    the shape matches a normal 2-bit layer, the packing, Metal kernel, on-disk
+    format, and loader need no changes -- ternary experts ride the 2-bit path.
+    This is the viable data-free sub-2-bit tier (see scripts/onebit).
+    """
+    c = _TERNARY_C
+    centroids = mx.array([-c, 0.0, c, c], dtype=dtype)
+    # Last boundary sits well above the ±1.5c quantize clip, so index 3 (the
+    # padding centroid) is never chosen; kept finite to stay valid in float16.
+    boundaries = mx.array([-c / 2.0, c / 2.0, 30.0], dtype=dtype)
+    return centroids, boundaries
+
+
+def get_trit_codebook(dtype: mx.Dtype = mx.float16) -> tuple[mx.array, mx.array]:
+    """Ternary {-c, 0, +c} codebook for genuine base-3 (trit) packing.
+
+    Returns a 3-entry centroid array ``[-c, 0, +c]`` and 2 boundaries
+    ``[-c/2, +c/2]``; ``quantize_scalar`` emits indices {0, 1, 2}. The 3-entry
+    codebook length is the self-describing marker for the trit path: the loader
+    keys off ``codebook.shape[-1] == 3`` to decode base-3 packing (20 trits per
+    uint32, ~1.6 bpw) instead of the 2-bit slot (2.0 bpw) used by the 4-entry
+    ``get_ternary_codebook``. Same centroids, but the real sub-2-bit storage win.
+    """
+    c = _TERNARY_C
+    centroids = mx.array([-c, 0.0, c], dtype=dtype)
+    boundaries = mx.array([-c / 2.0, c / 2.0], dtype=dtype)
+    return centroids, boundaries
 
 
 def quantize_scalar(values: mx.array, boundaries: mx.array) -> mx.array:
