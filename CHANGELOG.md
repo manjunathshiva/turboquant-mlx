@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-01
+
 ### Added — ternary (1.58-bit) experts with base-3 trit packing
 
 - **`convert --ternary-experts`** quantizes routed MoE experts to the data-free
