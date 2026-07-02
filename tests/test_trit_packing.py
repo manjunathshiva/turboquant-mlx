@@ -210,9 +210,19 @@ def _make_streaming_layer(in_dims, out_dims, gs, *, trit_flag, codebook):
 
 def test_streaming_trit_autodetect_from_codebook():
     """A 3-entry codebook must flip the streaming layer into trit mode even when
-    the caller forgets to pass trit=True (self-describing marker)."""
+    the caller forgets to pass trit=True (self-describing marker), and force
+    bits=2 to match the resident layer + keep the kernel-cache key consistent."""
     layer = _make_streaming_layer(96, 40, 32, trit_flag=False, codebook=_CB)
     assert layer.trit is True
+    assert layer.bits == 2
+
+
+def test_streaming_trit_rejects_mismatched_codebook():
+    """trit=True with a non-3 codebook would make the kernels (n_codes=3) read
+    out of bounds on the GPU — must fail loud at construction instead."""
+    bad_cb = mx.zeros((4,), dtype=mx.float16)  # 2-bit codebook, not ternary
+    with pytest.raises(ValueError, match="3-entry codebook"):
+        _make_streaming_layer(96, 40, 32, trit_flag=True, codebook=bad_cb)
 
 
 def test_streaming_dequantize_selected_trit_matches_reference():

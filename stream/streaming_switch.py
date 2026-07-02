@@ -378,6 +378,17 @@ class StreamingSwitchLinear(nn.Module):
         # bit-packing; the kernels and dequant switch to base-3 decode off this.
         # Detect from the 3-entry codebook if the caller didn't say (self-describing).
         self.trit = bool(trit) or codebook.size == 3
+        if self.trit:
+            # The Metal kernels hardcode n_codes=3 under trit; a mismatched
+            # codebook would read out of bounds on the GPU. Fail loud instead.
+            if codebook.size != 3:
+                raise ValueError(
+                    "Ternary (trit) mode requires a 3-entry codebook, "
+                    f"got size {codebook.size}."
+                )
+            # Match the resident layer (ternary is always bit-width 2) so the
+            # (bits, group_size, trit) kernel-cache key stays consistent.
+            self.bits = 2
         self._needs_rotation = needs_rotation
         # small resident tensors
         self.codebook = codebook
