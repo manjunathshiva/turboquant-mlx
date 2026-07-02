@@ -6,6 +6,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-07-02
+
+### Fixed — ternary experts on the streaming path
+
+- **Streaming a ternary (trit) MoE now works.** `StreamingSwitchLinear` was
+  trit-blind: its prefill dequant (`_dequantize_selected`) unpacked the base-3
+  trit weights as bit-packed 2-bit indices (16 vs 20 values per uint32), which
+  crashed with a `reshape` size mismatch, and its decode/prefill kernel calls
+  never passed `trit=`. The streaming layer now detects the 3-entry codebook
+  (with an explicit `trit` flag from the loader), decodes with `unpack_trits`,
+  and threads `trit=` into `polar_gather_qmv` / `polar_multi_gather_qmv`. This
+  is the path a >RAM ternary MoE takes — e.g. the 53 GB `Qwen3-235B tq3a-tqTe`
+  streamed on a 16 GB Mac mini. The resident (fits-in-RAM) path was unaffected.
+
 ## [0.12.0] - 2026-07-01
 
 ### Added — ternary (1.58-bit) experts with base-3 trit packing

@@ -171,6 +171,7 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
                 # one trigger per layer fires the next-layer prefetch; gate_proj
                 # is first in _PROJS so it fires with maximum lead time.
                 is_trigger=(proj == _PROJS[0]),
+                trit=res.trit,
             )
             setattr(sm, proj, st)
             proj_keys.append((wkey, skey))

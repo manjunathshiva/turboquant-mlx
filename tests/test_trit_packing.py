@@ -189,3 +189,42 @@ def test_switch_layer_trit_dispatch():
     refk = np.stack([w_deq[e] @ xkr[j] for j, e in enumerate(np.array(idxk))])
     yk = np.array(layer(xk, idxk))
     assert _rel(yk.reshape(k, out_dims).astype(np.float32), refk) < 3e-3
+
+
+# --------------------------------------------------------------------------- #
+# streaming layer (the disk-streamed path used on the mini / >RAM MoEs)
+# --------------------------------------------------------------------------- #
+
+def _make_streaming_layer(in_dims, out_dims, gs, *, trit_flag, codebook):
+    """Build a StreamingSwitchLinear without a cache/reader — enough to exercise
+    _dequantize_selected, the trit-blind prefill path that crashed on the mini."""
+    from turboquant_mlx.stream.streaming_switch import StreamingSwitchLinear
+    signs = mx.ones((in_dims,), dtype=mx.float16)
+    return StreamingSwitchLinear(
+        input_dims=in_dims, output_dims=out_dims, num_experts=8,
+        bits=2, group_size=gs, needs_rotation=False,
+        codebook=codebook, signs=signs,
+        weight_key="w", scales_key="s", cache=None, trit=trit_flag,
+    )
+
+
+def test_streaming_trit_autodetect_from_codebook():
+    """A 3-entry codebook must flip the streaming layer into trit mode even when
+    the caller forgets to pass trit=True (self-describing marker)."""
+    layer = _make_streaming_layer(96, 40, 32, trit_flag=False, codebook=_CB)
+    assert layer.trit is True
+
+
+def test_streaming_dequantize_selected_trit_matches_reference():
+    """Regression for the mini crash: _dequantize_selected must base-3 decode
+    trit-packed experts (reshape used the wrong 2-bit width before)."""
+    gs = 32
+    idx, scales, packed, w = _rand_expert_setup(6, 40, 96, gs, seed=7)
+    layer = _make_streaming_layer(96, 40, gs, trit_flag=True, codebook=_CB)
+    routed = np.array([4, 1, 5], dtype=np.int64)
+    w_sel = mx.array(np.array(packed)[routed])
+    s_sel = scales[mx.array(routed)]
+    deq = layer._dequantize_selected(w_sel, s_sel)   # (3, out, in) — no reshape crash
+    mx.eval(deq)
+    assert deq.shape == (3, 40, 96)
+    assert _rel(np.array(deq).astype(np.float32), w[routed]) < 2e-3
