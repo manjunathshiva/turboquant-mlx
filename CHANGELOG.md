@@ -6,6 +6,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-07-03
+
+### Fixed — generate CLI sampler now honors the model's generation_config
+
+- **`python -m turboquant_mlx.generate` sampled with temperature only** — no
+  top-p/top-k truncation — so every token in the vocabulary kept nonzero
+  probability at each step. Over long generations this occasionally sampled a
+  stray special token; the visible symptom was a **doubled answer** when
+  `</think>` was drawn where `<|im_end|>` belonged (seen on
+  `Qwen3.6-35B-A3B-tq3a-tqTe-g64`). Low-bit builds are the most exposed since
+  their logits are the noisiest. New `--top-p` / `--top-k` flags now default
+  from the model's own `generation_config.json` (e.g. Qwen ships
+  `top_k=20, top_p=0.95`), can be overridden per run, and `0` force-disables.
+  Models without a `generation_config.json` keep the previous behavior.
+
 ## [0.12.1] - 2026-07-02
 
 ### Fixed — ternary experts on the streaming path
