@@ -430,7 +430,12 @@ def _patch_default_rep_penalty(rep_config) -> None:
             try:
                 from turboquant_mlx.generate import resolve_model_path
 
-                model = handler.response_generator.cli_args.model
+                # APIHandler exposes cli_args via response_generator in
+                # mlx-lm 0.31.x; fall back to model_provider for other
+                # versions rather than pinning one attribute name.
+                provider = getattr(handler, "response_generator", None) \
+                    or getattr(handler, "model_provider", None)
+                model = provider.cli_args.model
                 cfg_file = resolve_model_path(model) / "generation_config.json"
                 if cfg_file.exists():
                     with open(cfg_file, encoding="utf-8") as f:

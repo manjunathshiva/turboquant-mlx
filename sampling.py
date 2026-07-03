@@ -68,14 +68,17 @@ def make_single_think_close_logits_processor(
     if think_close_id is None or think_close_id < 0:
         return None
     neg_inf = -float("inf")
-    seen = False
+    # Kept as an mx.array so the guard never forces a CPU-GPU sync inside
+    # the decode loop; it latches True once </think> appears.
+    seen = mx.array(False)
 
     def processor(tokens: mx.array, logits: mx.array) -> mx.array:
         nonlocal seen
-        if not seen and tokens is not None and tokens.size:
-            seen = bool(mx.any(tokens == think_close_id).item())
-        if seen:
-            logits[..., think_close_id] = neg_inf
+        if tokens is not None and tokens.size:
+            seen = mx.logical_or(seen, mx.any(tokens == think_close_id))
+        logits[..., think_close_id] = mx.where(
+            seen, neg_inf, logits[..., think_close_id]
+        )
         return logits
 
     return processor
