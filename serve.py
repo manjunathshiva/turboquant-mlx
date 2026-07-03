@@ -384,6 +384,84 @@ class _KeepaliveSSEWriter:
         return getattr(self._wfile, name)
 
 
+def _extract_rep_penalty_args(argv):
+    """Peel the server-side repetition-penalty default flags off ``argv``.
+
+    ``--rep-penalty`` sets a default ``repetition_penalty`` for requests that
+    don't specify one (OpenAI clients rarely do); ``--rep-ctx`` sets the
+    matching default context window. When ``--rep-penalty`` is omitted the
+    default is looked up lazily from the model's ``generation_config.json``
+    (loop-prone low-bit thinking builds ship one). ``--rep-penalty 0`` (or 1)
+    disables the fallback entirely.
+
+    Returns ``(rep_config | None, remaining_argv)``.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--rep-penalty", type=float, default=None)
+    parser.add_argument("--rep-ctx", type=int, default=256)
+    ns, remaining = parser.parse_known_args(argv)
+    if ns.rep_penalty is not None and ns.rep_penalty in (0.0, 1.0):
+        return None, remaining
+    return {"penalty": ns.rep_penalty, "context_size": ns.rep_ctx}, remaining
+
+
+def _patch_default_rep_penalty(rep_config) -> None:
+    """Give requests without a ``repetition_penalty`` a server-side default.
+
+    mlx_lm.server hardcodes the request default to 0.0 (disabled) with no CLI
+    flag, so OpenAI clients that never send the field can't benefit. Wraps
+    ``APIHandler.validate_model_parameters`` (which runs right after the body
+    fields are read) and fills in the default only when the client did not
+    send the field. The default is ``--rep-penalty`` when given, else the
+    model's ``generation_config.json`` ``repetition_penalty`` (ignoring the
+    neutral 1.0), resolved once on the first request.
+    """
+    import mlx_lm.server as _server_mod
+
+    APIHandler = _server_mod.APIHandler
+    _orig = APIHandler.validate_model_parameters
+    resolved: dict = {}
+
+    def _default_penalty(handler):
+        if "penalty" in resolved:
+            return resolved["penalty"]
+        penalty = rep_config["penalty"]
+        if penalty is None:
+            try:
+                from turboquant_mlx.generate import resolve_model_path
+
+                model = handler.response_generator.cli_args.model
+                cfg_file = resolve_model_path(model) / "generation_config.json"
+                if cfg_file.exists():
+                    with open(cfg_file, encoding="utf-8") as f:
+                        cfg_rep = json.load(f).get("repetition_penalty")
+                    if cfg_rep and cfg_rep != 1.0:
+                        penalty = cfg_rep
+            except Exception as e:
+                sys.stderr.write(
+                    f"[turboquant-serve] Could not read generation_config "
+                    f"repetition_penalty ({e})\n"
+                )
+        if penalty is not None:
+            sys.stderr.write(
+                f"[turboquant-serve] Default repetition_penalty={penalty} "
+                f"(ctx={rep_config['context_size']}) for requests that don't "
+                "set one\n"
+            )
+        resolved["penalty"] = penalty
+        return penalty
+
+    def validate_model_parameters(self):
+        penalty = _default_penalty(self)
+        if penalty is not None and "repetition_penalty" not in self.body:
+            self.repetition_penalty = penalty
+            if "repetition_context_size" not in self.body:
+                self.repetition_context_size = rep_config["context_size"]
+        return _orig(self)
+
+    APIHandler.validate_model_parameters = validate_model_parameters
+
+
 def _patch_prefill_keepalive(interval: float = 10.0) -> None:
     """Mirror mlx_lm's prefill keepalive *comments* as real SSE ``data:`` chunks.
 
@@ -422,7 +500,10 @@ def main() -> None:
     stream_config, remaining = _extract_stream_args(remaining)
     prefill_stats_config, remaining = _extract_prefill_stats_args(remaining)
     prefill_keepalive_config, remaining = _extract_prefill_keepalive_args(remaining)
+    rep_config, remaining = _extract_rep_penalty_args(remaining)
     _patch_loader(stream_config)
+    if rep_config is not None:
+        _patch_default_rep_penalty(rep_config)
     if kv_config is not None:
         _patch_kv_cache(kv_config)
     if prefill_stats_config is not None:

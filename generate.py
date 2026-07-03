@@ -237,9 +237,23 @@ def main():
     )
     parser.add_argument(
         "--rep-penalty", type=float, default=None,
-        help="Repetition penalty (e.g. 1.04). Disabled when omitted. "
-             "Recommended for hybrid Nemotron-3 to avoid long-gen tail "
-             "loops; omit for numeric/math prompts.",
+        help="Repetition penalty (e.g. 1.05). Defaults to the model's "
+             "generation_config.json value when present, else disabled. "
+             "Pass 0 or 1 to force-disable. Recommended for thinking-mode "
+             "models on low-bit builds (breaks think-block loops); omit for "
+             "numeric/math prompts.",
+    )
+    parser.add_argument(
+        "--no-think", action="store_true",
+        help="Disable thinking mode via the chat template "
+             "(enable_thinking=False). Much faster and immune to "
+             "think-block loops on thinking-capable models.",
+    )
+    parser.add_argument(
+        "--multi-think", action="store_true",
+        help="Allow more than one </think> token per generation. By default "
+             "a second </think> is masked once one has been emitted, which "
+             "prevents low-bit thinking models from re-emitting their answer.",
     )
     parser.add_argument(
         "--rep-ctx", type=int, default=256,
@@ -298,10 +312,13 @@ def main():
     if hasattr(tokenizer, 'apply_chat_template'):
         try:
             messages = [{"role": "user", "content": args.prompt}]
+            template_kwargs = {"enable_thinking": False} if args.no_think else {}
             prompt = tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True,
+                **template_kwargs,
             )
-            print("[INFO] Applied chat template")
+            print("[INFO] Applied chat template"
+                  + (" (thinking disabled)" if args.no_think else ""))
         except Exception:
             pass  # Fall back to raw prompt
 
@@ -311,14 +328,17 @@ def main():
     from turboquant_mlx.sampling import (
         eos_token_ids,
         make_min_tokens_logits_processor,
+        make_single_think_close_logits_processor,
+        think_close_token_id,
     )
 
-    # Truncation defaults come from the model's own generation_config.json
-    # (e.g. Qwen ships top_k=20/top_p=0.95). Untruncated temperature sampling
-    # over a 250K vocab occasionally picks a stray special token — seen as a
-    # doubled answer when '</think>' is sampled where '<|im_end|>' belongs.
-    top_p, top_k = args.top_p, args.top_k
-    if top_p is None or top_k is None:
+    # Sampling defaults come from the model's own generation_config.json
+    # (e.g. Qwen ships top_k=20/top_p=0.95; loop-prone low-bit builds can ship
+    # repetition_penalty). Untruncated temperature sampling over a 250K vocab
+    # occasionally picks a stray special token — seen as a doubled answer when
+    # '</think>' is sampled where '<|im_end|>' belongs.
+    top_p, top_k, rep_penalty = args.top_p, args.top_k, args.rep_penalty
+    if top_p is None or top_k is None or rep_penalty is None:
         # load_turboquant already resolved/downloaded the model, so this is a
         # cache hit; read the json directly rather than pulling in transformers
         # (only an optional [eval] dependency).
@@ -331,11 +351,21 @@ def main():
                     top_p = gen_cfg.get("top_p")
                 if top_k is None:
                     top_k = gen_cfg.get("top_k")
+                if rep_penalty is None:
+                    cfg_rep = gen_cfg.get("repetition_penalty")
+                    # 1.0 is transformers' neutral default — not a real request
+                    if cfg_rep and cfg_rep != 1.0:
+                        rep_penalty = cfg_rep
+                        print(f"[INFO] repetition_penalty {cfg_rep} "
+                              f"(from generation_config.json)")
         except Exception as e:
             print(
                 f"[INFO] Could not read generation_config.json for "
                 f"{args.model}; sampling without truncation defaults ({e})"
             )
+    # 0 or 1.0 on the CLI force-disables (1.0 is mathematically neutral)
+    if rep_penalty is not None and rep_penalty in (0.0, 1.0):
+        rep_penalty = None
     sampler = make_sampler(
         temp=args.temp,
         top_p=top_p if top_p is not None else 0.0,
@@ -345,11 +375,17 @@ def main():
         args.min_tokens, eos_token_ids(tokenizer)
     )
     logits_processors = []
-    if args.rep_penalty is not None:
+    if rep_penalty is not None:
         logits_processors.extend(make_logits_processors(
-            repetition_penalty=args.rep_penalty,
+            repetition_penalty=rep_penalty,
             repetition_context_size=args.rep_ctx,
         ))
+    if not args.multi_think:
+        think_guard = make_single_think_close_logits_processor(
+            think_close_token_id(tokenizer)
+        )
+        if think_guard is not None:
+            logits_processors.append(think_guard)
     if min_tokens_proc is not None:
         logits_processors.append(min_tokens_proc)
     if not logits_processors:

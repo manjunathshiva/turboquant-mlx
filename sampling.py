@@ -45,6 +45,51 @@ def make_min_tokens_logits_processor(
     return processor
 
 
+def make_single_think_close_logits_processor(
+    think_close_id: Optional[int],
+) -> Optional[Callable[[mx.array, mx.array], mx.array]]:
+    """Build a logits processor that allows at most one ``</think>`` token.
+
+    Low-bit thinking models occasionally sample a second ``</think>`` where
+    ``<|im_end|>`` belongs — the model then "reopens" its answer and emits it
+    again verbatim (observed on ternary-expert builds). After the first
+    ``</think>`` appears in the generated tokens, this processor masks it,
+    so the only sensible continuation after the answer is EOS.
+
+    Args:
+        think_close_id: Token id of ``</think>``. Pass ``None`` (or a
+            negative id) when the tokenizer has no such single token —
+            the processor is disabled and ``None`` is returned.
+
+    Returns:
+        A ``(tokens, logits) -> logits`` callable for mlx-lm's
+        ``logits_processors`` kwarg, or ``None`` if no-op.
+    """
+    if think_close_id is None or think_close_id < 0:
+        return None
+    neg_inf = -float("inf")
+    seen = False
+
+    def processor(tokens: mx.array, logits: mx.array) -> mx.array:
+        nonlocal seen
+        if not seen and tokens is not None and tokens.size:
+            seen = bool(mx.any(tokens == think_close_id).item())
+        if seen:
+            logits[..., think_close_id] = neg_inf
+        return logits
+
+    return processor
+
+
+def think_close_token_id(tokenizer) -> Optional[int]:
+    """Return the id of ``</think>`` when it encodes to a single token."""
+    try:
+        ids = tokenizer.encode("</think>", add_special_tokens=False)
+    except Exception:
+        return None
+    return ids[0] if len(ids) == 1 else None
+
+
 def eos_token_ids(tokenizer) -> set:
     """Return the full set of EOS token ids a tokenizer considers terminal.
 

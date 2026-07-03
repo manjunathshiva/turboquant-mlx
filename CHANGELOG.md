@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-07-03
+
+### Added — thinking-mode ergonomics for low-bit builds
+
+- **`--no-think` on the generate CLI**: disables thinking via the chat
+  template (`enable_thinking=False`). On loop-prone low-bit thinking builds
+  this answers instantly instead of deliberating for minutes. (The server
+  equivalent already exists: `--chat-template-args '{"enable_thinking": false}'`.)
+- **`--rep-penalty` now defaults from the model's `generation_config.json`**
+  (ignoring the neutral 1.0), so a build that ships `repetition_penalty: 1.05`
+  gets it automatically; `--rep-penalty 0` (or 1) force-disables. A 12-trial
+  A/B/C/D sweep on the ternary 35B showed a light repetition penalty is the
+  only sampling change that reliably exits `<think>` (3/3 vs 2/3 for every
+  other config, including the pre-0.12.2 sampler).
+- **`turboquant-serve --rep-penalty` / `--rep-ctx`**: server-side default
+  `repetition_penalty` for OpenAI clients that never send the field
+  (mlx_lm.server hardcodes the request default to 0.0 with no flag). When the
+  flag is omitted, the default is read from the model's
+  `generation_config.json`, resolved once on the first request.
+
+### Fixed — doubled answers from a second `</think>`
+
+- **Single-think-block guard** in the generate CLI: once `</think>` has been
+  emitted, its logit is masked, so the model can't "reopen" the answer and
+  emit it twice (observed sporadically on ternary builds even with top-k/top-p
+  truncation). Disable with `--multi-think` for models that legitimately emit
+  several think blocks.
+
 ## [0.12.2] - 2026-07-03
 
 ### Fixed — generate CLI sampler now honors the model's generation_config
