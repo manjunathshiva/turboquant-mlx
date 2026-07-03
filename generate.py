@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import glob
+import json
 import sys
 from pathlib import Path
 
@@ -318,15 +319,23 @@ def main():
     # doubled answer when '</think>' is sampled where '<|im_end|>' belongs.
     top_p, top_k = args.top_p, args.top_k
     if top_p is None or top_k is None:
+        # load_turboquant already resolved/downloaded the model, so this is a
+        # cache hit; read the json directly rather than pulling in transformers
+        # (only an optional [eval] dependency).
         try:
-            from transformers import GenerationConfig
-            gen_cfg = GenerationConfig.from_pretrained(args.model)
-            if top_p is None:
-                top_p = getattr(gen_cfg, "top_p", None)
-            if top_k is None:
-                top_k = getattr(gen_cfg, "top_k", None)
-        except Exception:
-            pass
+            gen_cfg_file = resolve_model_path(args.model) / "generation_config.json"
+            if gen_cfg_file.exists():
+                with open(gen_cfg_file, encoding="utf-8") as f:
+                    gen_cfg = json.load(f)
+                if top_p is None:
+                    top_p = gen_cfg.get("top_p")
+                if top_k is None:
+                    top_k = gen_cfg.get("top_k")
+        except Exception as e:
+            print(
+                f"[INFO] Could not read generation_config.json for "
+                f"{args.model}; sampling without truncation defaults ({e})"
+            )
     sampler = make_sampler(
         temp=args.temp,
         top_p=top_p if top_p is not None else 0.0,
