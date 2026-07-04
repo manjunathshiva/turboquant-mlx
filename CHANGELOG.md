@@ -35,6 +35,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   satisfied the flat-routings dispatch (`n_tokens == k`) and misaligned its
   rows against the k*k routing indices; the flat path is now additionally
   guarded by `indices.size == k`.
+- **Pinned `transformers<5.13`**: transformers 5.13 dropped string keys in
+  `AutoTokenizer.register`, which mlx-lm <= 0.31.3 still uses — every
+  `import mlx_lm` fails. The cap will be lifted once a compatible mlx-lm
+  release exists.
 
 ## [0.12.3] - 2026-07-03
 
