@@ -6,6 +6,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-07-04
+
+### Added
+
+- **`--no-think` and sampling defaults on the streaming CLI**
+  (`python -m turboquant_mlx.stream.stream_generate`), matching the 0.12.3
+  generate CLI: `--no-think` (disable thinking via the chat template),
+  `--multi-think`, and `--top-p` / `--top-k` / `--rep-penalty` / `--rep-ctx`
+  with defaults read from the model's `generation_config.json` (the neutral
+  1.0 repetition penalty is ignored; 0 or 1 on the CLI force-disables), plus
+  the single-`</think>` guard against re-emitted answers.
+
+### Fixed
+
+- **Small unsorted MoE batches no longer dequantize every expert.** mlx-lm's
+  `SwitchGLU` only sorts routings once `indices.size >= 64`, so 2-7-token
+  forwards (e.g. a short prompt extension on a warm prefix cache) arrive
+  unsorted and fell into the dequantize-all fallback — ~34x the cost of a
+  single-token forward (measured 1.17 s vs 34 ms per forward on the ternary
+  Qwen3.6-35B-A3B). Both unsorted row layouts (gate/up: one row per token;
+  down: one row per routing) now flatten into the fused per-routing kernel:
+  M=2 1177→233 ms (5.0x), M=4 1156→269 ms (4.3x); single-token decode and
+  sorted-batch paths are unchanged. Applies to both the resident and the
+  streaming expert layers.
+- **Top-k routing collision on unsorted batches**: a batch of exactly k
+  unsorted tokens on a top-k model (e.g. 4 tokens on GPT-OSS's top-4)
+  satisfied the flat-routings dispatch (`n_tokens == k`) and misaligned its
+  rows against the k*k routing indices; the flat path is now additionally
+  guarded by `indices.size == k`.
+- **Pinned `transformers<5.13`**: transformers 5.13 dropped string keys in
+  `AutoTokenizer.register`, which mlx-lm <= 0.31.3 still uses — every
+  `import mlx_lm` fails. The cap will be lifted once a compatible mlx-lm
+  release exists.
+
 ## [0.12.3] - 2026-07-03
 
 ### Added — thinking-mode ergonomics for low-bit builds

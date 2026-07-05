@@ -14,6 +14,7 @@ Example (Qwen3.6-35B-A3B, ~16 GB on disk, runs in ~5 GB RAM):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import time
@@ -22,7 +23,13 @@ import mlx.core as mx
 
 import turboquant_mlx.compat  # noqa: F401
 from mlx_lm import generate as mlx_generate
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
+from turboquant_mlx.generate import resolve_model_path
+from turboquant_mlx.sampling import (
+    make_single_think_close_logits_processor,
+    think_close_token_id,
+)
 
 from .loader import load_streaming
 
@@ -66,6 +73,27 @@ def main():
                    help="Force F_NOCACHE (page cache off). Default: auto by model-size-vs-RAM.")
     p.add_argument("--fast", action="store_true", help="Disable QJL correction for faster decode.")
     p.add_argument("--no-chat-template", action="store_true")
+    p.add_argument("--top-p", type=float, default=None,
+                   help="Nucleus sampling threshold. Defaults to the model's "
+                        "generation_config.json value when present, else disabled. "
+                        "Pass 0 to force-disable.")
+    p.add_argument("--top-k", type=int, default=None,
+                   help="Top-k truncation. Defaults to the model's "
+                        "generation_config.json value when present, else disabled. "
+                        "Pass 0 to force-disable.")
+    p.add_argument("--rep-penalty", type=float, default=None,
+                   help="Repetition penalty (e.g. 1.05). Defaults to the model's "
+                        "generation_config.json value when present, else disabled. "
+                        "Pass 0 or 1 to force-disable.")
+    p.add_argument("--rep-ctx", type=int, default=256,
+                   help="Repetition penalty context window in tokens (default: 256).")
+    p.add_argument("--no-think", action="store_true",
+                   help="Disable thinking mode via the chat template "
+                        "(enable_thinking=False). Much faster and immune to "
+                        "think-block loops on thinking-capable models.")
+    p.add_argument("--multi-think", action="store_true",
+                   help="Allow more than one </think> token per generation. By default "
+                        "a second </think> is masked once one has been emitted.")
     args = p.parse_args()
 
     t0 = time.time()
@@ -79,15 +107,65 @@ def main():
 
     prompt = args.prompt
     if not args.no_chat_template and hasattr(tok, "apply_chat_template"):
+        template_kwargs = {"enable_thinking": False} if args.no_think else {}
         prompt = tok.apply_chat_template(
-            [{"role": "user", "content": args.prompt}], add_generation_prompt=True
+            [{"role": "user", "content": args.prompt}], add_generation_prompt=True,
+            **template_kwargs,
         )
 
-    sampler = make_sampler(temp=args.temp)
+    # Sampling defaults come from the model's own generation_config.json,
+    # mirroring turboquant_mlx.generate: top_p/top_k truncation (a stray
+    # '</think>' sampled where EOS belongs doubles the answer) and
+    # repetition_penalty for loop-prone low-bit thinking builds.
+    top_p, top_k, rep_penalty = args.top_p, args.top_k, args.rep_penalty
+    if top_p is None or top_k is None or rep_penalty is None:
+        try:
+            gen_cfg_file = resolve_model_path(args.model) / "generation_config.json"
+            if gen_cfg_file.exists():
+                with open(gen_cfg_file, encoding="utf-8") as f:
+                    gen_cfg = json.load(f)
+                if top_p is None:
+                    top_p = gen_cfg.get("top_p")
+                if top_k is None:
+                    top_k = gen_cfg.get("top_k")
+                if rep_penalty is None:
+                    cfg_rep = gen_cfg.get("repetition_penalty")
+                    # 1.0 is transformers' neutral default — not a real request
+                    if cfg_rep and cfg_rep != 1.0:
+                        rep_penalty = cfg_rep
+                        print(f"[INFO] repetition_penalty {cfg_rep} "
+                              f"(from generation_config.json)")
+        except Exception as e:
+            print(f"[INFO] Could not read generation_config.json for "
+                  f"{args.model}; sampling without truncation defaults ({e})")
+    # 0 or 1.0 on the CLI force-disables (1.0 is mathematically neutral)
+    if rep_penalty is not None and rep_penalty in (0.0, 1.0):
+        rep_penalty = None
+    sampler = make_sampler(
+        temp=args.temp,
+        top_p=top_p if top_p is not None else 0.0,
+        top_k=top_k if top_k is not None else 0,
+    )
+    logits_processors = []
+    if rep_penalty is not None:
+        logits_processors.extend(make_logits_processors(
+            repetition_penalty=rep_penalty,
+            repetition_context_size=args.rep_ctx,
+        ))
+    if not args.multi_think:
+        think_guard = make_single_think_close_logits_processor(
+            think_close_token_id(tok)
+        )
+        if think_guard is not None:
+            logits_processors.append(think_guard)
+    if not logits_processors:
+        logits_processors = None
+
     print("=" * 60)
     t = time.time()
     text = mlx_generate(model, tok, prompt=prompt, max_tokens=args.max_tokens,
-                        sampler=sampler, verbose=True)
+                        sampler=sampler, logits_processors=logits_processors,
+                        verbose=True)
     dt = time.time() - t
     print("=" * 60)
     # Count tokens actually generated (the model may stop at EOS before

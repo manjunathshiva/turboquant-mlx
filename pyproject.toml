@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboquant-mlx-full"
-version = "0.12.3"
+version = "0.12.4"
 description = "Extreme weight and KV cache compression for LLMs on Apple Silicon (MLX implementation of Google's TurboQuant)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -40,6 +40,10 @@ classifiers = [
 dependencies = [
     "mlx>=0.20.0",
     "mlx-lm>=0.31.3",
+    # transformers 5.13 dropped string keys in AutoTokenizer.register, which
+    # mlx-lm <= 0.31.3 still uses (NewlineTokenizer) — import breaks. Lift the
+    # cap once an mlx-lm release is compatible.
+    "transformers<5.13",
     "numpy",
 ]
 

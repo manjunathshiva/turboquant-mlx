@@ -159,7 +159,12 @@ class PolarQuantizedSwitchLinear(nn.Module):
                 y = y + mx.expand_dims(self["bias"][indices], -2)
             return y
 
-        if n_tokens == k:
+        # indices.size == k distinguishes the genuine flat forms (sorted
+        # routings / single-token down_proj) from an unsorted batch that
+        # merely happens to have as many tokens as experts-per-token
+        # (e.g. 4 tokens x top-4): there indices is (..., L, k) with
+        # L == k, and treating x rows as flat routings would misalign.
+        if n_tokens == k and indices.size == k:
             # Large batched routing (diffusion canvas / big prefill via
             # SwitchMLP's do_sort): the per-row gather kernel re-reads x per
             # output row, so past _GATHER_MM_MIN_ROUTINGS it loses badly.
@@ -210,6 +215,42 @@ class PolarQuantizedSwitchLinear(nn.Module):
             if "bias" in self:
                 y = y + mx.expand_dims(self["bias"][indices], -2)
             return y
+
+        # Small unsorted batch: mlx-lm's SwitchGLU only sorts at
+        # indices.size >= 64, so short forwards (e.g. a 2-7 token prompt
+        # extension on a warm prefix cache) land here. Dequantizing every
+        # expert for a handful of routings is ~34x slower than the fused
+        # per-routing kernel, so flatten (token, expert) pairs and reuse
+        # polar_multi_gather_qmv. Two unsorted row layouts arrive:
+        #   gate/up: one row per token          (..., 1, 1, in), idx (..., k)
+        #   down:    one row per (token,expert) (..., k, 1, in), idx (..., k)
+        # Also taken regardless of size when the materialized expert tensor
+        # would be OOM-large (issue #1).
+        n_routings = indices.size
+        if x.shape[-2] == 1 and (
+            n_routings < _GATHER_MM_MIN_ROUTINGS
+            or self._dequant_bytes() > _GATHER_MM_MAX_DEQUANT_BYTES
+        ):
+            if n_tokens * k == n_routings:
+                # one row per token: repeat each row for its k experts
+                x_rows = mx.repeat(
+                    x.reshape(n_tokens, self.input_dims), repeats=k, axis=0
+                )
+            elif n_tokens == n_routings:
+                # already one row per (token, expert) routing
+                x_rows = x.reshape(n_routings, self.input_dims)
+            else:
+                x_rows = None
+            if x_rows is not None:
+                y = polar_multi_gather_qmv(
+                    self.weight, self.scales, self.codebook,
+                    x_rows, indices.reshape(-1),
+                    self.bits, self.group_size, trit=self.trit,
+                )  # (n_routings, output_dims)
+                y = y.reshape(list(indices.shape) + [1, self.output_dims])
+                if "bias" in self:
+                    y = y + mx.expand_dims(self["bias"][indices], -2)
+                return y
 
         # Prefill path: vectorized dequant + gather_mm
         w_deq = self._dequantize_all()  # (num_experts, out, in)

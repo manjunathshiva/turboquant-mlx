@@ -25,6 +25,7 @@ import mlx.nn as nn
 from turboquant_mlx.core.rotation import rotate_input
 from turboquant_mlx.kernels.polar_gather_qmv import polar_gather_qmv
 from turboquant_mlx.kernels.polar_multi_gather_qmv import polar_multi_gather_qmv
+from turboquant_mlx.layers.polar_switch_linear import _GATHER_MM_MIN_ROUTINGS
 
 
 class ExpertCache:
@@ -456,7 +457,9 @@ class StreamingSwitchLinear(nn.Module):
             )
             return y.reshape(list(indices.shape) + [1, self.output_dims])
 
-        if n_tokens == k:
+        # indices.size == k distinguishes genuine flat forms from an
+        # unsorted batch with n_tokens == k (see PolarQuantizedSwitchLinear).
+        if n_tokens == k and indices.size == k:
             x_2d = x.reshape(k, self.input_dims)
             y = polar_multi_gather_qmv(
                 w_sel, s_sel, self.codebook,
@@ -464,6 +467,31 @@ class StreamingSwitchLinear(nn.Module):
                 trit=self.trit,
             )
             return y.reshape(list(indices.shape) + [1, self.output_dims])
+
+        # Small unsorted batch: flatten (token, expert) pairs into the fused
+        # per-routing kernel instead of dequantizing the selected experts
+        # through the Python unpack path. Both unsorted row layouts, as in
+        # PolarQuantizedSwitchLinear.__call__. Past _GATHER_MM_MIN_ROUTINGS
+        # the per-row kernel re-reads x per output row and loses; keep the
+        # dequant-selected + gather_mm fallback there (mlx-lm sorts those
+        # shapes anyway, so this only affects direct callers).
+        n_routings = indices.size
+        if x.shape[-2] == 1 and n_routings < _GATHER_MM_MIN_ROUTINGS:
+            if n_tokens * k == n_routings:
+                x_rows = mx.repeat(
+                    x.reshape(n_tokens, self.input_dims), repeats=k, axis=0
+                )
+            elif n_tokens == n_routings:
+                x_rows = x.reshape(n_routings, self.input_dims)
+            else:
+                x_rows = None
+            if x_rows is not None:
+                y = polar_multi_gather_qmv(
+                    w_sel, s_sel, self.codebook,
+                    x_rows, idx_local_flat, self.bits, self.group_size,
+                    trit=self.trit,
+                )
+                return y.reshape(list(indices.shape) + [1, self.output_dims])
 
         # Prefill: dequantize only the selected experts, gather_mm locally.
         w_deq = self._dequantize_selected(w_sel, s_sel)
