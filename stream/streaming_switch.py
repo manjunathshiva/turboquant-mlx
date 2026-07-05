@@ -25,6 +25,7 @@ import mlx.nn as nn
 from turboquant_mlx.core.rotation import rotate_input
 from turboquant_mlx.kernels.polar_gather_qmv import polar_gather_qmv
 from turboquant_mlx.kernels.polar_multi_gather_qmv import polar_multi_gather_qmv
+from turboquant_mlx.layers.polar_switch_linear import _GATHER_MM_MIN_ROUTINGS
 
 
 class ExpertCache:
@@ -470,9 +471,12 @@ class StreamingSwitchLinear(nn.Module):
         # Small unsorted batch: flatten (token, expert) pairs into the fused
         # per-routing kernel instead of dequantizing the selected experts
         # through the Python unpack path. Both unsorted row layouts, as in
-        # PolarQuantizedSwitchLinear.__call__.
+        # PolarQuantizedSwitchLinear.__call__. Past _GATHER_MM_MIN_ROUTINGS
+        # the per-row kernel re-reads x per output row and loses; keep the
+        # dequant-selected + gather_mm fallback there (mlx-lm sorts those
+        # shapes anyway, so this only affects direct callers).
         n_routings = indices.size
-        if x.shape[-2] == 1:
+        if x.shape[-2] == 1 and n_routings < _GATHER_MM_MIN_ROUTINGS:
             if n_tokens * k == n_routings:
                 x_rows = mx.repeat(
                     x.reshape(n_tokens, self.input_dims), repeats=k, axis=0
