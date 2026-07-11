@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Disk-persistent prompt cache on `turboquant-serve`** (`--disk-cache
+  [DIR]`, plus `--disk-cache-budget-gb` / `--disk-cache-min-tokens` /
+  `--disk-cache-save-every`): each completed request's KV cache is
+  checkpointed to disk (background writer, LRU byte-budget eviction) and
+  restored on a prompt-cache miss — most importantly the first request after
+  a server restart, which resumes from the longest saved token prefix
+  instead of re-prefilling the whole conversation (a ~13-minute cold 22K
+  prefill on a streaming 122B on a 16 GB mini becomes a checkpoint load plus
+  a short suffix prefill). Token-level longest-common-prefix matching keeps
+  the exact semantics of the in-memory cache: strict-prefix checkpoints
+  extend any cache type, longer/divergent checkpoints are used only for
+  trimmable caches. TurboQuant-quantized KV caches serialize too
+  (`TurboQuantKVCache.from_state` added). Measured on a 64 GB M4 with
+  Qwen3.6-35B-A3B-tq3-g32 and a 16.3K-token conversation: the first turn
+  after a restart drops 21.1 s → 3.0 s (6.9x; 99.9% of the prompt served
+  from the 700 MB checkpoint, 22 tokens freshly prefilled, greedy output
+  byte-identical to the never-restarted server).
+
 ## [0.12.4] - 2026-07-04
 
 ### Added
