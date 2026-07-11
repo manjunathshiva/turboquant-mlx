@@ -8,6 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Asymmetric expert precision** (`convert --expert-down-bits {2,3,4}`):
+  quantize MoE expert down-projections at a higher-precision Gaussian
+  codebook while up/gate take the `--mlp-bits` / `--ternary-experts` tier —
+  the down projection is the SwiGLU summation bottleneck, and llama.cpp-family
+  2-bit mixes (up/gate IQ2_XXS, down Q2_K) rely on exactly this asymmetry.
+  Applies only to MoE SwitchLinear experts (dense MLPs are untouched); the
+  loader needs no matching rule because per-layer bits are self-describing
+  via the on-disk codebook length. Works with both the in-memory and
+  `--streaming` converters.
+
+### Added
+
 - **Disk-persistent prompt cache on `turboquant-serve`** (`--disk-cache
   [DIR]`, plus `--disk-cache-budget-gb` / `--disk-cache-min-tokens` /
   `--disk-cache-save-every`): each completed request's KV cache is

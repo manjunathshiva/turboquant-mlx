@@ -33,6 +33,7 @@ def convert(
     mlp_bits: int = None,
     mlp_group_size: int = None,
     ternary_experts: bool = False,
+    expert_down_bits: int = None,
 ):
     """Convert a HuggingFace model to TurboQuant-compressed MLX format.
 
@@ -70,6 +71,7 @@ def convert(
         mlp_bits=mlp_bits,
         mlp_group_size=mlp_group_size,
         ternary_experts=ternary_experts,
+        expert_down_bits=expert_down_bits,
     )
 
     # Load model
@@ -199,6 +201,15 @@ def configure_parser() -> argparse.ArgumentParser:
              "Attention stays at --attn-bits/--bits.",
     )
     parser.add_argument(
+        "--expert-down-bits",
+        type=int, default=None, choices=[2, 3, 4],
+        help="Asymmetric expert precision: quantize MoE expert down "
+             "projections at this Gaussian-codebook width while up/gate take "
+             "the --mlp-bits / --ternary-experts tier. The down projection is "
+             "the SwiGLU summation bottleneck; llama.cpp-family 2-bit mixes "
+             "keep it above up/gate for exactly this reason.",
+    )
+    parser.add_argument(
         "--streaming",
         action="store_true",
         help="Memory-bounded conversion: write each quantized layer to a shard "
@@ -229,6 +240,7 @@ def main():
             mlp_bits=args.mlp_bits,
             mlp_group_size=args.mlp_group_size,
             ternary_experts=args.ternary_experts,
+            expert_down_bits=args.expert_down_bits,
         )
         return
     convert(
@@ -245,6 +257,7 @@ def main():
         mlp_bits=args.mlp_bits,
         mlp_group_size=args.mlp_group_size,
         ternary_experts=args.ternary_experts,
+        expert_down_bits=args.expert_down_bits,
     )
 
 
