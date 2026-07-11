@@ -406,17 +406,30 @@ class TurboQuantKVCache:
     def state(self, v):
         if not v:
             return
+
+        def _norm(x):
+            # A deserialized state (mlx tree_unflatten) hands back lists in
+            # place of tuples and may use zero-size arrays for absent tiers.
+            if x is None:
+                return None
+            if isinstance(x, (list, tuple)):
+                return tuple(x)
+            if isinstance(x, mx.array) and x.size == 0:
+                return None
+            return x
+
         # 2-tuple legacy form: (tq_keys, tq_values)
         if len(v) == 2:
-            self._tq_keys, self._tq_values = v
+            self._tq_keys = _norm(v[0])
+            self._tq_values = _norm(v[1])
             return
         # 4-tuple form: (tq_keys, tq_values, fp16_keys, fp16_values)
         if len(v) == 4:
             tq_k, tq_v, fp_k, fp_v = v
-            self._tq_keys = tq_k
-            self._tq_values = tq_v
-            self._fp16_keys = fp_k
-            self._fp16_values = fp_v
+            self._tq_keys = _norm(tq_k)
+            self._tq_values = _norm(tq_v)
+            self._fp16_keys = _norm(fp_k)
+            self._fp16_values = _norm(fp_v)
             return
         raise ValueError(
             f"Unexpected state length {len(v)}; expected 2 or 4."
@@ -460,6 +473,48 @@ class TurboQuantKVCache:
             raise ValueError(
                 f"Unexpected meta_state length {len(v)}; expected 4, 5, or 6."
             )
+
+    @classmethod
+    def from_state(cls, state, meta_state):
+        """Recreate a cache from ``(state, meta_state)``.
+
+        This is the ``mlx_lm.models.cache`` deserialization protocol, used by
+        the turboquant-serve disk prompt cache. Constructor params come from
+        ``meta_state`` (any of the 4/5/6-tuple forms the setter accepts).
+        """
+        v = list(meta_state)
+        if len(v) == 4:
+            k_bits = v_bits = int(v[1])
+            group_size, seed, min_tok = int(v[2]), int(v[3]), 0
+        elif len(v) in (5, 6):
+            k_bits, v_bits = int(v[1]), int(v[2])
+            group_size, seed = int(v[3]), int(v[4])
+            min_tok = int(v[5]) if len(v) == 6 else 0
+        else:
+            raise ValueError(
+                f"Unexpected meta_state length {len(v)}; expected 4, 5, or 6."
+            )
+        obj = cls(
+            k_bits=k_bits,
+            v_bits=v_bits,
+            group_size=group_size,
+            seed=seed,
+            min_tokens_before_quant=min_tok,
+        )
+        obj.state = state
+        obj.offset = int(v[0])
+        # The serialized fp16 tier is trimmed to the tokens it holds, but the
+        # update path slice-assigns into a buffer preallocated at the full
+        # threshold width — re-pad it so later appends fit.
+        if obj._fp16_keys is not None:
+            held = obj._fp16_keys.shape[-2]
+            if held < min_tok:
+                pad = [(0, 0)] * (obj._fp16_keys.ndim - 2) + [
+                    (0, min_tok - held), (0, 0)
+                ]
+                obj._fp16_keys = mx.pad(obj._fp16_keys, pad)
+                obj._fp16_values = mx.pad(obj._fp16_values, pad)
+        return obj
 
     def is_trimmable(self):
         return True

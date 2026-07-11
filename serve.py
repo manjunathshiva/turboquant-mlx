@@ -57,6 +57,29 @@ Usage:
     # Code) — mirror prefill keepalives as real SSE data chunks:
     turboquant-serve --model manjunathshiva/qwen3.5-122b-tq3 \
         --cache-budget-gb 4 --prefill-keepalive --prompt-concurrency 1
+    # Persist the prompt cache to disk so a restarted server resumes a long
+    # agentic conversation instead of re-prefilling it from scratch:
+    turboquant-serve --model manjunathshiva/qwen3.5-122b-tq3 \
+        --cache-budget-gb 4 --disk-cache --prompt-concurrency 1
+
+Disk prompt cache (cold prefill survives restarts)
+--------------------------------------------------
+``--disk-cache [DIR]`` makes the prompt-prefix cache persistent: after each
+completed request the KV cache is checkpointed to DIR (default: a per-model
+directory under ``~/.cache/turboquant/prompt-cache``), and any later request
+— including the first one after a server restart — resumes from the longest
+saved token prefix instead of re-prefilling from scratch. On a 16 GB mini
+serving a streaming 122B, that turns the ~13-minute cold 22K-token re-prefill
+after a restart into a checkpoint load plus a short suffix prefill. Matching
+is token-level longest-common-prefix (same semantics as the in-memory cache),
+writes happen on a background thread, and the store is trimmed to
+``--disk-cache-budget-gb`` (default 10) by least-recently-used eviction.
+``--disk-cache-min-tokens`` (default 512) skips checkpointing short prompts;
+``--disk-cache-save-every`` (default 1024) throttles how often a growing
+conversation is re-checkpointed — a restart loses at most that much prefill.
+Works with ``--kv-bits``/``--kv-k-bits`` (TurboQuant KV caches serialize) and
+with hybrid-attention models (non-trimmable GDN/Mamba states restore from
+strict-prefix checkpoints). Single server process per cache directory.
 
 Prefill keepalive (long cold prefills behind a proxy)
 -----------------------------------------------------
@@ -294,6 +317,60 @@ def _extract_prefill_stats_args(argv):
     return dict(stats_file=ns.prefill_stats_file), remaining
 
 
+def _extract_disk_cache_args(argv):
+    """Peel the disk prompt-cache flags off ``argv``.
+
+    ``--disk-cache [DIR]`` persists prompt-cache checkpoints to disk and
+    restores them across server restarts (and in-memory evictions), so a
+    restarted server resumes a long conversation with a file load plus a
+    short suffix prefill instead of a full cold prefill. DIR defaults to a
+    per-model directory under ``~/.cache/turboquant/prompt-cache``.
+    Returns ``(config | None, remaining_argv)``.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--disk-cache", dest="disk_cache", nargs="?",
+                        const="auto", default=None)
+    parser.add_argument("--disk-cache-budget-gb", dest="budget_gb",
+                        type=float, default=10.0)
+    parser.add_argument("--disk-cache-min-tokens", dest="min_tokens",
+                        type=int, default=512)
+    parser.add_argument("--disk-cache-save-every", dest="save_every",
+                        type=int, default=1024)
+    ns, remaining = parser.parse_known_args(argv)
+
+    if ns.disk_cache is None:
+        return None, remaining
+
+    cache_dir = ns.disk_cache
+    if cache_dir == "auto":
+        import hashlib
+        from pathlib import Path
+
+        # The model arg stays in `remaining` for mlx_lm.server; peek at it
+        # to build a stable per-model default directory.
+        model = "default"
+        for i, a in enumerate(remaining):
+            if a == "--model" and i + 1 < len(remaining):
+                model = remaining[i + 1]
+                break
+            if a.startswith("--model="):
+                model = a.split("=", 1)[1]
+                break
+        tag = hashlib.sha256(model.encode()).hexdigest()[:8]
+        name = model.rstrip("/").rsplit("/", 1)[-1] or "default"
+        cache_dir = str(
+            Path("~/.cache/turboquant/prompt-cache").expanduser()
+            / f"{name}-{tag}"
+        )
+
+    return dict(
+        cache_dir=cache_dir,
+        budget_gb=ns.budget_gb,
+        min_tokens=ns.min_tokens,
+        save_every=ns.save_every,
+    ), remaining
+
+
 def _extract_prefill_keepalive_args(argv):
     """Peel the prefill-keepalive flags off ``argv``.
 
@@ -506,11 +583,17 @@ def main() -> None:
     prefill_stats_config, remaining = _extract_prefill_stats_args(remaining)
     prefill_keepalive_config, remaining = _extract_prefill_keepalive_args(remaining)
     rep_config, remaining = _extract_rep_penalty_args(remaining)
+    disk_cache_config, remaining = _extract_disk_cache_args(remaining)
     _patch_loader(stream_config)
     if rep_config is not None:
         _patch_default_rep_penalty(rep_config)
     if kv_config is not None:
         _patch_kv_cache(kv_config)
+    if disk_cache_config is not None:
+        # Install before prefill-stats so the stats wrapper (which patches
+        # last, hence runs first) records reuse *including* disk restores.
+        from turboquant_mlx.disk_prompt_cache import install as _install_disk_cache
+        _install_disk_cache(**disk_cache_config)
     if prefill_stats_config is not None:
         from turboquant_mlx.prefill_stats import install as _install_prefill_stats
         _install_prefill_stats(**prefill_stats_config)
@@ -544,6 +627,16 @@ def main() -> None:
             f"group={kv_config['group_size']}, "
             f"sink={kv_config['min_tokens_before_quant']} "
             "(forces single-stream serving)\n"
+        )
+    if disk_cache_config is not None:
+        sys.stderr.write(
+            f"[turboquant-serve] Disk prompt cache: ON "
+            f"(dir={disk_cache_config['cache_dir']}, "
+            f"budget={disk_cache_config['budget_gb']:g} GB, "
+            f"min_tokens={disk_cache_config['min_tokens']}, "
+            f"save_every={disk_cache_config['save_every']}) — prompt-cache "
+            "checkpoints persist across restarts; cold prefill resumes from "
+            "the longest saved prefix.\n"
         )
     if prefill_stats_config is not None:
         dest = prefill_stats_config["stats_file"] or "stderr only"
