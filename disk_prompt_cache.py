@@ -287,6 +287,7 @@ class DiskPromptCache:
                 if self._file(entry.digest).exists():
                     entries[entry.digest] = entry
         except FileNotFoundError:
+            # Expected on first run (no index written yet): start empty.
             pass
         except Exception as e:
             self.log.write(
@@ -299,8 +300,10 @@ class DiskPromptCache:
             if f.stem not in self._entries:
                 try:
                     f.unlink()
-                except OSError:
-                    pass
+                except OSError as e:
+                    self.log.write(
+                        f"[disk-cache] failed to remove stale file {f}: {e}\n"
+                    )
 
     def _save_index(self) -> None:
         # Called with self._lock held. Atomic via tmp + rename.
@@ -317,9 +320,11 @@ class DiskPromptCache:
         # Called with self._lock held.
         self._entries.pop(digest, None)
         try:
-            self._file(digest).unlink()
-        except OSError:
-            pass
+            self._file(digest).unlink(missing_ok=True)
+        except OSError as e:
+            self.log.write(
+                f"[disk-cache] failed to remove checkpoint {digest}: {e}\n"
+            )
 
     def _evict_over_budget(self, protect: str) -> None:
         # Called with self._lock held.
@@ -435,9 +440,11 @@ class DiskPromptCache:
             mx.save_safetensors(str(path), data, meta)
         except Exception as e:
             try:
-                path.unlink()
-            except OSError:
-                pass
+                path.unlink(missing_ok=True)
+            except OSError as unlink_err:
+                self.log.write(
+                    f"[disk-cache] cleanup failed for {path}: {unlink_err}\n"
+                )
             with self._lock:
                 self._pending.pop(digest, None)
             self.log.write(f"[disk-cache] save failed: {e}\n")
@@ -533,6 +540,11 @@ class DiskPromptCache:
     def install(self) -> "DiskPromptCache":
         """Wrap ``LRUPromptCache`` so all servers persist through this store."""
         from mlx_lm.models.cache import LRUPromptCache
+
+        if self._orig_fetch is not None:
+            # Already installed: re-wrapping would capture our own wrappers
+            # as the "originals" and make uninstall leave a permanent patch.
+            return self
 
         store = self
         self._orig_fetch = LRUPromptCache.fetch_nearest_cache

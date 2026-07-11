@@ -355,6 +355,7 @@ def test_uninstall_restores_originals(tmp_path):
     orig_insert = LRUPromptCache.insert_cache
     store = _store(tmp_path)
     store.install()
+    store.install()  # double-install must not capture our own wrappers
     assert LRUPromptCache.fetch_nearest_cache is not orig_fetch
     store.uninstall()
     assert LRUPromptCache.fetch_nearest_cache is orig_fetch
