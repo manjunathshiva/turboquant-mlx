@@ -41,15 +41,22 @@ def _total_ram_bytes() -> int:
         return int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]))
 
 
+def _model_file_bytes(model_path: str) -> int:
+    """Total bytes of the model's safetensors (0 when none are found).
+
+    glob.escape so a model_path with [ ] etc. still matches."""
+    files = glob.glob(os.path.join(glob.escape(model_path), "model*.safetensors"))
+    return sum(os.path.getsize(f) for f in files)
+
+
 def _auto_page_cache(model_path: str) -> bool:
     """True iff the model's safetensors fit comfortably in RAM (page cache helps)."""
     try:
-        # glob.escape so a model_path with [ ] etc. still matches; no files ->
-        # we can't size the model, so fail safe to F_NOCACHE rather than 0 bytes.
-        files = glob.glob(os.path.join(glob.escape(model_path), "model*.safetensors"))
-        if not files:
+        # No files -> we can't size the model, so fail safe to F_NOCACHE
+        # rather than treating it as 0 bytes.
+        model_bytes = _model_file_bytes(model_path)
+        if not model_bytes:
             return False
-        model_bytes = sum(os.path.getsize(f) for f in files)
         ram = _total_ram_bytes()
     except Exception:
         return False  # any uncertainty -> the always-safe F_NOCACHE path
@@ -88,6 +95,44 @@ def _cap_active_experts(layers, max_active: int) -> None:
         print(f"[stream] K-reduction: capped router top_k {changed[0]}->{min(changed[0], max_active)} "
               f"on {len(changed)} MoE blocks (~2x less disk I/O; pass "
               f"max_active_experts=0 / --max-active-experts 0 to use native routing)")
+
+
+# Auto cache budget (ds4-style): size the expert cache from what the GPU can
+# actually keep resident — a fraction of Metal's max recommended working set,
+# minus the resident (non-expert) weights, minus a reserve for the KV cache
+# and the transient prefill workspace — instead of a fixed guess.
+_AUTO_WSS_FRACTION = 0.8
+_AUTO_RESERVE_BYTES = int(2.0e9)
+_AUTO_MIN_BUDGET_BYTES = int(0.5e9)
+
+_SAFETENSORS_ITEMSIZE = {"U32": 4, "I32": 4, "F32": 4, "F16": 2, "BF16": 2,
+                         "U8": 1}
+
+
+def _streamed_expert_bytes(reader) -> int:
+    """Total on-disk bytes of the tensors the streaming swap pages from disk
+    (MoE switch_mlp weight/scales) — everything else stays resident."""
+    total = 0
+    for key, loc in reader._index.items():
+        if "switch_mlp" not in key:
+            continue
+        if not (key.endswith(".weight") or key.endswith(".scales")):
+            continue
+        n = 1
+        for d in loc.shape:
+            n *= d
+        total += n * _SAFETENSORS_ITEMSIZE.get(loc.dtype, 4)
+    return total
+
+
+def _auto_cache_budget(model_bytes: int, expert_bytes: int,
+                       wss_bytes: int) -> int:
+    """Pure budget math (unit-testable without a model): what's left of the
+    working-set fraction after the resident weights and the reserve, clamped
+    to [floor, all experts] — a budget past every expert buys nothing."""
+    resident = max(0, model_bytes - expert_bytes)
+    budget = int(_AUTO_WSS_FRACTION * wss_bytes) - resident - _AUTO_RESERVE_BYTES
+    return max(_AUTO_MIN_BUDGET_BYTES, min(budget, expert_bytes))
 
 
 # A model repo may ship its own routing profile alongside the weights (the
@@ -136,14 +181,23 @@ def _load_pin_spec(pin_file: str) -> "tuple[dict, list]":
     return pin_layers, pin_order
 
 
-def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
+def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                    prefetch_workers: int = 8, prefetch_ahead: int = 0,
                    pin_file: str | None = None, max_active_experts: int = 4,
                    use_page_cache: bool | None = None, use_hotlist: bool = True,
-                   preload_pins: bool = True):
+                   preload_pins: bool = True, wire_memory: bool = False):
     """Returns (model, tokenizer, cache).
 
-    cache_budget_gb bounds total resident expert memory (LRU-evicted).
+    cache_budget_gb bounds total resident expert memory (LRU-evicted). Pass
+    the string ``"auto"`` to size it from the machine instead: 80% of Metal's
+    max recommended working set, minus the resident (non-expert) weights,
+    minus a 2 GB reserve for KV + prefill workspace, clamped to
+    [0.5 GB, all experts].
+    wire_memory=True (--wire-memory) additionally raises MLX's wired-memory
+    limit to resident + budget + reserve (capped at the working set) so the
+    weights and the expert cache stay resident under memory pressure — the
+    ds4 mlock idea. Opt-in: on a roomy machine the OS page cache already
+    keeps re-reads warm, and wiring takes memory from other apps.
     prefetch_workers parallelizes per-layer expert reads (1 = serial baseline).
     prefetch_ahead speculatively prefetches this many upcoming layers' experts
     (predicted from the previous token's routing); 0 disables prefetch.
@@ -169,6 +223,33 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
         use_page_cache = _auto_page_cache(local_path)
     model, tok = load_turboquant(local_path, lazy=True, fast=fast)
     reader = SafetensorsExpertReader(local_path, use_page_cache=use_page_cache)
+
+    expert_bytes = _streamed_expert_bytes(reader)
+    resident_bytes = max(0, _model_file_bytes(local_path) - expert_bytes)
+    auto = isinstance(cache_budget_gb, str) and cache_budget_gb.lower() == "auto"
+    if isinstance(cache_budget_gb, str) and not auto:
+        cache_budget_gb = float(cache_budget_gb)
+    if auto:
+        wss = mx.device_info()["max_recommended_working_set_size"]
+        budget_bytes = _auto_cache_budget(resident_bytes + expert_bytes,
+                                          expert_bytes, wss)
+        cache_budget_gb = budget_bytes / 1e9
+        print(f"[stream] auto budget: {_AUTO_WSS_FRACTION:.0%} × working set "
+              f"{wss / 1e9:.1f} GB − resident {resident_bytes / 1e9:.1f} GB − "
+              f"reserve {_AUTO_RESERVE_BYTES / 1e9:.1f} GB -> cache "
+              f"{cache_budget_gb:.1f} GB (experts on disk: "
+              f"{expert_bytes / 1e9:.1f} GB)")
+    if wire_memory:
+        wss = mx.device_info()["max_recommended_working_set_size"]
+        want = int(min(wss, resident_bytes + cache_budget_gb * 1e9
+                       + _AUTO_RESERVE_BYTES))
+        try:
+            mx.set_wired_limit(want)
+            print(f"[stream] wired-memory limit {want / 1e9:.1f} GB — weights "
+                  "and expert cache stay resident under memory pressure")
+        except Exception as exc:
+            print(f"[stream] could not set wired limit ({exc}); continuing unwired")
+
     cache = ExpertCache(
         reader, int(cache_budget_gb * 1e9),
         prefetch_workers=prefetch_workers,

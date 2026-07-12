@@ -8,6 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Auto cache budget + wired memory for streaming** (ds4-style):
+  `--cache-budget-gb auto` sizes the expert cache from the machine — 80% of
+  Metal's max recommended working set, minus the resident (non-expert)
+  weights (computed from the safetensors index, nothing loaded), minus a
+  2 GB KV/prefill reserve, clamped to [0.5 GB, all experts]. On a 16 GB mini
+  with the 122B ternary this lands on ~4.2 GB, matching the hand-tuned
+  known-good value. `--wire-memory` (opt-in) raises MLX's wired-memory limit
+  to resident + budget + reserve so weights and the expert cache stay
+  resident under memory pressure — the MLX-native equivalent of ds4's
+  mlock'd cache chunks. Off by default: on a roomy machine the OS page cache
+  already keeps re-reads warm, and wiring takes memory from other apps.
+
 - **Shipped hot-expert list for streaming** (ds4-style): a model repo can
   now carry its own routing profile — drop `calibrate_experts.py`'s pin
   output into the model directory as `hot_experts.json` and the streaming

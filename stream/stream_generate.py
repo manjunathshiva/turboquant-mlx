@@ -39,6 +39,18 @@ def _rss_gb() -> float:
     return int(out) / 1024 / 1024
 
 
+def _budget_arg(v: str):
+    """--cache-budget-gb accepts a float or the literal 'auto'."""
+    if v.lower() == "auto":
+        return "auto"
+    try:
+        return float(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a number of GB or 'auto', got {v!r}"
+        ) from None
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Stream-generate from a TurboQuant MoE model (experts paged from disk)."
@@ -47,8 +59,14 @@ def main():
     p.add_argument("--prompt", default="Why is the sky blue?")
     p.add_argument("--max-tokens", type=int, default=256)
     p.add_argument("--temp", type=float, default=0.7)
-    p.add_argument("--cache-budget-gb", type=float, default=3.0,
-                   help="Max resident expert memory (LRU-evicted). Lower = less RAM, more disk reads.")
+    p.add_argument("--cache-budget-gb", type=_budget_arg, default=3.0,
+                   help="Max resident expert memory (LRU-evicted). Lower = less RAM, "
+                        "more disk reads. Pass 'auto' to size it from the machine "
+                        "(80%% of Metal's working set minus resident weights).")
+    p.add_argument("--wire-memory", action="store_true",
+                   help="Raise MLX's wired-memory limit so weights + expert cache "
+                        "stay resident under memory pressure (for constrained "
+                        "machines; roomy ones don't need it).")
     p.add_argument("--prefetch-workers", type=int, default=8,
                    help="Threads for parallel per-layer expert reads. 1 = serial baseline.")
     p.add_argument("--prefetch-ahead", type=int, default=0,
@@ -107,6 +125,7 @@ def main():
         prefetch_workers=args.prefetch_workers, prefetch_ahead=args.prefetch_ahead,
         pin_file=args.pin_file, max_active_experts=args.max_active_experts,
         use_page_cache=args.use_page_cache, use_hotlist=args.use_hotlist,
+        wire_memory=args.wire_memory,
     )
     print(f"[stream] loaded in {time.time() - t0:.1f}s | resident RSS={_rss_gb():.2f} GB")
 

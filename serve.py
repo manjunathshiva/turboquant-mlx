@@ -34,7 +34,10 @@ Passing ``--cache-budget-gb`` routes the loader through
 ``turboquant_mlx.stream.load_streaming`` instead of the resident loader, so a
 MoE whose weights exceed RAM (e.g. a 122B on a 16 GB Mac mini) can be *served*
 over the OpenAI API — only the router-selected experts are paged from disk per
-token. The Flash-MoE streaming levers come with it: ``--max-active-experts``
+token. ``--cache-budget-gb auto`` sizes the expert cache from the machine
+(80% of Metal's recommended working set minus the resident weights and a KV
+reserve), and ``--wire-memory`` keeps weights + cache resident under memory
+pressure (for constrained machines). The Flash-MoE streaming levers come with it: ``--max-active-experts``
 (K-reduction, default 4 → ~2x less disk I/O) and ``--use-page-cache`` /
 ``--no-page-cache`` (auto by model-size-vs-RAM; trust-OS is ~2.4x faster decode
 when the model fits free RAM, F_NOCACHE otherwise). Hot-expert pinning:
@@ -211,9 +214,11 @@ def _patch_loader(stream_config=None) -> None:
             )
 
         if stream_config is not None:
+            bud = stream_config["cache_budget_gb"]
+            bud_s = bud if isinstance(bud, str) else f"{bud} GB"
             sys.stderr.write(
                 f"[turboquant-serve] Streaming TurboQuant model from {model_path} "
-                f"(cache_budget={stream_config['cache_budget_gb']} GB)\n"
+                f"(cache_budget={bud_s})\n"
             )
             # load_streaming returns (model, tok, cache); the cache stays alive
             # via the StreamingSwitchLinear modules that reference it.
@@ -288,7 +293,10 @@ def _extract_stream_args(argv):
     flags are no-ops without a budget (and are documented as such).
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--cache-budget-gb", type=float, default=None)
+    # str, not float: accepts 'auto' (machine-sized budget); load_streaming
+    # parses numeric strings itself.
+    parser.add_argument("--cache-budget-gb", type=str, default=None)
+    parser.add_argument("--wire-memory", action="store_true")
     parser.add_argument("--max-active-experts", type=int, default=4)
     parser.add_argument("--prefetch-workers", type=int, default=8)
     parser.add_argument("--prefetch-ahead", type=int, default=0)
@@ -304,14 +312,27 @@ def _extract_stream_args(argv):
     if ns.cache_budget_gb is None:
         return None, remaining
 
+    budget = ns.cache_budget_gb
+    if budget.lower() == "auto":
+        budget = "auto"
+    else:
+        try:
+            budget = float(budget)
+        except ValueError:
+            raise SystemExit(
+                f"--cache-budget-gb expects a number of GB or 'auto', "
+                f"got {budget!r}"
+            ) from None
+
     stream_config = dict(
-        cache_budget_gb=ns.cache_budget_gb,
+        cache_budget_gb=budget,
         max_active_experts=ns.max_active_experts,
         use_page_cache=ns.use_page_cache,
         prefetch_workers=ns.prefetch_workers,
         prefetch_ahead=ns.prefetch_ahead,
         pin_file=ns.pin_file,
         use_hotlist=ns.use_hotlist,
+        wire_memory=ns.wire_memory,
     )
     return stream_config, remaining
 
@@ -667,11 +688,13 @@ def main() -> None:
     if stream_config is not None:
         pc = "auto" if stream_config["use_page_cache"] is None else (
             "on" if stream_config["use_page_cache"] else "off")
+        bud = stream_config["cache_budget_gb"]
+        bud_s = bud if isinstance(bud, str) else f"{bud} GB"
+        wired = ", wire_memory=on" if stream_config["wire_memory"] else ""
         sys.stderr.write(
-            f"[turboquant-serve] Expert streaming: cache_budget="
-            f"{stream_config['cache_budget_gb']} GB, "
+            f"[turboquant-serve] Expert streaming: cache_budget={bud_s}, "
             f"max_active_experts={stream_config['max_active_experts']}, "
-            f"page_cache={pc} (single-user; use --prompt-concurrency 1)\n"
+            f"page_cache={pc}{wired} (single-user; use --prompt-concurrency 1)\n"
         )
     if kv_config is not None:
         if kv_config["tq_bits"] is not None:
