@@ -154,16 +154,23 @@ class ToolSyntaxGreedyProcessor:
             self._pos = self._base
         if n > self._pos:
             new_ids = tokens[self._pos:].tolist()
-            self._scanner.consume(self.tokenizer.decode(new_ids))
-            self._pos = n
+            text = self.tokenizer.decode(new_ids)
+            # A multi-byte character split across the decode boundary shows
+            # up as trailing replacement characters; hold those tokens back
+            # and re-decode them together with the next call's tokens. Safe
+            # to defer: every structural character is single-byte ASCII, so
+            # pending partial bytes can never complete a tag or quote.
+            held = 0
+            while text.endswith("�") and held < len(new_ids):
+                held += 1
+                text = self.tokenizer.decode(new_ids[:-held])
+            self._scanner.consume(text)
+            self._pos = n - held
         if not self._scanner.force_greedy:
             return logits
         idx = mx.argmax(logits, axis=-1, keepdims=True)
         mask = mx.arange(logits.shape[-1]) == idx
         return mx.where(mask, logits, mx.array(-math.inf, dtype=logits.dtype))
-
-
-_INSTALLED = False
 
 
 def install(
@@ -176,11 +183,14 @@ def install(
     server calls ``_make_sampler(args, tokenizer)`` immediately before it on
     the same thread in both the batched and single-stream paths — so the
     sampler patch stashes the tokenizer for the processor patch to read.
+
+    Idempotent: the wrapper functions carry a marker attribute, so a second
+    ``install`` is a no-op instead of double-wrapping.
     """
-    global _INSTALLED
-    if _INSTALLED:
-        return
     import mlx_lm.server as _server_mod
+
+    if getattr(_server_mod._make_sampler, "_tool_syntax_greedy", False):
+        return
 
     _orig_make_sampler = _server_mod._make_sampler
     _orig_make_processors = _server_mod._make_logits_processors
@@ -199,6 +209,6 @@ def install(
             )
         return processors
 
+    _make_sampler._tool_syntax_greedy = True
     _server_mod._make_sampler = _make_sampler
     _server_mod._make_logits_processors = _make_logits_processors
-    _INSTALLED = True

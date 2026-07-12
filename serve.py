@@ -572,6 +572,10 @@ def _extract_tool_syntax_greedy_args(argv):
     parser.add_argument("--tool-syntax-tags", type=str, default=None)
     ns, remaining = parser.parse_known_args(argv)
     if not ns.tool_syntax_greedy:
+        if ns.tool_syntax_tags is not None:
+            raise SystemExit(
+                "--tool-syntax-tags requires --tool-syntax-greedy"
+            )
         return None, remaining
     config = {}
     if ns.tool_syntax_tags is not None:

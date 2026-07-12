@@ -153,6 +153,49 @@ def test_custom_tags():
     assert "G" in txt
 
 
+class ByteTokenizer:
+    """One token id per UTF-8 *byte* — every multi-byte character arrives
+    split across calls, exercising the partial-character hold-back."""
+
+    def decode(self, ids):
+        return bytes(ids).decode("utf-8", errors="replace")
+
+
+def test_multibyte_utf8_split_across_tokens():
+    gen = '<tool_call>{"città": "Zürich"}</tool_call> naïve tail'
+    data = gen.encode("utf-8")
+    proc = ToolSyntaxGreedyProcessor(ByteTokenizer())
+    history = list("prompt ".encode("utf-8"))
+    decisions = []
+    for b in data:
+        out = proc(mx.array(history), _logits())
+        decisions.append(_is_greedy(out))
+        history.append(b)
+
+    def bpos(sub):
+        return data.index(sub.encode("utf-8"))
+
+    # Opening the block is the sampler's decision.
+    assert not any(decisions[: len("<tool_call>")])
+    # Structure and the non-ASCII key are greedy end to end — the split
+    # bytes of 'à' must not corrupt the scanner's string state.
+    assert decisions[bpos("{")]
+    kstart = bpos('"città"')
+    klen = len('"città"'.encode("utf-8"))
+    assert all(decisions[kstart : kstart + klen])
+    # Value contents (including the split 'ü' and the closing-quote
+    # position) are sampled; the quote that opens the value is greedy.
+    vstart = bpos('"Zürich"')
+    vlen = len('"Zürich"'.encode("utf-8"))
+    assert decisions[vstart]
+    assert not any(decisions[vstart + 1 : vstart + vlen])
+    # Back to structure after the value closes.
+    assert decisions[bpos("}")]
+    # The close tag must still be recognized with multi-byte text around it.
+    tail = bpos(" naïve")
+    assert not any(decisions[tail:])
+
+
 def test_rewind_rebuilds_state():
     proc = ToolSyntaxGreedyProcessor(CharTokenizer())
     prompt = _encode("hi ")
@@ -181,10 +224,22 @@ def test_greedy_mask_preserves_argmax():
     assert math.isinf(out[0, 11].item()) and out[0, 11].item() < 0
 
 
+def test_tags_without_greedy_flag_errors():
+    from turboquant_mlx.serve import _extract_tool_syntax_greedy_args
+
+    with pytest.raises(SystemExit):
+        _extract_tool_syntax_greedy_args(["--tool-syntax-tags", "<fn>,</fn>"])
+    config, remaining = _extract_tool_syntax_greedy_args(
+        ["--tool-syntax-greedy", "--tool-syntax-tags", "<fn>,</fn>", "--model", "m"]
+    )
+    assert config == {"open_tag": "<fn>", "close_tag": "</fn>"}
+    assert remaining == ["--model", "m"]
+
+
 def test_install_is_idempotent_and_appends_processor():
     import mlx_lm.server as server_mod
 
-    import turboquant_mlx.tool_syntax_greedy as tsg
+    from turboquant_mlx import tool_syntax_greedy as tsg
 
     orig_sampler = server_mod._make_sampler
     orig_procs = server_mod._make_logits_processors
@@ -232,4 +287,3 @@ def test_install_is_idempotent_and_appends_processor():
     finally:
         server_mod._make_sampler = orig_sampler
         server_mod._make_logits_processors = orig_procs
-        tsg._INSTALLED = False
