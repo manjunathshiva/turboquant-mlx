@@ -61,6 +61,10 @@ Usage:
     # agentic conversation instead of re-prefilling it from scratch:
     turboquant-serve --model manjunathshiva/qwen3.5-122b-tq3 \
         --cache-budget-gb 4 --disk-cache --prompt-concurrency 1
+    # Agent harness on a low-bit build: sample normally, but decode tool-call
+    # structure greedily so fabricated syntax can't slip in:
+    turboquant-serve --model <tq-path> --temp 0.7 --tool-syntax-greedy \
+        --prompt-concurrency 1
 
 Disk prompt cache (cold prefill survives restarts)
 --------------------------------------------------
@@ -80,6 +84,17 @@ conversation is re-checkpointed — a restart loses at most that much prefill.
 Works with ``--kv-bits``/``--kv-k-bits`` (TurboQuant KV caches serialize) and
 with hybrid-attention models (non-trimmable GDN/Mamba states restore from
 strict-prefix checkpoints). Single server process per cache directory.
+
+Greedy tool-call syntax (--tool-syntax-greedy)
+----------------------------------------------
+Agent harnesses need temperature (greedy loops across turns on low-bit
+builds) but sampled *structure* is where those builds fabricate tool calls.
+``--tool-syntax-greedy`` masks the logits to argmax while the generation is
+inside a ``<tool_call>``...``</tool_call>`` block — braces, keys, colons,
+tags — and leaves the configured sampler in charge of the JSON *value*
+strings (the free-text payloads, where greedy causes repetition) and of the
+decision to emit a tool call at all. Tags are configurable via
+``--tool-syntax-tags "<open>,</close>"`` for non-Hermes templates.
 
 Prefill keepalive (long cold prefills behind a proxy)
 -----------------------------------------------------
@@ -544,6 +559,32 @@ def _patch_default_rep_penalty(rep_config) -> None:
     APIHandler.validate_model_parameters = validate_model_parameters
 
 
+def _extract_tool_syntax_greedy_args(argv):
+    """Peel ``--tool-syntax-greedy`` (and optional ``--tool-syntax-tags``).
+
+    ``--tool-syntax-tags`` takes ``"<open>,</close>"`` for chat templates
+    that don't use the Hermes-style ``<tool_call>`` markers.
+
+    Returns ``(config | None, remaining_argv)``.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--tool-syntax-greedy", action="store_true")
+    parser.add_argument("--tool-syntax-tags", type=str, default=None)
+    ns, remaining = parser.parse_known_args(argv)
+    if not ns.tool_syntax_greedy:
+        return None, remaining
+    config = {}
+    if ns.tool_syntax_tags is not None:
+        open_tag, _, close_tag = ns.tool_syntax_tags.partition(",")
+        if not open_tag or not close_tag:
+            raise SystemExit(
+                "--tool-syntax-tags expects '<open>,</close>', got: "
+                f"{ns.tool_syntax_tags!r}"
+            )
+        config = {"open_tag": open_tag, "close_tag": close_tag}
+    return config, remaining
+
+
 def _patch_prefill_keepalive(interval: float = 10.0) -> None:
     """Mirror mlx_lm's prefill keepalive *comments* as real SSE ``data:`` chunks.
 
@@ -584,7 +625,11 @@ def main() -> None:
     prefill_keepalive_config, remaining = _extract_prefill_keepalive_args(remaining)
     rep_config, remaining = _extract_rep_penalty_args(remaining)
     disk_cache_config, remaining = _extract_disk_cache_args(remaining)
+    tool_greedy_config, remaining = _extract_tool_syntax_greedy_args(remaining)
     _patch_loader(stream_config)
+    if tool_greedy_config is not None:
+        from turboquant_mlx.tool_syntax_greedy import install as _install_tool_greedy
+        _install_tool_greedy(**tool_greedy_config)
     if rep_config is not None:
         _patch_default_rep_penalty(rep_config)
     if kv_config is not None:
@@ -637,6 +682,18 @@ def main() -> None:
             f"save_every={disk_cache_config['save_every']}) — prompt-cache "
             "checkpoints persist across restarts; cold prefill resumes from "
             "the longest saved prefix.\n"
+        )
+    if tool_greedy_config is not None:
+        from turboquant_mlx.tool_syntax_greedy import (
+            _DEFAULT_CLOSE_TAG,
+            _DEFAULT_OPEN_TAG,
+        )
+        open_tag = tool_greedy_config.get("open_tag", _DEFAULT_OPEN_TAG)
+        close_tag = tool_greedy_config.get("close_tag", _DEFAULT_CLOSE_TAG)
+        sys.stderr.write(
+            f"[turboquant-serve] Tool-syntax greedy: ON "
+            f"(tags {open_tag}...{close_tag}) — structural tokens decode at "
+            "argmax; JSON value strings keep the request sampler.\n"
         )
     if prefill_stats_config is not None:
         dest = prefill_stats_config["stats_file"] or "stderr only"

@@ -8,6 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Greedy tool-call syntax on `turboquant-serve`** (`--tool-syntax-greedy`,
+  optional `--tool-syntax-tags "<open>,</close>"`): a per-request logits
+  processor masks logits to argmax while the generation is inside a
+  `<tool_call>`...`</tool_call>` block — braces, keys, colons, tags — and
+  leaves the configured sampler in charge of JSON *value* strings (free-text
+  payloads) and of the decision to emit a tool call at all, so agent
+  harnesses can serve low-bit builds at temperature without fabricated
+  tool-call structure. Composes with any sampler and with the repetition
+  penalties (argmax of the penalized distribution). Validated on the 35B
+  asymmetric-ternary build: well-formed `tool_calls` via curl, and no
+  regression on the Opencode agent smoke test (2/2 pass, same latency).
+
 - **Asymmetric expert precision** (`convert --expert-down-bits {2,3,4}`):
   quantize MoE expert down-projections at a higher-precision Gaussian
   codebook while up/gate take the `--mlp-bits` / `--ternary-experts` tier —
