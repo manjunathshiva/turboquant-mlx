@@ -8,6 +8,7 @@ Uses the FakeReader from test_stream_cache so no model or disk is involved.
 import json
 
 import numpy as np
+import pytest
 
 import turboquant_mlx.stream.streaming_switch as ss
 from turboquant_mlx.stream.loader import _find_hotlist, _load_pin_spec
@@ -102,6 +103,20 @@ def test_load_pin_spec_preserves_rank_order_and_dedups(tmp_path):
     pin_layers, pin_order = _load_pin_spec(str(f))
     assert pin_order == [(4, 17), (0, 3), (2, 9)]  # file order, deduped
     assert pin_layers == {4: {17}, 0: {3}, 2: {9}}
+
+
+@pytest.mark.parametrize("payload", [
+    json.dumps([[0, 1]]),                    # flat list, not {"pin": ...}
+    json.dumps({"perm": {"0": [1, 2]}}),     # wrong key
+    json.dumps({"pin": [[0]]}),              # entry too short
+    json.dumps({"pin": [[0, "x"]]}),         # non-int expert
+    json.dumps({"pin": [0, 1]}),             # entries not pairs
+])
+def test_load_pin_spec_rejects_malformed(tmp_path, payload):
+    f = tmp_path / "pin.json"
+    f.write_text(payload)
+    with pytest.raises(ValueError):
+        _load_pin_spec(str(f))
 
 
 def test_preload_stats_exposed():

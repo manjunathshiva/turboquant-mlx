@@ -102,17 +102,32 @@ def _find_hotlist(model_path: str) -> str | None:
     return cand if os.path.isfile(cand) else None
 
 
-def _load_pin_spec(pin_file: str):
+def _load_pin_spec(pin_file: str) -> "tuple[dict, list]":
     """Parse ``{"pin": [[layer, expert], ...]}`` keeping BOTH a per-layer set
     (to build pin keys during the layer swap) and the file's rank order
-    (hottest first, so a budget-capped preload keeps the hottest)."""
+    (hottest first, so a budget-capped preload keeps the hottest).
+
+    Raises ``ValueError`` with the offending file/entry on a malformed spec —
+    a shipped hotlist comes from a downloaded repo, so the caller decides
+    whether that is fatal (explicit ``--pin-file``) or skippable (auto-found).
+    """
     with open(pin_file) as f:
-        pairs = json.load(f).get("pin", [])
+        data = json.load(f)
+    pairs = data.get("pin") if isinstance(data, dict) else None
+    if not isinstance(pairs, list):
+        raise ValueError(
+            f'{pin_file}: expected {{"pin": [[layer, expert], ...]}}'
+        )
     pin_layers: dict = {}
     pin_order: list = []
     seen = set()
-    for layer, expert in pairs:
-        le = (int(layer), int(expert))
+    for item in pairs:
+        try:
+            le = (int(item[0]), int(item[1]))
+        except (TypeError, ValueError, IndexError, KeyError):
+            raise ValueError(
+                f"{pin_file}: bad pin entry {item!r} (want [layer, expert])"
+            ) from None
         if le in seen:
             continue
         seen.add(le)
@@ -162,12 +177,22 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
 
     # Load the hot-expert pin spec (frequency-based pinning, #2 + shipped
     # hotlist, #6). Keyed by layer so we can pin all three projections of each
-    # hot expert; the rank order drives the startup preload.
-    if pin_file is None and use_hotlist:
-        pin_file = _find_hotlist(local_path)
-        if pin_file:
-            print(f"[stream] found shipped hot-expert list: {pin_file}")
-    pin_layers, pin_order = _load_pin_spec(pin_file) if pin_file else ({}, [])
+    # hot expert; the rank order drives the startup preload. A malformed
+    # explicit --pin-file fails loud (the user asked for that exact file); a
+    # malformed shipped hotlist only warns — it came with the download, and
+    # the model runs fine without it.
+    pin_layers: dict = {}
+    pin_order: list = []
+    if pin_file:
+        pin_layers, pin_order = _load_pin_spec(pin_file)
+    elif use_hotlist:
+        shipped = _find_hotlist(local_path)
+        if shipped:
+            try:
+                pin_layers, pin_order = _load_pin_spec(shipped)
+                print(f"[stream] found shipped hot-expert list: {shipped}")
+            except ValueError as exc:  # includes json.JSONDecodeError
+                print(f"[stream] ignoring malformed shipped hotlist: {exc}")
 
     # Locate the transformer layer stack and its weight-key prefix. Multimodal
     # MoEs (qwen3_5_moe) nest it under `language_model.model.layers`; text-only
