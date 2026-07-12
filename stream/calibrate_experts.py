@@ -162,6 +162,8 @@ def analyze(args):
     print(f"[analyze] pin {len(pin)} experts (~{used / 1e9:.1f} GB, cost "
           f"{cost / 1e6:.0f} MB/expert) covering {100 * covered / max(1, total_sel):.1f}% "
           f"of all selections -> {args.pin_out}")
+    print(f"[analyze] to ship it, copy {args.pin_out} to <model_dir>/hot_experts.json — "
+          "the streaming loader pins+preloads it automatically")
 
     # ---- perm.json: per-layer co-activation ordering for the #3 repack ----
     # Must be a FULL permutation of all E experts — experts that never fired in

@@ -27,6 +27,14 @@ from turboquant_mlx.kernels.polar_gather_qmv import polar_gather_qmv
 from turboquant_mlx.kernels.polar_multi_gather_qmv import polar_multi_gather_qmv
 from turboquant_mlx.layers.polar_switch_linear import _GATHER_MM_MIN_ROUTINGS
 
+# Startup hotlist preload: pinned experts may occupy at most this fraction of
+# the cache budget — the LRU set needs working room, or every subsequent miss
+# thrashes a sliver of remaining capacity.
+_PRELOAD_BUDGET_FRACTION = 0.6
+# Specs per preload batch (16 hot experts × 3 projections). Also the budget
+# check granularity: rank order caps the overshoot at one chunk.
+_PRELOAD_CHUNK = 48
+
 
 class ExpertCache:
     """Process-wide LRU cache of per-expert (weight, scales) mx.arrays, with
@@ -103,6 +111,9 @@ class ExpertCache:
         self._pin_keys: set = set(pin_keys or ())
         self._pinned: dict = {}              # (wkey, e) -> (w, s, nbytes)
         self._pin_hits = 0
+        # startup hotlist preload (ds4-style shipped hot-expert list)
+        self.preload_experts = 0             # expert-projections read by preload()
+        self.preload_bytes = 0               # bytes read by preload()
 
     # -- speculative prefetch -----------------------------------------
     def register_layer(self, layer_idx: int, proj_keys: list):
@@ -255,6 +266,52 @@ class ExpertCache:
             self._od[ck] = entry
         self.cur += entry[2]
 
+    def preload(self, pin_specs: list) -> tuple:
+        """Read pinned experts into memory *before the first token* (the
+        ds4-style shipped hotlist). ``pin_specs`` is
+        ``[(weight_key, scales_key, expert), ...]`` in hotness rank order.
+
+        Without this, a pinned expert still costs a critical-path miss the
+        first time the router picks it; preloading converts those cold-start
+        misses into coalesced batch reads at startup.
+
+        Pinned bytes are capped at ``_PRELOAD_BUDGET_FRACTION`` of the byte
+        budget so the LRU keeps working room. The cap is checked once per
+        ``_PRELOAD_CHUNK`` of specs — rank order means the hottest experts
+        load first — and everything past it is removed from the pin set
+        entirely, so it ages through the LRU like any other expert instead
+        of pinning lazily over the cap. Returns ``(n_loaded, n_dropped)``
+        in expert-projections.
+        """
+        cap = self.budget * _PRELOAD_BUDGET_FRACTION
+        pinned_bytes = sum(entry[2] for entry in self._pinned.values())
+        loaded = dropped = 0
+        for start in range(0, len(pin_specs), _PRELOAD_CHUNK):
+            if pinned_bytes >= cap:
+                for wkey, _skey, e in pin_specs[start:]:
+                    if (wkey, e) not in self._pinned:
+                        self._pin_keys.discard((wkey, e))
+                        dropped += 1
+                break
+            by_proj: dict = {}
+            for wkey, skey, e in pin_specs[start:start + _PRELOAD_CHUNK]:
+                if (wkey, e) in self._pinned or (wkey, e) in self._od:
+                    continue
+                by_proj.setdefault((wkey, skey), []).append((wkey, skey, e))
+            for pairs in by_proj.values():
+                # keep gather's coalescing stats clean — preload reads are
+                # accounted in the preload_* counters instead
+                runs0, reads0 = self.read_runs, self.expert_reads
+                entries = self._load_coalesced(pairs)
+                self.read_runs, self.expert_reads = runs0, reads0
+                for ck, entry in entries.items():
+                    self._insert(ck, entry)
+                    pinned_bytes += entry[2]
+                    self.preload_bytes += entry[2]
+                    self.preload_experts += 1
+                    loaded += 1
+        return loaded, dropped
+
     def gather(self, wkey: str, skey: str, experts: list[int]):
         """Return stacked (n, out, packed) weight + (n, out, ng) scales for
         ``experts`` (in the given order)."""
@@ -337,6 +394,8 @@ class ExpertCache:
             "prefetch_dropped": self.prefetch_dropped,
             "resident_experts": len(self._od) + len(self._pinned),
             "pinned_experts": len(self._pinned),
+            "preload_experts": self.preload_experts,
+            "preload_gb": self.preload_bytes / 1e9,
             "resident_gb": self.cur / 1e9,
             "bytes_read_gb": self.bytes_read / 1e9,
             "bytes_prefetched_gb": self.bytes_prefetched / 1e9,

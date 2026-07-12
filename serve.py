@@ -37,8 +37,12 @@ over the OpenAI API — only the router-selected experts are paged from disk per
 token. The Flash-MoE streaming levers come with it: ``--max-active-experts``
 (K-reduction, default 4 → ~2x less disk I/O) and ``--use-page-cache`` /
 ``--no-page-cache`` (auto by model-size-vs-RAM; trust-OS is ~2.4x faster decode
-when the model fits free RAM, F_NOCACHE otherwise). Streaming is a single-user
-path — pair with ``--prompt-concurrency 1``.
+when the model fits free RAM, F_NOCACHE otherwise). Hot-expert pinning:
+``--pin-file`` takes a calibrate_experts.py pin spec, and a ``hot_experts.json``
+shipped in the model directory is picked up automatically (``--no-hotlist``
+disables); pinned experts are preloaded at startup so first-token routing hits
+warm memory. Streaming is a single-user path — pair with
+``--prompt-concurrency 1``.
 
 Usage:
     turboquant-serve --model manjunathshiva/Nemotron-3-Super-120B-A12B-tq3
@@ -289,6 +293,8 @@ def _extract_stream_args(argv):
     parser.add_argument("--prefetch-workers", type=int, default=8)
     parser.add_argument("--prefetch-ahead", type=int, default=0)
     parser.add_argument("--pin-file", default=None)
+    parser.add_argument("--no-hotlist", dest="use_hotlist", action="store_false",
+                        default=True)
     parser.add_argument("--use-page-cache", dest="use_page_cache",
                         action="store_true", default=None)
     parser.add_argument("--no-page-cache", dest="use_page_cache",
@@ -305,6 +311,7 @@ def _extract_stream_args(argv):
         prefetch_workers=ns.prefetch_workers,
         prefetch_ahead=ns.prefetch_ahead,
         pin_file=ns.pin_file,
+        use_hotlist=ns.use_hotlist,
     )
     return stream_config, remaining
 
