@@ -8,7 +8,6 @@ Uses the FakeReader from test_stream_cache so no model or disk is involved.
 import json
 
 import numpy as np
-import mlx.core as mx
 
 import turboquant_mlx.stream.streaming_switch as ss
 from turboquant_mlx.stream.loader import _find_hotlist, _load_pin_spec
