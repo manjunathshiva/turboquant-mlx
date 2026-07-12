@@ -43,6 +43,13 @@ class TurboQuantConfig:
     mlp_bits: Optional[int] = None
     mlp_group_size: Optional[int] = None  # block-scale override for the MLP/expert tier
     ternary_experts: bool = False  # ternary (1.58-bit) MoE experts, stored 2-bit
+    # Asymmetric expert precision (DwarfStar-style): keep the expert
+    # down-projections at a higher-precision Gaussian codebook while up/gate
+    # take the mlp_bits / ternary tier. The down projection is the summation
+    # bottleneck of the SwiGLU, and llama.cpp-family low-bit mixes (q2:
+    # up/gate IQ2_XXS, down Q2_K) rely on exactly this asymmetry. None
+    # disables. Applies only to MoE SwitchLinear experts, never dense MLPs.
+    expert_down_bits: Optional[int] = None
 
     def __post_init__(self):
         if self.bits not in (2, 3, 4):
@@ -62,6 +69,9 @@ class TurboQuantConfig:
             raise ValueError(f"rotation must be 'hadamard', 'blockwise_hadamard', or 'none', got {self.rotation}")
         if not isinstance(self.ternary_experts, bool):
             raise ValueError(f"ternary_experts must be a bool, got {self.ternary_experts!r}")
+        if self.expert_down_bits is not None and self.expert_down_bits not in (2, 3, 4):
+            raise ValueError(
+                f"expert_down_bits must be 2, 3, or 4, got {self.expert_down_bits}")
 
     def bits_for_path(self, path: str) -> int:
         """Resolve the bit-width for a layer based on its dotted path.
@@ -109,6 +119,7 @@ class TurboQuantConfig:
             "mlp_bits": self.mlp_bits,
             "mlp_group_size": self.mlp_group_size,
             "ternary_experts": self.ternary_experts,
+            "expert_down_bits": self.expert_down_bits,
         }
 
     @classmethod
@@ -124,6 +135,7 @@ class TurboQuantConfig:
             mlp_bits=d.get("mlp_bits", None),
             mlp_group_size=d.get("mlp_group_size", None),
             ternary_experts=d.get("ternary_experts", False),
+            expert_down_bits=d.get("expert_down_bits", None),
         )
 
     @property

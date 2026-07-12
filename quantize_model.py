@@ -210,6 +210,14 @@ def turboquant_quantize(
             # Ternary experts pack as base-3 trits (3-entry codebook, 20/uint32,
             # ~1.6 bpw); bits=2 is storage/scale semantics only.
             layer_bits = 2 if use_ternary else tq_config.bits_for_path(path)
+            if (tq_config.expert_down_bits is not None
+                    and path.split(".")[-1] == "down_proj"):
+                # Asymmetric expert precision: the down projection carries a
+                # higher-precision Gaussian codebook than the up/gate tier.
+                # The loader needs no matching rule — per-layer bits are
+                # self-describing via the on-disk codebook length.
+                use_ternary = False
+                layer_bits = tq_config.expert_down_bits
             label = "ternary" if use_ternary else f"{layer_bits}b"
             print(f"[INFO] Quantizing SwitchLinear {path} ({num_experts} experts, {input_dims}d, {label} g{expert_group_size})")
 

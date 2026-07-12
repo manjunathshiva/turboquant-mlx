@@ -117,6 +117,7 @@ def convert_streaming(
     mlp_bits: int = None,
     mlp_group_size: int = None,
     ternary_experts: bool = False,
+    expert_down_bits: int = None,
     max_file_size_gb: int = MAX_FILE_SIZE_GB,
 ):
     """Convert an HF model to TurboQuant MLX format with bounded peak memory.
@@ -137,6 +138,7 @@ def convert_streaming(
         rotation_seed=rotation_seed, fuse_rotations=fuse_rotations,
         use_qjl=use_qjl, attn_bits=attn_bits, mlp_bits=mlp_bits,
         mlp_group_size=mlp_group_size, ternary_experts=ternary_experts,
+        expert_down_bits=expert_down_bits,
     )
 
     print(f"[INFO] Loading model from {hf_path} (lazy)")
