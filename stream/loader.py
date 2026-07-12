@@ -11,7 +11,9 @@ shared expert) stays resident as usual.
 from __future__ import annotations
 
 import glob
+import json
 import os
+import time
 
 import mlx.core as mx
 
@@ -88,10 +90,42 @@ def _cap_active_experts(layers, max_active: int) -> None:
               f"max_active_experts=0 / --max-active-experts 0 to use native routing)")
 
 
+# A model repo may ship its own routing profile alongside the weights (the
+# ds4 hotlist idea): calibrate_experts.py's pin.json, renamed to this, uploaded
+# with the checkpoint. Streaming then warm-starts on any machine with just
+# --cache-budget-gb.
+_HOTLIST_FILENAME = "hot_experts.json"
+
+
+def _find_hotlist(model_path: str) -> str | None:
+    cand = os.path.join(model_path, _HOTLIST_FILENAME)
+    return cand if os.path.isfile(cand) else None
+
+
+def _load_pin_spec(pin_file: str):
+    """Parse ``{"pin": [[layer, expert], ...]}`` keeping BOTH a per-layer set
+    (to build pin keys during the layer swap) and the file's rank order
+    (hottest first, so a budget-capped preload keeps the hottest)."""
+    with open(pin_file) as f:
+        pairs = json.load(f).get("pin", [])
+    pin_layers: dict = {}
+    pin_order: list = []
+    seen = set()
+    for layer, expert in pairs:
+        le = (int(layer), int(expert))
+        if le in seen:
+            continue
+        seen.add(le)
+        pin_order.append(le)
+        pin_layers.setdefault(le[0], set()).add(le[1])
+    return pin_layers, pin_order
+
+
 def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
                    prefetch_workers: int = 8, prefetch_ahead: int = 0,
                    pin_file: str | None = None, max_active_experts: int = 4,
-                   use_page_cache: bool | None = None):
+                   use_page_cache: bool | None = None, use_hotlist: bool = True,
+                   preload_pins: bool = True):
     """Returns (model, tokenizer, cache).
 
     cache_budget_gb bounds total resident expert memory (LRU-evicted).
@@ -100,6 +134,12 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
     (predicted from the previous token's routing); 0 disables prefetch.
     pin_file is an optional JSON {"pin": [[layer, expert], ...]} of hot experts
     to keep permanently resident (never LRU-evicted) — see calibrate_experts.py.
+    When it is None and the model directory ships a ``hot_experts.json`` (same
+    schema), that file is used automatically; use_hotlist=False/--no-hotlist
+    disables the auto-discovery. Pinned experts are PRELOADED at startup in
+    hotness order (coalesced batch reads, capped at 60% of the budget so the
+    LRU keeps working room) instead of pinning lazily on first miss;
+    preload_pins=False restores the lazy behavior.
     max_active_experts caps router top_k to min(native, this) on every MoE block
     (the Flash-MoE K-reduction lever: ~2x less streamed disk I/O at no quality
     cost up to K=4 on validated models). Default 4; set 0 to use native routing.
@@ -120,14 +160,14 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
         prefetch_ahead=prefetch_ahead,
     )
 
-    # Load the hot-expert pin spec (frequency-based pinning, #2). Keyed by layer
-    # so we can pin all three projections of each hot expert.
-    pin_layers: dict = {}
-    if pin_file:
-        import json
-        with open(pin_file) as f:
-            for layer, expert in json.load(f).get("pin", []):
-                pin_layers.setdefault(int(layer), set()).add(int(expert))
+    # Load the hot-expert pin spec (frequency-based pinning, #2 + shipped
+    # hotlist, #6). Keyed by layer so we can pin all three projections of each
+    # hot expert; the rank order drives the startup preload.
+    if pin_file is None and use_hotlist:
+        pin_file = _find_hotlist(local_path)
+        if pin_file:
+            print(f"[stream] found shipped hot-expert list: {pin_file}")
+    pin_layers, pin_order = _load_pin_spec(pin_file) if pin_file else ({}, [])
 
     # Locate the transformer layer stack and its weight-key prefix. Multimodal
     # MoEs (qwen3_5_moe) nest it under `language_model.model.layers`; text-only
@@ -183,5 +223,19 @@ def load_streaming(model_path, cache_budget_gb: float = 3.0, fast: bool = False,
     pin_note = f", pinned {len(pin_keys)} hot expert-projections" if pin_keys else ""
     print(f"[stream] swapped {swapped} expert projections to streaming "
           f"(budget {cache_budget_gb:.1f} GB{pin_note})")
+    if pin_keys and preload_pins:
+        t0 = time.time()
+        specs = [
+            (wkey, skey, e)
+            for layer, e in pin_order
+            for wkey, skey in cache._layer_keys.get(layer, ())
+            if (wkey, e) in pin_keys
+        ]
+        n, dropped = cache.preload(specs)
+        drop_note = (f", {dropped} past the 60%-of-budget cap left to the LRU"
+                     if dropped else "")
+        print(f"[stream] hotlist preload: {n} expert-projections "
+              f"({cache.preload_bytes / 1e9:.2f} GB) in {time.time() - t0:.1f}s"
+              f"{drop_note}")
     _cap_active_experts(layers, max_active_experts)
     return model, tok, cache

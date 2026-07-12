@@ -8,6 +8,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Shipped hot-expert list for streaming** (ds4-style): a model repo can
+  now carry its own routing profile — drop `calibrate_experts.py`'s pin
+  output into the model directory as `hot_experts.json` and the streaming
+  loader pins **and preloads** those experts at startup (`--no-hotlist`
+  opts out; explicit `--pin-file` still overrides). Preload reads the list
+  in hotness order with coalesced batch reads, capped at 60% of
+  `--cache-budget-gb` so the LRU keeps working room; experts past the cap
+  are un-pinned and age through the LRU normally. Previously pinned experts
+  loaded lazily on first miss, so the profile did nothing for cold-start
+  latency. Cache stats gained `preload_experts` / `preload_gb`.
+
 - **Greedy tool-call syntax on `turboquant-serve`** (`--tool-syntax-greedy`,
   optional `--tool-syntax-tags "<open>,</close>"`): a per-request logits
   processor masks logits to argmax while the generation is inside a

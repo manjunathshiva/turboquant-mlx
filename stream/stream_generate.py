@@ -59,7 +59,12 @@ def main():
                         "storage proves bandwidth-bound.")
     p.add_argument("--pin-file", default=None,
                    help="JSON {'pin': [[layer, expert], ...]} of hot experts to keep "
-                        "permanently resident (from calibrate_experts.py).")
+                        "permanently resident (from calibrate_experts.py). Without it, "
+                        "a hot_experts.json shipped in the model directory is used "
+                        "automatically. Pins are preloaded at startup.")
+    p.add_argument("--no-hotlist", dest="use_hotlist", action="store_false",
+                   default=True,
+                   help="Ignore a hot_experts.json shipped in the model directory.")
     p.add_argument("--max-active-experts", type=int, default=4,
                    help="Cap router top_k to min(native, this) on every MoE block "
                         "(Flash-MoE K-reduction: ~2x less streamed disk I/O at no quality "
@@ -101,7 +106,7 @@ def main():
         args.model, cache_budget_gb=args.cache_budget_gb, fast=args.fast,
         prefetch_workers=args.prefetch_workers, prefetch_ahead=args.prefetch_ahead,
         pin_file=args.pin_file, max_active_experts=args.max_active_experts,
-        use_page_cache=args.use_page_cache,
+        use_page_cache=args.use_page_cache, use_hotlist=args.use_hotlist,
     )
     print(f"[stream] loaded in {time.time() - t0:.1f}s | resident RSS={_rss_gb():.2f} GB")
 
