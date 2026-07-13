@@ -132,7 +132,10 @@ def _auto_cache_budget(model_bytes: int, expert_bytes: int,
     to [floor, all experts] — a budget past every expert buys nothing."""
     resident = max(0, model_bytes - expert_bytes)
     budget = int(_AUTO_WSS_FRACTION * wss_bytes) - resident - _AUTO_RESERVE_BYTES
-    return max(_AUTO_MIN_BUDGET_BYTES, min(budget, expert_bytes))
+    # expert_bytes is the hard ceiling and must win over the floor: when the
+    # experts themselves are smaller than the minimum budget, the floor would
+    # otherwise hand back a budget larger than everything it could ever hold.
+    return min(expert_bytes, max(_AUTO_MIN_BUDGET_BYTES, budget))
 
 
 # A model repo may ship its own routing profile alongside the weights (the

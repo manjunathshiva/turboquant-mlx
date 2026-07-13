@@ -8,6 +8,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Mid-prefill disk-cache checkpoints** (`--disk-cache`, on by default;
+  `--disk-cache-no-prefill-checkpoints` opts out): the disk prompt cache now
+  also checkpoints every `--disk-cache-save-every` tokens *during* prompt
+  processing, not just after the request completes. This fixes a measured
+  total-reuse failure on hybrid GDN/Mamba models: the end-of-request
+  checkpoint includes the generated assistant tail, and chat templates
+  re-render that tail differently on the next turn (Qwen's empty `<think>`
+  block appears at generation time but not in history), so the checkpoint is
+  never a strict prefix of turn N+1 and the non-trimmable cache gets **zero**
+  reuse — live on a 16 GB mini, a 21,250-token turn 2 re-prefilled from
+  token 0 over a 4-token divergence. The mid-prefill ladder (1024, 2048, …)
+  restores from the newest checkpoint below the divergence, and a *crash*
+  mid-prefill resumes the same way instead of starting over.
+
+- **Metal buffer-cache limit on `turboquant-serve`**
+  (`--metal-cache-limit-gb`, default `auto`): MLX's GPU buffer reuse cache
+  is unbounded by default, and a long chunked prefill allocates attention
+  workspace with a new, larger shape every chunk — so stale buffers
+  accumulate ~80 MB per 1K prompt tokens instead of being reused. Measured
+  on a 16 GB Mac mini serving the resident 12.6 GB down4 35B: active memory
+  flat at ~13.2 GB, buffer cache 1.9 → 3.5 GB, hard Metal OOM crash at
+  14K/21K prompt tokens. `auto` caps the cache via `mx.set_cache_limit`
+  right after the model loads whenever working-set headroom is under 8 GB
+  (roomy machines keep the fast unbounded default); with the cap the same
+  21K-token prefill runs flat at ~13.5 GB total. Pass a number (GB) to
+  force a cap or `off` to disable. On 16 GB machines pair with
+  `--prefill-step-size 256` — the *per-chunk* transient workspace scales
+  with chunk size, and mlx-lm's default of 2048 OOMs tight boxes on the
+  first chunk.
+
 - **Auto cache budget + wired memory for streaming** (ds4-style):
   `--cache-budget-gb auto` sizes the expert cache from the machine — 80% of
   Metal's max recommended working set, minus the resident (non-expert)

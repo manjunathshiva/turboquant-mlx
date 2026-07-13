@@ -93,3 +93,13 @@ def test_stream_generate_budget_arg_type():
 
 def test_wss_fraction_sane():
     assert 0.5 <= _AUTO_WSS_FRACTION <= 0.9
+
+
+def test_auto_budget_experts_smaller_than_floor_cap_at_experts():
+    # A tiny MoE whose whole expert tier is under the 0.5 GB floor: the
+    # ceiling (all experts) must win over the floor — a budget larger than
+    # every expert buys nothing.
+    b = _auto_cache_budget(model_bytes=10_000_000_000,
+                           expert_bytes=200_000_000,
+                           wss_bytes=16_000_000_000)
+    assert b == 200_000_000
