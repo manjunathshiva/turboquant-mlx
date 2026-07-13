@@ -373,3 +373,99 @@ def test_tq_kv_cache_restores_through_lru(installed_store):
     assert rest == [7] * 20
     assert isinstance(cache[0], TurboQuantKVCache)
     assert cache[0].offset == 600
+
+
+# ---------------------------------------------------------------------------
+# 5. Mid-prefill checkpoints (the non-trimmable divergent-turn fix)
+# ---------------------------------------------------------------------------
+
+def _drive_prefill(store, lru, tokens, cache_list, chunk=50):
+    """Simulate the server flow: fetch (sets the active request), then run
+    the patched mlx_lm.server.stream_generate with a fake prefill loop that
+    fires the progress callback at chunk boundaries."""
+    import mlx_lm.server as server_mod
+
+    _cache, rest = lru.fetch_nearest_cache(MODEL_KEY, tokens)
+
+    def fake_stream_generate(*args, **kwargs):
+        cb = kwargs.get("prompt_progress_callback")
+        total = len(rest)
+        for p in range(chunk, total + 1, chunk):
+            # A real prefill grows the cache before each callback; the fake
+            # keeps one fixed cache object — fine, the store only reads it.
+            if cb is not None:
+                cb(p, total)
+        yield None
+
+    orig = store._orig_stream_generate
+    store._orig_stream_generate = fake_stream_generate
+    try:
+        for _ in server_mod.stream_generate(
+                prompt=rest, prompt_cache=cache_list,
+                prompt_progress_callback=None):
+            pass
+    finally:
+        store._orig_stream_generate = orig
+    return rest
+
+
+def test_prefill_checkpoints_ladder_and_divergent_turn(installed_store):
+    """A non-trimmable cache diverging in the assistant tail (the live 21K
+    Qwen failure) restores from the newest mid-prefill checkpoint below the
+    divergence instead of getting 0 reuse."""
+    store = installed_store
+    lru = LRUPromptCache(max_size=10)
+    tokens = list(range(600))
+
+    _drive_prefill(store, lru, tokens, [_arrays_cache()], chunk=50)
+    # save_every=100, min_tokens=4 -> ladder at 100, 200, ..., 500 (the
+    # p == total callback at 600 is left to the end-of-request insert).
+    sizes = sorted(e.tokens.size for e in store._entries.values())
+    assert sizes == [100, 200, 300, 400, 500]
+
+    # Turn 2 re-renders with a divergence at token 590 (inside the tail).
+    turn2 = tokens[:590] + [9] * 40
+    lru2 = LRUPromptCache(max_size=10)
+    cache, rest = lru2.fetch_nearest_cache(MODEL_KEY, turn2)
+    # Non-trimmable: the 500-token checkpoint (strict prefix) restores.
+    assert cache is not None
+    assert len(turn2) - len(rest) == 500
+
+
+def test_prefill_checkpoints_respect_stride_and_reuse_offset(installed_store):
+    """With part of the prompt already reused, checkpoint positions count
+    absolute covered tokens (reused + processed), not callback progress."""
+    store = installed_store
+    lru = LRUPromptCache(max_size=10)
+    tokens = list(range(600))
+    # Seed the LRU (and disk) with a 300-token prefix of the conversation.
+    lru.insert_cache(MODEL_KEY, tokens[:300], [_arrays_cache()])
+    before = {e.digest for e in store._entries.values()}
+
+    _drive_prefill(store, lru, tokens, [_arrays_cache()], chunk=50)
+    new_sizes = sorted(e.tokens.size for e in store._entries.values()
+                       if e.digest not in before)
+    assert new_sizes == [400, 500]  # 300 covered by seed; ladder resumes
+
+
+def test_no_prefill_checkpoints_flag(tmp_path):
+    import mlx_lm.server as server_mod
+
+    orig_sg = server_mod.stream_generate
+    store = _store(tmp_path, prefill_checkpoints=False)
+    store.install()
+    try:
+        assert server_mod.stream_generate is orig_sg
+    finally:
+        store.uninstall()
+
+
+def test_uninstall_restores_stream_generate(tmp_path):
+    import mlx_lm.server as server_mod
+
+    orig_sg = server_mod.stream_generate
+    store = _store(tmp_path)
+    store.install()
+    assert server_mod.stream_generate is not orig_sg
+    store.uninstall()
+    assert server_mod.stream_generate is orig_sg

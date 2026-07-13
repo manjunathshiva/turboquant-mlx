@@ -8,6 +8,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Mid-prefill disk-cache checkpoints** (`--disk-cache`, on by default;
+  `--disk-cache-no-prefill-checkpoints` opts out): the disk prompt cache now
+  also checkpoints every `--disk-cache-save-every` tokens *during* prompt
+  processing, not just after the request completes. This fixes a measured
+  total-reuse failure on hybrid GDN/Mamba models: the end-of-request
+  checkpoint includes the generated assistant tail, and chat templates
+  re-render that tail differently on the next turn (Qwen's empty `<think>`
+  block appears at generation time but not in history), so the checkpoint is
+  never a strict prefix of turn N+1 and the non-trimmable cache gets **zero**
+  reuse — live on a 16 GB mini, a 21,250-token turn 2 re-prefilled from
+  token 0 over a 4-token divergence. The mid-prefill ladder (1024, 2048, …)
+  restores from the newest checkpoint below the divergence, and a *crash*
+  mid-prefill resumes the same way instead of starting over.
+
 - **Metal buffer-cache limit on `turboquant-serve`**
   (`--metal-cache-limit-gb`, default `auto`): MLX's GPU buffer reuse cache
   is unbounded by default, and a long chunked prefill allocates attention

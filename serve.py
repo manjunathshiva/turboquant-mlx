@@ -88,6 +88,14 @@ writes happen on a background thread, and the store is trimmed to
 ``--disk-cache-min-tokens`` (default 512) skips checkpointing short prompts;
 ``--disk-cache-save-every`` (default 1024) throttles how often a growing
 conversation is re-checkpointed — a restart loses at most that much prefill.
+Checkpoints are also taken **mid-prefill** every ``save_every`` tokens
+(``--disk-cache-no-prefill-checkpoints`` disables), which is what makes
+persistence work for non-trimmable hybrid GDN/Mamba caches: chat templates
+re-render the assistant tail differently on the next turn (e.g. Qwen's empty
+``<think>`` block), so the end-of-request checkpoint is never a strict prefix
+of turn N+1 — the mid-prefill ladder restores from the newest checkpoint below
+the divergence instead of re-prefilling from token 0. A crash mid-prefill
+resumes the same way.
 Works with ``--kv-bits``/``--kv-k-bits`` (TurboQuant KV caches serialize) and
 with hybrid-attention models (non-trimmable GDN/Mamba states restore from
 strict-prefix checkpoints). Single server process per cache directory.
@@ -484,6 +492,9 @@ def _extract_disk_cache_args(argv):
                         type=int, default=512)
     parser.add_argument("--disk-cache-save-every", dest="save_every",
                         type=int, default=1024)
+    parser.add_argument("--disk-cache-no-prefill-checkpoints",
+                        dest="no_prefill_ckpt", action="store_true",
+                        default=False)
     ns, remaining = parser.parse_known_args(argv)
 
     if ns.disk_cache is None:
@@ -516,6 +527,7 @@ def _extract_disk_cache_args(argv):
         budget_gb=ns.budget_gb,
         min_tokens=ns.min_tokens,
         save_every=ns.save_every,
+        prefill_checkpoints=not ns.no_prefill_ckpt,
     ), remaining
 
 
@@ -819,9 +831,12 @@ def main() -> None:
             f"(dir={disk_cache_config['cache_dir']}, "
             f"budget={disk_cache_config['budget_gb']:g} GB, "
             f"min_tokens={disk_cache_config['min_tokens']}, "
-            f"save_every={disk_cache_config['save_every']}) — prompt-cache "
-            "checkpoints persist across restarts; cold prefill resumes from "
-            "the longest saved prefix.\n"
+            f"save_every={disk_cache_config['save_every']}, "
+            f"prefill_checkpoints="
+            f"{'on' if disk_cache_config['prefill_checkpoints'] else 'off'}) "
+            "— prompt-cache checkpoints persist across restarts (and are "
+            "taken mid-prefill, so crashes and divergent follow-up turns "
+            "resume from the nearest checkpoint).\n"
         )
     if tool_greedy_config is not None:
         from turboquant_mlx.tool_syntax_greedy import (

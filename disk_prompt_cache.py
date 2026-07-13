@@ -26,6 +26,19 @@ citizen", adapted to mlx_lm's token-level prompt trie):
   checkpoint per ``save_every`` new tokens along a conversation lineage;
   when the new checkpoint is trimmable, stored strict-prefix checkpoints
   are superseded (deleted) — mirroring the trie's ``pop_prefixes``.
+- **Mid-prefill checkpoints** (``prefill_checkpoints``, default on): the
+  store also saves *during* a long prefill, every ``save_every`` tokens, by
+  wrapping the server's ``stream_generate`` progress callback. This is what
+  makes persistence useful for **non-trimmable** (hybrid GDN/Mamba) caches:
+  an end-of-request checkpoint includes the generated assistant tail, and
+  chat templates re-render that tail differently on the next turn (e.g.
+  Qwen's empty ``<think>`` block appears at generation time but not in
+  history), so the full checkpoint is never a strict prefix of turn N+1 and
+  a non-trimmable cache can't use it — measured live, a 21K-token turn got
+  0 reuse over a 4-token divergence. The mid-prefill ladder (1024, 2048, …)
+  gives non-trimmable caches trim semantics at ``save_every`` granularity:
+  the newest checkpoint at/below the divergence restores. It also makes a
+  *crash* mid-prefill resumable instead of starting from token 0.
 - Storage: one ``.safetensors`` per checkpoint via the same state/meta_state
   protocol as ``mlx_lm.models.cache.save_prompt_cache``, plus an
   ``index.json`` holding the token lists. ``None`` entries inside a cache's
@@ -236,6 +249,10 @@ class DiskPromptCache:
         Along one conversation lineage, only checkpoint after at least this
         many new tokens since the stored prefix (a restart loses at most this
         much prefill).
+    prefill_checkpoints : bool
+        Also checkpoint *during* prompt processing, every ``save_every``
+        tokens (see module docstring). Costs one state copy + background
+        write per stride; essential for non-trimmable (GDN/Mamba) caches.
     sync : bool
         Write checkpoints synchronously instead of on the background thread
         (used by tests).
@@ -243,12 +260,19 @@ class DiskPromptCache:
 
     def __init__(self, cache_dir, budget_gb: float = 10.0,
                  min_tokens: int = 512, save_every: int = 1024,
+                 prefill_checkpoints: bool = True,
                  sync: bool = False, log: TextIO = sys.stderr):
         self.dir = Path(cache_dir).expanduser()
         self.dir.mkdir(parents=True, exist_ok=True)
         self.budget_bytes = int(budget_gb * (1 << 30))
         self.min_tokens = int(min_tokens)
         self.save_every = int(save_every)
+        self.prefill_checkpoints = bool(prefill_checkpoints)
+        # (model_key, full_request_tokens, reused) of the in-flight request,
+        # recorded by the fetch wrapper so the stream_generate wrapper can
+        # save mid-prefill states under the right lineage. Single-stream
+        # serving is assumed (KV-quant already forces it).
+        self._active: Optional[tuple] = None
         self.log = log
         self._lock = threading.Lock()
         self._entries: Dict[str, _Entry] = {}
@@ -270,6 +294,7 @@ class DiskPromptCache:
 
         self._orig_fetch = None
         self._orig_insert = None
+        self._orig_stream_generate = None
 
     # -- index ------------------------------------------------------------
 
@@ -552,10 +577,16 @@ class DiskPromptCache:
 
         def fetch_nearest_cache(lru, model, tokens):
             cache, rest = store._orig_fetch(lru, model, tokens)
+            # Remember the in-flight request so mid-prefill checkpoints save
+            # under the right lineage (single-stream serving); updated below
+            # if a disk restore improves the reused count.
+            store._active = (model, list(tokens), len(tokens) - len(rest))
             try:
                 reused = len(tokens) - len(rest)
                 if store.restore_into(lru, model, tokens, reused):
                     cache, rest = store._orig_fetch(lru, model, tokens)
+                    store._active = (
+                        model, list(tokens), len(tokens) - len(rest))
             except Exception as e:  # persistence must never break serving
                 store.log.write(f"[disk-cache] restore skipped: {e}\n")
             return cache, rest
@@ -569,8 +600,55 @@ class DiskPromptCache:
 
         LRUPromptCache.fetch_nearest_cache = fetch_nearest_cache
         LRUPromptCache.insert_cache = insert_cache
+        if self.prefill_checkpoints:
+            self._install_prefill_checkpoints()
         atexit.register(self.flush)
         return self
+
+    def _install_prefill_checkpoints(self) -> None:
+        """Wrap ``mlx_lm.server.stream_generate`` so the prompt-progress
+        callback checkpoints the growing cache every ``save_every`` tokens.
+
+        The callback runs on the generation thread — the only thread that may
+        evaluate the cache's MLX graph — and fires *between* prefill chunks,
+        so the state copy never stacks on top of the per-chunk transient
+        workspace. ``maybe_save``'s stride/covered policy still applies; the
+        local stride guard just avoids taking the store lock every chunk.
+        """
+        import mlx_lm.server as _server_mod
+
+        store = self
+        self._orig_stream_generate = _server_mod.stream_generate
+
+        def stream_generate_with_checkpoints(*args, **kwargs):
+            active = store._active
+            cache_list = kwargs.get("prompt_cache")
+            orig_cb = kwargs.get("prompt_progress_callback")
+            if active is not None and cache_list is not None:
+                model, full_tokens, reused = active
+                last = {"n": reused}
+
+                def callback(processed, total):
+                    if orig_cb is not None:
+                        orig_cb(processed, total)
+                    covered = reused + processed
+                    # processed == total fires as decode starts; leave that
+                    # state to the end-of-request insert_cache save.
+                    if (processed < total
+                            and covered - last["n"] >= store.save_every):
+                        last["n"] = covered
+                        try:
+                            store.maybe_save(
+                                model, full_tokens[:covered], cache_list)
+                        except Exception as e:
+                            store.log.write(
+                                f"[disk-cache] prefill checkpoint "
+                                f"skipped: {e}\n")
+
+                kwargs["prompt_progress_callback"] = callback
+            return store._orig_stream_generate(*args, **kwargs)
+
+        _server_mod.stream_generate = stream_generate_with_checkpoints
 
     def uninstall(self) -> None:
         from mlx_lm.models.cache import LRUPromptCache
@@ -579,15 +657,22 @@ class DiskPromptCache:
             LRUPromptCache.fetch_nearest_cache = self._orig_fetch
         if self._orig_insert is not None:
             LRUPromptCache.insert_cache = self._orig_insert
+        if self._orig_stream_generate is not None:
+            import mlx_lm.server as _server_mod
+
+            _server_mod.stream_generate = self._orig_stream_generate
         self._orig_fetch = None
         self._orig_insert = None
+        self._orig_stream_generate = None
 
 
 def install(cache_dir, budget_gb: float = 10.0, min_tokens: int = 512,
-            save_every: int = 1024, log: TextIO = sys.stderr) -> DiskPromptCache:
+            save_every: int = 1024, prefill_checkpoints: bool = True,
+            log: TextIO = sys.stderr) -> DiskPromptCache:
     """Create a ``DiskPromptCache`` and patch it into ``mlx_lm.server``."""
     store = DiskPromptCache(
         cache_dir, budget_gb=budget_gb, min_tokens=min_tokens,
-        save_every=save_every, log=log,
+        save_every=save_every, prefill_checkpoints=prefill_checkpoints,
+        log=log,
     )
     return store.install()
