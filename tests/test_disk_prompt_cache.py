@@ -469,3 +469,37 @@ def test_uninstall_restores_stream_generate(tmp_path):
     assert server_mod.stream_generate is not orig_sg
     store.uninstall()
     assert server_mod.stream_generate is orig_sg
+
+
+def test_longer_non_trimmable_checkpoint_does_not_suppress_prefix_saves(tmp_path):
+    """The live mini failure: a stale full checkpoint (prompt + generated
+    tail, non-trimmable) from a previous session must not swallow the
+    mid-prefill ladder of a new session over the same document."""
+    store = _store(tmp_path)
+    tokens = list(range(600))
+    store.maybe_save(MODEL_KEY, tokens, [_arrays_cache()])
+    store.maybe_save(MODEL_KEY, tokens[:300], [_arrays_cache()])
+    sizes = sorted(e.tokens.size for e in store._entries.values())
+    assert sizes == [300, 600]
+
+
+def test_longer_trimmable_checkpoint_still_suppresses_prefix_saves(tmp_path):
+    store = _store(tmp_path)
+    tokens = list(range(600))
+    store.maybe_save(MODEL_KEY, tokens, [_kv_cache(600)])
+    store.maybe_save(MODEL_KEY, tokens[:300], [_kv_cache(300)])
+    assert len(store) == 1
+
+
+def test_prefill_ladder_survives_stale_full_checkpoint(installed_store):
+    store = installed_store
+    # Previous session: end-of-request checkpoint = prompt + generated tail
+    # (diverges from the new session's re-render at token 590).
+    lru0 = LRUPromptCache(max_size=10)
+    lru0.insert_cache(MODEL_KEY, list(range(590)) + [1, 2, 3],
+                      [_arrays_cache()])
+    # New session, same document.
+    lru = LRUPromptCache(max_size=10)
+    _drive_prefill(store, lru, list(range(600)), [_arrays_cache()], chunk=50)
+    sizes = sorted(e.tokens.size for e in store._entries.values())
+    assert {100, 200, 300, 400, 500}.issubset(set(sizes))

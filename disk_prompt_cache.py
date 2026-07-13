@@ -396,8 +396,16 @@ class DiskPromptCache:
                 if e.model_key != mk:
                     continue
                 lcp = _lcp(e.tokens, toks)
-                if lcp == n:
-                    return  # a stored checkpoint already covers these tokens
+                if lcp == n and (e.trimmable or e.tokens.size == n):
+                    # Covered: an identical checkpoint, or a longer trimmable
+                    # one (restorable for any prefix by trimming). A longer
+                    # NON-trimmable checkpoint covers nothing shorter — it can
+                    # never be trimmed down — so it must not suppress the
+                    # save: that left divergent follow-up turns with no
+                    # usable checkpoint at all (a stale full checkpoint from
+                    # a previous session silently swallowed the whole
+                    # mid-prefill ladder).
+                    return
                 if lcp == e.tokens.size:
                     best_prefix = max(best_prefix, lcp)
             if best_prefix and n - best_prefix < self.save_every:
