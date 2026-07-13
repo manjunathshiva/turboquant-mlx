@@ -109,3 +109,18 @@ class TestFlagParsing:
             _extract_prompt_cache_max_args(["--prompt-cache-max-gb", "much"])
         with pytest.raises(SystemExit):
             _extract_prompt_cache_max_args(["--prompt-cache-max-gb", "0"])
+
+
+class TestCaseInsensitiveFlags:
+    def test_prompt_cache_max_gb(self):
+        assert _extract_prompt_cache_max_args(
+            ["--prompt-cache-max-gb", "AUTO"])[0] == "auto"
+        assert _extract_prompt_cache_max_args(
+            ["--prompt-cache-max-gb", "Off"])[0] is None
+
+    def test_metal_cache_limit_gb(self):
+        from turboquant_mlx.serve import _extract_metal_cache_limit_args
+        assert _extract_metal_cache_limit_args(
+            ["--metal-cache-limit-gb", "Auto"])[0] == "auto"
+        assert _extract_metal_cache_limit_args(
+            ["--metal-cache-limit-gb", "OFF"])[0] is None

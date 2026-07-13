@@ -288,18 +288,21 @@ def _patch_prompt_cache_bytes(mode) -> None:
     ``max_bytes`` is computed at insert time (the model isn't loaded yet
     when the server constructs the cache, so a static value can't be
     derived up front). The base class enforces the cap on every insert."""
+    import mlx.core as mx
     import mlx_lm.server as _server_mod
     from mlx_lm.models.cache import LRUPromptCache
+
+    # The device working set is static for the server's lifetime; query it
+    # once here instead of on every cache insertion.
+    wss = (mx.device_info()["max_recommended_working_set_size"]
+           if mode == "auto" else None)
 
     class _BudgetLRUPromptCache(LRUPromptCache):
         @property
         def max_bytes(self):
             if mode != "auto":
                 return int(mode * 1024**3)
-            import mlx.core as mx
-
-            wss = mx.device_info()["max_recommended_working_set_size"]
-            active_excl = mx.get_active_memory() - self._n_bytes
+            active_excl = mx.get_active_memory() - self.nbytes
             limit = _auto_prompt_cache_bytes(wss, active_excl)
             return _PROMPT_CACHE_UNBOUNDED if limit is None else limit
 
@@ -322,9 +325,10 @@ def _extract_prompt_cache_max_args(argv):
     parser.add_argument("--prompt-cache-max-gb", dest="limit", default="auto")
     ns, remaining = parser.parse_known_args(argv)
 
-    if ns.limit == "off":
+    limit = ns.limit.lower() if isinstance(ns.limit, str) else ns.limit
+    if limit == "off":
         return None, remaining
-    if ns.limit == "auto":
+    if limit == "auto":
         return "auto", remaining
     try:
         val = float(ns.limit)
@@ -349,9 +353,10 @@ def _extract_metal_cache_limit_args(argv):
     parser.add_argument("--metal-cache-limit-gb", dest="limit", default="auto")
     ns, remaining = parser.parse_known_args(argv)
 
-    if ns.limit == "off":
+    limit = ns.limit.lower() if isinstance(ns.limit, str) else ns.limit
+    if limit == "off":
         return None, remaining
-    if ns.limit == "auto":
+    if limit == "auto":
         return "auto", remaining
     try:
         val = float(ns.limit)
