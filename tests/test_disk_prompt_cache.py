@@ -503,3 +503,20 @@ def test_prefill_ladder_survives_stale_full_checkpoint(installed_store):
     _drive_prefill(store, lru, list(range(600)), [_arrays_cache()], chunk=50)
     sizes = sorted(e.tokens.size for e in store._entries.values())
     assert {100, 200, 300, 400, 500}.issubset(set(sizes))
+
+
+def test_prefill_checkpoints_write_synchronously(tmp_path):
+    """Mid-prefill saves must hit disk inline (no queued state copy alive
+    during the next chunk), even when the store's writer is async."""
+    store = _store(tmp_path, sync=False)
+    store.install()
+    try:
+        lru = LRUPromptCache(max_size=10)
+        _drive_prefill(store, lru, list(range(600)), [_arrays_cache()],
+                       chunk=50)
+        # No flush(): entries and files must already be on disk.
+        assert sorted(e.tokens.size for e in store._entries.values()) == \
+            [100, 200, 300, 400, 500]
+        assert len(list(store.dir.glob("*.safetensors"))) == 5
+    finally:
+        store.uninstall()

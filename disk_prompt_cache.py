@@ -379,8 +379,16 @@ class DiskPromptCache:
     # -- save path ----------------------------------------------------------
 
     def maybe_save(self, model: Any, tokens: List[int],
-                   prompt_cache: List[Any]) -> None:
-        """Checkpoint ``prompt_cache`` if the save policy says it's worth it."""
+                   prompt_cache: List[Any], sync: bool = False) -> None:
+        """Checkpoint ``prompt_cache`` if the save policy says it's worth it.
+
+        ``sync=True`` writes inline instead of queueing. Mid-prefill
+        checkpoints must use it: a queued payload is a full state copy that
+        stays alive while the *next* prefill chunk computes, and copy +
+        chunk workspace stacked is what re-OOMed a 16 GB machine at 19K/21K
+        tokens. Written inline, the copy exists only between chunks (where
+        the transient workspace is idle) and is freed before the next chunk.
+        """
         toks = np.asarray(tokens, dtype=np.int64)
         n = int(toks.size)
         if n < self.min_tokens:
@@ -438,7 +446,7 @@ class DiskPromptCache:
             trimmable=trimmable, created=now, last_used=now,
         )
         job = (mk, toks, data, meta, trimmable)
-        if self._sync:
+        if self._sync or sync:
             self._do_save(*job)
         else:
             with self._lock:
@@ -647,7 +655,8 @@ class DiskPromptCache:
                         last["n"] = covered
                         try:
                             store.maybe_save(
-                                model, full_tokens[:covered], cache_list)
+                                model, full_tokens[:covered], cache_list,
+                                sync=True)
                         except Exception as e:
                             store.log.write(
                                 f"[disk-cache] prefill checkpoint "
