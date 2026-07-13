@@ -172,6 +172,17 @@ python -m turboquant_mlx.convert \
     --bits 3 --group-size 64 --ternary-experts --streaming
 # Resident load of a ~53 GB model needs a wired-memory bump on a 64 GB Mac:
 #   sudo sysctl -w iogpu.wired_limit_mb=60416
+
+# Asymmetric experts — ternary up/gate + higher-bit down_proj. The down
+# projection is the SwiGLU write-back into the residual stream, and spending
+# 4 bits on just that one expert matrix is what turns a sub-2-bit build
+# agent-capable: on Qwen3.6-35B-A3B, pure ternary fails an Opencode coding
+# task 0/4 while ternary+down4 passes 3/3 — for +3.2 GB (9.4 -> 12.6 GB),
+# still resident on a 16 GB Mac mini.
+python -m turboquant_mlx.convert \
+    --hf-path Qwen/Qwen3.6-35B-A3B \
+    --mlx-path ./Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64 \
+    --bits 3 --group-size 64 --ternary-experts --expert-down-bits 4
 ```
 
 ### 2. Generate text
@@ -298,6 +309,15 @@ The [Flash-MoE streaming levers](#tuning-the-streaming-reader-v061) ride along:
 with `--kv-*` to compress the growing KV cache of long agentic loops, and
 `--prompt-concurrency 1` since streaming is a single-user path.
 
+`--cache-budget-gb auto` sizes the expert cache from the machine (80% of
+Metal's recommended working set, minus resident weights and a KV reserve),
+and a `hot_experts.json` shipped in the model directory (the pin output of
+`calibrate_experts.py`) is auto-discovered: those experts are pinned **and
+preloaded** at startup — measured on the 35B ternary, a 1.1 GB / 1,500-expert
+profile preloads in 0.3 s and lifts the cache hit rate 74 → 82%, cutting
+critical-path disk reads 30%. `--no-hotlist` opts out; `--wire-memory`
+(opt-in) wires weights + expert cache against memory pressure.
+
 > **Note**: `mlx_lm.server` is intended for development and local use, not
 > production. It does not implement authentication or rate limiting.
 
@@ -319,7 +339,29 @@ to speed up follow-up turns. Each new prompt grows that pool, and once
 caches + model weights + decode workspace exceed Metal's wired-memory
 budget, the next allocation aborts the process.
 
-Two fixes, in order of impact:
+Since 0.13, `turboquant-serve` applies two auto-guards on tight machines
+(both no-ops when working-set headroom is ≥ 8 GB):
+
+- **`--metal-cache-limit-gb auto`** (default) caps MLX's GPU buffer reuse
+  cache after the model loads. During a long chunked prefill the attention
+  workspace has a new, larger shape every chunk, so the unbounded cache
+  grows ~80 MB per 1K prompt tokens — measured on a 16 GB mini serving a
+  resident 12.6 GB 35B, that alone OOM-crashed a 21K-token prefill at 14K
+  while *active* memory stayed flat. With the cap the same prefill runs
+  flat end to end.
+- **`--prompt-cache-max-gb auto`** (default) puts a **byte** budget on the
+  LRU prompt cache, enforced on every insert. Upstream's
+  `--prompt-cache-bytes` exists but is only applied on the *batched*
+  serving path — TurboQuant KV-quant serving is sequential, where an agent
+  conversation retained 8 KV states (1.14 GB) on the mini, paged the
+  system, and got the server killed by the GPU watchdog. Evictions are
+  cheap when `--disk-cache` is on (states restore from disk).
+
+On 16 GB machines also pass **`--prefill-step-size 256`** (or 128 near the
+context ceiling): the *per-chunk* prefill workspace scales with chunk size,
+and mlx-lm's default of 2048 OOMs tight boxes on the first chunk.
+
+For bigger machines serving near the ceiling, the two manual levers:
 
 **1. Raise Metal's wired-memory ceiling** (biggest lever, requires sudo,
 resets on reboot):
@@ -397,6 +439,68 @@ below for how to choose bit-widths and the speed/quality trade-offs.
 > enabling any `--kv-*` flag makes the server serve requests sequentially.
 > That's the right trade-off for a single-user setup; for a multi-client
 > server it means concurrent requests queue rather than batch.
+
+#### Persistent prompt cache across restarts (`--disk-cache`)
+
+`--disk-cache [DIR]` makes the prompt-prefix cache a disk citizen: KV-cache
+checkpoints are written per conversation (background writer, LRU byte-budget
+eviction, default 10 GB) and any later request — including the first one
+after a server **restart or crash** — resumes from the longest saved token
+prefix instead of re-prefilling from scratch. Measured: a 16.3K-token
+conversation's first turn after restart drops **21.1 s → 3.0 s** on a 64 GB
+Mac (6.9×, output byte-identical), and on a 16 GB mini a crashed 21K-token
+prefill resumed from token 18,432 (249 MB checkpoint loaded in 2.3 s).
+
+Checkpoints are also taken **mid-prefill** every `--disk-cache-save-every`
+tokens (default 1024). That ladder is what makes persistence work for
+hybrid GDN/Mamba models whose recurrent state can't be trimmed: chat
+templates re-render the assistant turn differently in history (e.g. Qwen's
+empty `<think>` block), so the end-of-request checkpoint is never an exact
+prefix of the next turn — the ladder restores from the newest checkpoint
+below the divergence instead. Measured on the mini: turn 2 of a 21K
+conversation reused **20,480 of 21,250 tokens** on a non-trimmable cache
+that previously got zero.
+
+#### Agent harnesses on low-bit builds (`--tool-syntax-greedy`)
+
+Agent harnesses need temperature (greedy decoding perseverates across turns
+on low-bit builds), but sampled *structure* is where those builds fabricate
+tool calls. `--tool-syntax-greedy` masks logits to argmax only while the
+generation is inside a `<tool_call>`...`</tool_call>` block — braces, keys,
+tags — and leaves the sampler in charge of JSON value strings and of the
+decision to call a tool at all. Tags are configurable via
+`--tool-syntax-tags "<open>,</close>"`.
+
+#### Recipe: a coding agent on a 16 GB Mac mini
+
+The asymmetric-expert build
+[Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64)
+(ternary up/gate + 4-bit down_proj, 12.6 GB) is the smallest 35B that
+survives an agent loop — validated end-to-end on a base M-series 16 GB
+Mac mini:
+
+```bash
+sudo sysctl -w iogpu.wired_limit_mb=14336   # 14 GiB; 13824 is enough below ~16K context
+
+turboquant-serve \
+    --model manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64 \
+    --host 0.0.0.0 --port 8080 \
+    --kv-bits 8 --tool-syntax-greedy --disk-cache \
+    --prefill-step-size 128 \
+    --temp 0.7 --top-p 0.8 --top-k 20 \
+    --chat-template-args '{"enable_thinking": false}' \
+    --prompt-concurrency 1
+```
+
+Measured on the mini (model on an external SSD): **15.2–15.6 tok/s** decode
+at 13.6 GB peak (flat to 1800 generated tokens), 21K-token cold prefill
+~234 s (~90 tok/s), and the Opencode fix-the-failing-test task passes
+**3/3** (3:37 / 2:25 / 1:54 — faster each run as the disk cache warms; the
+identical task fails 0/4 on the pure-ternary build). Practical context
+ceiling is ~16–18K at the default wired cap; the 128-token prefill step +
+14 GiB wired configuration above is what carries 21K+. Point Opencode (or
+any OpenAI-compatible harness) at `http://<host>:8080/v1` with model id
+`default_model`, keep temperature ~0.7, and disable auto-discovered skills.
 
 ---
 
