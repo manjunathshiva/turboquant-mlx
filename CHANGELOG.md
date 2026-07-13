@@ -8,6 +8,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Prompt-cache byte cap on `turboquant-serve`** (`--prompt-cache-max-gb`,
+  default `auto`): mlx-lm's in-memory LRU prompt cache is bounded by entry
+  count only, and an agent-harness conversation retains one KV state per
+  turn — measured on a 16 GB mini serving the resident 12.6 GB down4 35B,
+  8 retained sequences (1.14 GB) paged the system until a prefill command
+  buffer stalled on swap I/O and the Metal watchdog killed the server (GPU
+  Timeout). `auto` computes the byte budget at insert time (working-set
+  headroom excluding the cache's own bytes, minus a 2 GB reserve, floored
+  at 256 MB) and lets the upstream LRU evict down to it; roomy machines
+  stay unbounded. Pair with `--disk-cache`: evicted states restore from
+  disk instead of re-prefilling.
+
 - **Mid-prefill disk-cache checkpoints** (`--disk-cache`, on by default;
   `--disk-cache-no-prefill-checkpoints` opts out): the disk prompt cache now
   also checkpoints every `--disk-cache-save-every` tokens *during* prompt

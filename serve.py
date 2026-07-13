@@ -128,6 +128,20 @@ or ``off`` to disable. On 16 GB machines pair this with a smaller
 scales with chunk size, and the mlx_lm default of 2048 also OOMs tight
 boxes on its first chunk.
 
+Prompt-cache byte cap (--prompt-cache-max-gb, default: auto)
+------------------------------------------------------------
+mlx_lm.server bounds its in-memory LRU prompt cache by entry count only
+(``--prompt-cache-size``, default 10). An agent-harness conversation retains
+one KV state per turn, and on a tight machine that accumulation pages the
+system until a prefill command buffer stalls on swap I/O and the Metal
+watchdog kills the server (measured: 8 sequences / 1.14 GB on a 16 GB mini
+→ GPU Timeout). ``auto`` computes a byte budget at insert time — working-set
+headroom (excluding the cache's own bytes) minus a 2 GB reserve, floored at
+256 MB — and lets the upstream LRU evict down to it; roomy machines stay
+unbounded. Pass a size in GB to force a cap or ``off`` for stock behavior.
+Pair with ``--disk-cache``: evicted states restore from disk instead of
+re-prefilling.
+
 Prefill keepalive (long cold prefills behind a proxy)
 -----------------------------------------------------
 A streaming agentic client (Claude Code via claude-code-router) aborts a
@@ -240,6 +254,94 @@ def _apply_metal_cache_limit(mode) -> None:
     )
 
 
+# In-memory prompt-cache byte cap. mlx_lm.server bounds its LRU prompt cache
+# by ENTRY COUNT only (--prompt-cache-size, default 10); LRUPromptCache's
+# max_bytes parameter exists upstream but is never wired to a flag. On a
+# tight machine an agent-harness conversation accumulates one KV state per
+# turn — measured live on a 16 GB mini serving the resident 12.6 GB 35B:
+# 8 sequences / 1.14 GB retained, the system started paging, a prefill
+# command buffer stalled on swap I/O and the Metal watchdog killed the
+# server (kIOGPUCommandBufferCallbackErrorTimeout). Evicting is cheap when
+# --disk-cache is on (evicted states restore from disk).
+_PROMPT_CACHE_RESERVE_BYTES = 2 * 1024**3
+_PROMPT_CACHE_MIN_BYTES = 256 * 1024**2
+_PROMPT_CACHE_UNBOUNDED = 1 << 62
+
+
+def _auto_prompt_cache_bytes(wss_bytes: int,
+                             active_excl_cache_bytes: int) -> int | None:
+    """Byte budget for the LRU prompt cache; None = leave unbounded.
+
+    ``active_excl_cache_bytes`` is active memory *minus* the cache's own
+    bytes (weights + working state), so the formula stays stable as the
+    cache itself grows and shrinks.
+    """
+    headroom = wss_bytes - active_excl_cache_bytes
+    if headroom >= _CACHE_LIMIT_AMPLE_HEADROOM_BYTES:
+        return None
+    return max(_PROMPT_CACHE_MIN_BYTES,
+               int(headroom - _PROMPT_CACHE_RESERVE_BYTES))
+
+
+def _patch_prompt_cache_bytes(mode) -> None:
+    """Swap ``mlx_lm.server.LRUPromptCache`` for a subclass whose
+    ``max_bytes`` is computed at insert time (the model isn't loaded yet
+    when the server constructs the cache, so a static value can't be
+    derived up front). The base class enforces the cap on every insert."""
+    import mlx.core as mx
+    import mlx_lm.server as _server_mod
+    from mlx_lm.models.cache import LRUPromptCache
+
+    # The device working set is static for the server's lifetime; query it
+    # once here instead of on every cache insertion.
+    wss = (mx.device_info()["max_recommended_working_set_size"]
+           if mode == "auto" else None)
+
+    class _BudgetLRUPromptCache(LRUPromptCache):
+        @property
+        def max_bytes(self):
+            if mode != "auto":
+                return int(mode * 1024**3)
+            active_excl = mx.get_active_memory() - self.nbytes
+            limit = _auto_prompt_cache_bytes(wss, active_excl)
+            return _PROMPT_CACHE_UNBOUNDED if limit is None else limit
+
+        @max_bytes.setter
+        def max_bytes(self, value):
+            # The base __init__ assigns a default; the property governs.
+            pass
+
+    _server_mod.LRUPromptCache = _BudgetLRUPromptCache
+
+
+def _extract_prompt_cache_max_args(argv):
+    """Peel ``--prompt-cache-max-gb`` off ``argv``.
+
+    Accepts "auto" (default: cap only when working-set headroom is tight),
+    "off" (stock mlx-lm behavior, unbounded bytes), or a size in GB.
+    Returns ``(mode | None, remaining_argv)``.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--prompt-cache-max-gb", dest="limit", default="auto")
+    ns, remaining = parser.parse_known_args(argv)
+
+    limit = ns.limit.lower() if isinstance(ns.limit, str) else ns.limit
+    if limit == "off":
+        return None, remaining
+    if limit == "auto":
+        return "auto", remaining
+    try:
+        val = float(ns.limit)
+    except ValueError:
+        raise SystemExit(
+            f"--prompt-cache-max-gb: expected a number in GB, 'auto', or "
+            f"'off' (got {ns.limit!r})"
+        )
+    if val <= 0:
+        raise SystemExit(f"--prompt-cache-max-gb: must be > 0 (got {val})")
+    return val, remaining
+
+
 def _extract_metal_cache_limit_args(argv):
     """Peel ``--metal-cache-limit-gb`` off ``argv``.
 
@@ -251,9 +353,10 @@ def _extract_metal_cache_limit_args(argv):
     parser.add_argument("--metal-cache-limit-gb", dest="limit", default="auto")
     ns, remaining = parser.parse_known_args(argv)
 
-    if ns.limit == "off":
+    limit = ns.limit.lower() if isinstance(ns.limit, str) else ns.limit
+    if limit == "off":
         return None, remaining
-    if ns.limit == "auto":
+    if limit == "auto":
         return "auto", remaining
     try:
         val = float(ns.limit)
@@ -776,7 +879,10 @@ def main() -> None:
     disk_cache_config, remaining = _extract_disk_cache_args(remaining)
     tool_greedy_config, remaining = _extract_tool_syntax_greedy_args(remaining)
     cache_limit_mode, remaining = _extract_metal_cache_limit_args(remaining)
+    prompt_cache_max_mode, remaining = _extract_prompt_cache_max_args(remaining)
     _patch_loader(stream_config, cache_limit_mode)
+    if prompt_cache_max_mode is not None:
+        _patch_prompt_cache_bytes(prompt_cache_max_mode)
     if tool_greedy_config is not None:
         from turboquant_mlx.tool_syntax_greedy import install as _install_tool_greedy
         _install_tool_greedy(**tool_greedy_config)
@@ -813,6 +919,15 @@ def main() -> None:
             f"[turboquant-serve] Expert streaming: cache_budget={bud_s}, "
             f"max_active_experts={stream_config['max_active_experts']}, "
             f"page_cache={pc}{wired} (single-user; use --prompt-concurrency 1)\n"
+        )
+    if prompt_cache_max_mode is not None:
+        cap_s = ("auto (caps only when working-set headroom is tight)"
+                 if prompt_cache_max_mode == "auto"
+                 else f"{prompt_cache_max_mode:g} GB")
+        sys.stderr.write(
+            f"[turboquant-serve] Prompt-cache byte cap: {cap_s} — bounds "
+            "retained per-conversation KV states; evicted states restore "
+            "from --disk-cache when enabled\n"
         )
     if kv_config is not None:
         if kv_config["tq_bits"] is not None:
