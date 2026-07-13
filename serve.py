@@ -103,6 +103,23 @@ strings (the free-text payloads, where greedy causes repetition) and of the
 decision to emit a tool call at all. Tags are configurable via
 ``--tool-syntax-tags "<open>,</close>"`` for non-Hermes templates.
 
+Metal buffer-cache limit (--metal-cache-limit-gb, default: auto)
+----------------------------------------------------------------
+MLX keeps freed GPU buffers in a reuse cache that is unbounded by default.
+During a long chunked prefill the attention workspace has a new, larger
+shape every chunk, so stale buffers accumulate instead of being reused:
+measured on a 21K-token prompt against a resident 12.6 GB MoE, the cache
+grew ~80 MB per 1K prompt tokens (1.9 → 3.5 GB) while *active* memory
+stayed flat — a hard Metal OOM crash mid-prefill on a 16 GB machine. The
+default ``auto`` caps the cache via ``mx.set_cache_limit`` right after the
+model loads whenever working-set headroom (recommended working set minus
+resident bytes) is under 8 GB; roomy machines are left untouched (the
+unbounded cache is fastest). Pass a number (GB) to force a specific cap,
+or ``off`` to disable. On 16 GB machines pair this with a smaller
+``--prefill-step-size`` (256–512): the *per-chunk* transient workspace
+scales with chunk size, and the mlx_lm default of 2048 also OOMs tight
+boxes on its first chunk.
+
 Prefill keepalive (long cold prefills behind a proxy)
 -----------------------------------------------------
 A streaming agentic client (Claude Code via claude-code-router) aborts a
@@ -158,7 +175,93 @@ def _check_mlx_lm_version() -> None:
         sys.exit(1)
 
 
-def _patch_loader(stream_config=None) -> None:
+# MLX's GPU buffer reuse cache is unbounded by default. A long chunked
+# prefill allocates attention workspace with a new, larger shape every chunk,
+# so stale buffers accumulate instead of being reused: measured on a 21K-token
+# prompt against a resident 12.6 GB MoE, active memory stayed flat (~13.2 GB)
+# while the cache grew 1.9 -> 3.5 GB, crossing a 16 GB machine's limit
+# mid-prefill (hard Metal OOM). Capping the cache holds the same prefill to a
+# flat ~13.5 GB total. Roomy machines keep the unbounded default (fastest).
+_CACHE_LIMIT_RESERVE_BYTES = 2 * 1024**3       # transient prefill workspace
+_CACHE_LIMIT_MIN_BYTES = 256 * 1024**2         # keep decode-step buffer reuse
+_CACHE_LIMIT_AMPLE_HEADROOM_BYTES = 8 * 1024**3
+
+
+def _auto_metal_cache_limit(wss_bytes: int, active_bytes: int) -> int | None:
+    """Buffer-cache cap for tight machines; None = leave MLX's default.
+
+    headroom = recommended working set - resident model bytes. With >= 8 GB
+    of headroom the unbounded cache never threatens the limit. Below that,
+    cap the cache to the headroom minus a ~2 GB reserve for the transient
+    per-chunk prefill workspace, floored at 256 MB so the per-token decode
+    buffers (a handful of fixed shapes) still get reused.
+    """
+    headroom = wss_bytes - active_bytes
+    if headroom >= _CACHE_LIMIT_AMPLE_HEADROOM_BYTES:
+        return None
+    return max(_CACHE_LIMIT_MIN_BYTES, int(headroom - _CACHE_LIMIT_RESERVE_BYTES))
+
+
+def _apply_metal_cache_limit(mode) -> None:
+    """Apply the Metal buffer-cache cap. Runs right after the model loads —
+    the auto formula needs the measured resident (active) bytes."""
+    import mlx.core as mx
+
+    if mode == "auto":
+        wss = mx.device_info()["max_recommended_working_set_size"]
+        active = mx.get_active_memory()
+        limit = _auto_metal_cache_limit(wss, active)
+        if limit is None:
+            sys.stderr.write(
+                f"[turboquant-serve] Metal buffer-cache limit: off — ample "
+                f"headroom (working set {wss / 1024**3:.1f} GiB, resident "
+                f"{active / 1024**3:.1f} GiB)\n"
+            )
+            return
+        why = (f"auto: working set {wss / 1024**3:.1f} GiB, resident "
+               f"{active / 1024**3:.1f} GiB")
+    else:
+        limit = int(mode * 1024**3)
+        why = "explicit"
+    mx.set_cache_limit(limit)
+    sys.stderr.write(
+        f"[turboquant-serve] Metal buffer-cache limit: "
+        f"{limit / 1024**3:.2f} GiB ({why}) — bounds reuse-cache growth "
+        "during long prefills; pair with --prefill-step-size 256 on 16 GB "
+        "machines\n"
+    )
+
+
+def _extract_metal_cache_limit_args(argv):
+    """Peel ``--metal-cache-limit-gb`` off ``argv``.
+
+    Accepts "auto" (default), "off", or a size in GB (0 = disable buffer
+    reuse entirely). Returns ``(mode | None, remaining_argv)`` where mode is
+    "auto" or a float; None means leave MLX untouched.
+    """
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--metal-cache-limit-gb", dest="limit", default="auto")
+    ns, remaining = parser.parse_known_args(argv)
+
+    if ns.limit == "off":
+        return None, remaining
+    if ns.limit == "auto":
+        return "auto", remaining
+    try:
+        val = float(ns.limit)
+    except ValueError:
+        raise SystemExit(
+            f"--metal-cache-limit-gb: expected a number in GB, 'auto', or "
+            f"'off' (got {ns.limit!r})"
+        )
+    if val < 0:
+        raise SystemExit(
+            f"--metal-cache-limit-gb: must be >= 0 (got {val})"
+        )
+    return val, remaining
+
+
+def _patch_loader(stream_config=None, cache_limit_mode=None) -> None:
     """Replace `mlx_lm.server.load` with a TurboQuant-aware wrapper.
 
     The server calls the bare name `load(...)` after `from .utils import
@@ -228,6 +331,8 @@ def _patch_loader(stream_config=None) -> None:
                 f"[turboquant-serve] Loading TurboQuant model from {model_path}\n"
             )
             model, tokenizer = load_turboquant(model_path, lazy=lazy)
+        if cache_limit_mode is not None:
+            _apply_metal_cache_limit(cache_limit_mode)
         if return_config:
             return model, tokenizer, cfg
         return model, tokenizer
@@ -658,7 +763,8 @@ def main() -> None:
     rep_config, remaining = _extract_rep_penalty_args(remaining)
     disk_cache_config, remaining = _extract_disk_cache_args(remaining)
     tool_greedy_config, remaining = _extract_tool_syntax_greedy_args(remaining)
-    _patch_loader(stream_config)
+    cache_limit_mode, remaining = _extract_metal_cache_limit_args(remaining)
+    _patch_loader(stream_config, cache_limit_mode)
     if tool_greedy_config is not None:
         from turboquant_mlx.tool_syntax_greedy import install as _install_tool_greedy
         _install_tool_greedy(**tool_greedy_config)
