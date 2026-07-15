@@ -80,6 +80,14 @@ def main():
                         "permanently resident (from calibrate_experts.py). Without it, "
                         "a hot_experts.json shipped in the model directory is used "
                         "automatically. Pins are preloaded at startup.")
+    p.add_argument("--no-learn-experts", dest="learn_experts",
+                   action="store_false",
+                   help="don't record/reuse a per-user hot-expert profile "
+                        "(learning is on by default; it only pins once it has "
+                        "seen enough of your own traffic)")
+    p.add_argument("--usage-file", default=None,
+                   help="where to keep the learned expert profile "
+                        "(default: ~/.cache/turboquant-mlx/usage/)")
     p.add_argument("--no-hotlist", dest="use_hotlist", action="store_false",
                    default=True,
                    help="Ignore a hot_experts.json shipped in the model directory.")
@@ -125,6 +133,7 @@ def main():
         prefetch_workers=args.prefetch_workers, prefetch_ahead=args.prefetch_ahead,
         pin_file=args.pin_file, max_active_experts=args.max_active_experts,
         use_page_cache=args.use_page_cache, use_hotlist=args.use_hotlist,
+        learn_experts=args.learn_experts, usage_file=args.usage_file,
         wire_memory=args.wire_memory,
     )
     print(f"[stream] loaded in {time.time() - t0:.1f}s | resident RSS={_rss_gb():.2f} GB")

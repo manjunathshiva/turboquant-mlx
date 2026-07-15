@@ -144,6 +144,19 @@ def _auto_cache_budget(model_bytes: int, expert_bytes: int,
 # --cache-budget-gb.
 _HOTLIST_FILENAME = "hot_experts.json"
 
+# mirrored from usage_profile so the loader can report progress toward maturity
+from turboquant_mlx.stream.usage_profile import _MIN_ROUTINGS as _LEARN_MIN_ROUTINGS
+
+
+def _save_usage(profile, path) -> None:
+    """atexit hook: merge this run into the decayed history. Never raises."""
+    try:
+        if profile.routings and profile.update_on_disk(path):
+            print(f"[stream] expert-usage profile updated: {path} "
+                  f"(+{profile.routings:,} routings this run)")
+    except Exception:
+        pass
+
 
 def _find_hotlist(model_path: str) -> str | None:
     cand = os.path.join(model_path, _HOTLIST_FILENAME)
@@ -184,11 +197,27 @@ def _load_pin_spec(pin_file: str) -> "tuple[dict, list]":
     return pin_layers, pin_order
 
 
+def _pin_spec_to_layers(spec: dict) -> "tuple[dict, list]":
+    """Same shape as _load_pin_spec, for an in-memory spec (learned profile)."""
+    pin_layers: dict = {}
+    pin_order: list = []
+    seen = set()
+    for item in spec.get("pin", []):
+        le = (int(item[0]), int(item[1]))
+        if le in seen:
+            continue
+        seen.add(le)
+        pin_order.append(le)
+        pin_layers.setdefault(le[0], set()).add(le[1])
+    return pin_layers, pin_order
+
+
 def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                    prefetch_workers: int = 8, prefetch_ahead: int = 0,
                    pin_file: str | None = None, max_active_experts: int = 4,
                    use_page_cache: bool | None = None, use_hotlist: bool = True,
-                   preload_pins: bool = True, wire_memory: bool = False):
+                   preload_pins: bool = True, wire_memory: bool = False,
+                   learn_experts: bool = True, usage_file: str | None = None):
     """Returns (model, tokenizer, cache).
 
     cache_budget_gb bounds total resident expert memory (LRU-evicted). Pass
@@ -253,11 +282,28 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
         except Exception as exc:
             print(f"[stream] could not set wired limit ({exc}); continuing unwired")
 
+    # Learning cache (colibri #3). `history` is what previous runs recorded and
+    # decides this run's pins; `profile` collects THIS run and is merged into
+    # the history at exit. The profile object is created even when the pins come
+    # from a shipped hotlist — that is how a cold machine bootstraps its own
+    # list while still benefiting from the shipped prior today.
+    from turboquant_mlx.stream.usage_profile import UsageProfile, profile_path
+    profile_file = usage_file or profile_path(local_path)
+    history = UsageProfile.load(profile_file)
+    profile = UsageProfile(history.num_experts) if learn_experts else None
+
     cache = ExpertCache(
         reader, int(cache_budget_gb * 1e9),
         prefetch_workers=prefetch_workers,
         prefetch_ahead=prefetch_ahead,
+        usage_profile=profile,
     )
+    # Fold this run into the persisted history at exit. Registered rather than
+    # left to the caller because the win only materialises across runs, and a
+    # profile that is never written is a feature that never fires.
+    if profile is not None and profile_file:
+        import atexit
+        atexit.register(_save_usage, profile, profile_file)
 
     # Load the hot-expert pin spec (frequency-based pinning, #2 + shipped
     # hotlist, #6). Keyed by layer so we can pin all three projections of each
@@ -269,14 +315,28 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     pin_order: list = []
     if pin_file:
         pin_layers, pin_order = _load_pin_spec(pin_file)
-    elif use_hotlist:
-        shipped = _find_hotlist(local_path)
-        if shipped:
-            try:
-                pin_layers, pin_order = _load_pin_spec(shipped)
-                print(f"[stream] found shipped hot-expert list: {shipped}")
-            except ValueError as exc:  # includes json.JSONDecodeError
-                print(f"[stream] ignoring malformed shipped hotlist: {exc}")
+    else:
+        # A learned profile beats the shipped prior once it has seen enough of
+        # THIS user's traffic; below that it is noise (a few tokens would pin
+        # whatever the greeting touched), so the shipped list still wins.
+        if learn_experts and history.is_mature():
+            spec = history.pin_spec()
+            pin_layers, pin_order = _pin_spec_to_layers(spec)
+            print(f"[stream] learned hot-expert list: {len(pin_order)} experts "
+                  f"from {history.routings:,} recorded routings "
+                  f"({profile_file})")
+        elif use_hotlist:
+            shipped = _find_hotlist(local_path)
+            if shipped:
+                try:
+                    pin_layers, pin_order = _load_pin_spec(shipped)
+                    print(f"[stream] found shipped hot-expert list: {shipped}")
+                except ValueError as exc:  # includes json.JSONDecodeError
+                    print(f"[stream] ignoring malformed shipped hotlist: {exc}")
+        if learn_experts and not history.is_mature():
+            print(f"[stream] learning expert usage -> {profile_file} "
+                  f"({history.routings:,}/{_LEARN_MIN_ROUTINGS:,} routings; "
+                  f"pins from this profile once mature)")
 
     # Locate the transformer layer stack and its weight-key prefix. Multimodal
     # MoEs (qwen3_5_moe) nest it under `language_model.model.layers`; text-only
