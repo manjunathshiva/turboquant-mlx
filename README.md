@@ -157,8 +157,11 @@ Projection at 16,384 tokens of context
 Verdict: ✅ RESIDENT — fits fully in memory
 ```
 
-It reads **only safetensors headers** — no tensors are loaded, no engine starts —
-so it answers in milliseconds against a local dir or an HF repo id. Weights are
+It reads **only safetensors headers** — no tensors are loaded, no engine starts.
+A HuggingFace repo id is planned **over the network**, from range requests against
+the shard headers: the 12.6 GB repo above answers in ~2.5 s and pulls **232 KB**
+into a cold cache, so "will it fit?" is answered *before* the download, not after.
+Weights are
 exact; KV is derived from the config's attention geometry (hybrid models only
 grow KV on their full-attention layers); the prefill workspace is an estimate
 that scales with *both* chunk size and context.

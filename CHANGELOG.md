@@ -30,6 +30,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   OOMed in the field. The 0.13.0 auto-guards fix tight-memory serving at
   runtime — this predicts it instead.
 
+  A HuggingFace repo id is planned **over the network from its headers** (range
+  requests via `get_safetensors_metadata`), never by downloading it: the 12.6 GB
+  down4 repo answers in ~2.5 s and pulls 232 KB into a cold cache — so the
+  question is answered *before* the download, which is the whole point. An
+  already-cached repo is used from disk.
+
 ## [0.13.0] - 2026-07-13
 
 ### Added

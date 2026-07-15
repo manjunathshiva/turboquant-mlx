@@ -25,6 +25,10 @@ estimate:
                              puts --prefill-step-size 2048 over the wired cap
                              (observed: OOM) and 256/128 under it (observed: runs).
 
+A HuggingFace repo id is planned **over the network from its headers** — never
+by downloading it, which would defeat the point. Measured: the 12.6 GB down4 repo
+plans in ~2.5 s and pulls 232 KB into a cold cache.
+
 Usage:
     turboquant-plan --model <path_or_repo>
     turboquant-plan --model <path> --context 32768 --kv-bits 8
@@ -80,6 +84,32 @@ def read_safetensors_index(model_path: str) -> dict:
                 continue
             index[name] = (meta["dtype"], tuple(meta["shape"]))
     return index
+
+
+def read_remote_index(repo_id: str) -> dict:
+    """{tensor_name: (dtype, shape)} for an un-downloaded HF repo.
+
+    `get_safetensors_metadata` fetches each shard's header with an HTTP range
+    request — bytes, not gigabytes. This is what makes "plan *before* the
+    download" true rather than a slogan: the 12.6 GB down4 repo answers in
+    ~2.5 s over the network with 2,026 tensors described and nothing cached.
+    """
+    from huggingface_hub import get_safetensors_metadata
+    meta = get_safetensors_metadata(repo_id)
+    index = {}
+    for shard in meta.files_metadata.values():
+        for name, t in shard.tensors.items():
+            index[name] = (t.dtype, tuple(t.shape))
+    if not index:
+        raise FileNotFoundError(f"{repo_id}: no safetensors metadata")
+    return index
+
+
+def read_remote_config(repo_id: str) -> dict:
+    """config.json only — a few KB, not the checkpoint."""
+    from huggingface_hub import hf_hub_download
+    with open(hf_hub_download(repo_id, "config.json")) as f:
+        return json.load(f)
 
 
 def footprint(index: dict) -> dict:
@@ -157,10 +187,32 @@ def prefill_workspace_bytes(cfg: dict, context: int, step: int) -> float:
 # machine
 # --------------------------------------------------------------------------
 
+def estimate_wss(ram_bytes: float | None) -> float | None:
+    """Estimate Metal's default working-set cap from RAM.
+
+    Apple's `recommendedMaxWorkingSetSize` is roughly two-thirds of RAM on small
+    machines and a larger fraction on big ones — measured here: a 16 GB mini
+    reports 10.5 GB (66%), a 68.7 GB M4 Max reports 55.7 GB (81%). A single
+    fraction can't serve both, so this is piecewise and deliberately biased LOW:
+    under-promising the cap costs a user an unnecessary flag, over-promising
+    costs them an OOM.
+    """
+    if not ram_bytes:
+        return None
+    frac = 0.66 if ram_bytes <= 36 * _GB else 0.75
+    return frac * ram_bytes
+
+
 def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
     """Metal working-set cap + system RAM. Overridable so you can plan for a
-    machine you're not sitting at ("will this run on my 16 GB mini?")."""
-    out = {"assumed": bool(wired_gb or ram_gb)}
+    machine you're not sitting at ("will this run on my 16 GB mini?").
+
+    The two numbers MUST describe the same machine. Reading this device's
+    working set while the caller has assumed someone else's RAM is how you tell
+    a 16 GB mini that a 30 GB model fits — so an assumed --ram-gb estimates the
+    cap from that RAM instead of querying Metal here.
+    """
+    out = {"assumed": bool(wired_gb or ram_gb), "wss_estimated": False}
     if ram_gb:
         out["ram_bytes"] = ram_gb * _GB
     else:
@@ -169,15 +221,23 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
                 ["sysctl", "-n", "hw.memsize"]).strip())
         except Exception:
             out["ram_bytes"] = None
+
     if wired_gb:
         out["wss_bytes"] = wired_gb * _GB
+    elif ram_gb:
+        # planning for another machine: this device's cap is irrelevant
+        out["wss_bytes"] = estimate_wss(out["ram_bytes"])
+        out["wss_estimated"] = True
     else:
         try:
             import mlx.core as mx
             out["wss_bytes"] = float(
                 mx.device_info()["max_recommended_working_set_size"])
         except Exception:
-            out["wss_bytes"] = None
+            # no Metal device (Linux/CI): fall back to the RAM estimate rather
+            # than leaving it unknown, which made every verdict "needs a bump"
+            out["wss_bytes"] = estimate_wss(out["ram_bytes"])
+            out["wss_estimated"] = out["wss_bytes"] is not None
     return out
 
 
@@ -187,14 +247,17 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
 
 def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None,
                step: int | None = None, wired_gb: float | None = None,
-               ram_gb: float | None = None) -> dict:
-    cfg_path = os.path.join(model_path, "config.json")
-    if not os.path.isfile(cfg_path):
-        raise FileNotFoundError(f"{cfg_path} not found")
-    with open(cfg_path) as f:
-        cfg = json.load(f)
-
-    index = read_safetensors_index(model_path)
+               ram_gb: float | None = None, remote: bool = False) -> dict:
+    if remote:
+        cfg = read_remote_config(model_path)
+        index = read_remote_index(model_path)
+    else:
+        cfg_path = os.path.join(model_path, "config.json")
+        if not os.path.isfile(cfg_path):
+            raise FileNotFoundError(f"{cfg_path} not found")
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        index = read_safetensors_index(model_path)
     fp = footprint(index)
     mach = machine(wired_gb, ram_gb)
     c = _text_config(cfg)
@@ -292,7 +355,9 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         "schema": 1,
         "model": {
             "path": model_path,
-            "name": os.path.basename(os.path.abspath(model_path)),
+            "source": "huggingface" if remote else "local",
+            "name": (model_path if remote
+                     else os.path.basename(os.path.abspath(model_path))),
             "type": cfg.get("model_type") or c.get("model_type"),
             "quantization": cfg.get("quantization", {}).get("mode"),
             "bits": cfg.get("quantization", {}).get("bits"),
@@ -403,20 +468,28 @@ def render(p: dict) -> str:
 def run_doctor(model_path: str, plan: dict) -> list:
     """[(check_id, status, message)] with stable ids for automation."""
     checks = []
+    if plan["model"].get("source") == "huggingface":
+        checks.append(("model.remote", "warn",
+                       f"{model_path} planned from remote headers — not "
+                       f"downloaded, so on-disk checks are skipped"))
 
     def add(cid, ok, msg, warn=False):
         checks.append((cid, "warn" if warn and not ok else
                        ("pass" if ok else "fail"), msg))
 
-    add("model.dir", os.path.isdir(model_path), f"model directory {model_path}")
-    add("model.config", os.path.isfile(os.path.join(model_path, "config.json")),
-        "config.json present")
-    shards = glob.glob(os.path.join(model_path, "*.safetensors"))
-    add("model.weights", bool(shards), f"{len(shards)} safetensors shard(s)")
-
-    tok = any(os.path.isfile(os.path.join(model_path, f)) for f in
-              ("tokenizer.json", "tokenizer.model", "tokenizer_config.json"))
-    add("model.tokenizer", tok, "tokenizer files present")
+    local = plan["model"].get("source") != "huggingface"
+    if local:
+        add("model.dir", os.path.isdir(model_path),
+            f"model directory {model_path}")
+    if local:
+        add("model.config",
+            os.path.isfile(os.path.join(model_path, "config.json")),
+            "config.json present")
+        shards = glob.glob(os.path.join(model_path, "*.safetensors"))
+        add("model.weights", bool(shards), f"{len(shards)} safetensors shard(s)")
+        tok = any(os.path.isfile(os.path.join(model_path, f)) for f in
+                  ("tokenizer.json", "tokenizer.model", "tokenizer_config.json"))
+        add("model.tokenizer", tok, "tokenizer files present")
 
     q = plan["model"]["quantization"]
     add("model.turboquant", q == "turboquant",
@@ -450,7 +523,7 @@ def run_doctor(model_path: str, plan: dict) -> list:
         add("fit.projection", plan["verdict"]["runnable"],
             f"placement: {v} — peak {pk} vs working set {_gb(mach['wss_bytes'])}")
 
-    if plan["model"]["is_moe"] and v == "streaming":
+    if local and plan["model"]["is_moe"] and v == "streaming":
         add("fit.hotlist",
             os.path.isfile(os.path.join(model_path, "hot_experts.json")),
             "hot_experts.json (warm-starts the streaming cache)", warn=True)
@@ -461,12 +534,18 @@ def run_doctor(model_path: str, plan: dict) -> list:
 # CLI
 # --------------------------------------------------------------------------
 
-def _resolve(path: str) -> str:
+def _resolve(path: str) -> tuple:
+    """(target, remote). A repo id is planned over the network from its headers —
+    never by downloading it, which would defeat the entire point of the tool.
+    A local cache hit is used directly when one exists."""
     p = os.path.expanduser(path)
     if os.path.isdir(p):
-        return p
-    from turboquant_mlx.generate import resolve_model_path
-    return resolve_model_path(path)
+        return p, False
+    try:                                    # already downloaded? use the cache
+        from huggingface_hub import snapshot_download
+        return snapshot_download(path, local_files_only=True), False
+    except Exception:
+        return path, True                   # plan it remotely, headers only
 
 
 def _common_args(ap):
@@ -492,10 +571,10 @@ def main(argv=None) -> int:
     _common_args(ap)
     args = ap.parse_args(argv)
     try:
-        path = _resolve(args.model)
+        path, remote = _resolve(args.model)
         p = build_plan(path, context=args.context, kv_bits=args.kv_bits,
                        step=args.prefill_step_size, wired_gb=args.wired_gb,
-                       ram_gb=args.ram_gb)
+                       ram_gb=args.ram_gb, remote=remote)
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return _EXIT_UNFIT
@@ -514,10 +593,10 @@ def doctor_main(argv=None) -> int:
     _common_args(ap)
     args = ap.parse_args(argv)
     try:
-        path = _resolve(args.model)
+        path, remote = _resolve(args.model)
         p = build_plan(path, context=args.context, kv_bits=args.kv_bits,
                        step=args.prefill_step_size, wired_gb=args.wired_gb,
-                       ram_gb=args.ram_gb)
+                       ram_gb=args.ram_gb, remote=remote)
     except Exception as e:
         if args.json:
             print(json.dumps({"schema": 1, "checks": [

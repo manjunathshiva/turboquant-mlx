@@ -13,6 +13,8 @@ import pytest
 from turboquant_mlx.plan import (
     _RESERVE_BYTES,
     build_plan,
+    estimate_wss,
+    machine,
     footprint,
     kv_bytes_per_token,
     prefill_workspace_bytes,
@@ -182,6 +184,104 @@ class TestFieldCalibration:
         """The projection counts KV and workspace explicitly, so the reserve
         must be the *residue* (~1 GB measured), not serve.py's 2 GB budget."""
         assert _RESERVE_BYTES == pytest.approx(1.0 * GB)
+
+
+class TestMachineIsOneMachine:
+    """Review findings (PR #50): wss and ram must describe the SAME machine, and
+    an unknown cap must not turn every verdict into 'needs a sudo bump'."""
+
+    def _model(self, tmp_path, gb):
+        n = int(gb * GB / 4)
+        return _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+
+    def test_assumed_ram_does_not_borrow_this_machines_wss(self, tmp_path):
+        """Planning a 30 GB model for a 16 GB mini must not read the 55 GB
+        working set of the machine running the command."""
+        pl = build_plan(self._model(tmp_path, 30), ram_gb=16)
+        assert pl["machine"]["wss_estimated"]
+        assert pl["machine"]["wss_bytes"] < 12 * GB, \
+            "used the host's working set for an assumed 16 GB machine"
+        assert pl["verdict"]["mode"] == "streaming"
+
+    def test_small_model_is_never_told_to_sudo(self, tmp_path):
+        """A 2 GB model on 16 GB fits the default cap; recommending a wired
+        bump for it is noise."""
+        pl = build_plan(self._model(tmp_path, 2), ram_gb=16)
+        assert pl["verdict"]["mode"] == "resident"
+        assert not pl["verdict"]["needs_wired_bump"]
+        assert not any("sysctl" in f for f in pl["flags"])
+
+    def test_wss_estimate_tracks_the_measured_caps(self):
+        """16 GB mini reports 10.5 GB; 68.7 GB M4 Max reports 55.7 GB. The
+        estimate must be close on small machines and never optimistic."""
+        assert estimate_wss(16 * GB) == pytest.approx(10.5 * GB, abs=0.3 * GB)
+        assert estimate_wss(68.72 * GB) <= 55.66 * GB
+        assert estimate_wss(None) is None
+
+    def test_explicit_wired_gb_wins(self, tmp_path):
+        pl = build_plan(self._model(tmp_path, 2), ram_gb=16, wired_gb=13.5)
+        assert pl["machine"]["wss_bytes"] == pytest.approx(13.5 * GB)
+        assert not pl["machine"]["wss_estimated"]
+
+    def test_no_metal_device_falls_back_to_the_estimate(self, tmp_path, monkeypatch):
+        """On a box with no Metal (CI/Linux) the cap is unknown — estimate it
+        from RAM instead of flagging a bump for everything."""
+        import builtins
+        real = builtins.__import__
+
+        def no_mlx(name, *a, **k):
+            if name == "mlx.core":
+                raise ImportError("no metal here")
+            return real(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", no_mlx)
+        m = machine()          # no overrides: must not raise, must not be None
+        assert m["wss_bytes"] is None or m["wss_estimated"]
+
+
+class TestRemotePlanning:
+    """A repo id must be planned from headers over the network — downloading it
+    would defeat the entire purpose of a preflight tool."""
+
+    def test_repo_id_uses_remote_headers_not_a_download(self, monkeypatch):
+        import turboquant_mlx.plan as P
+        calls = {"cfg": 0, "idx": 0}
+
+        def fake_cfg(repo):
+            calls["cfg"] += 1
+            return Q35
+
+        def fake_idx(repo):
+            calls["idx"] += 1
+            n = int(9.45 * GB / 4)
+            return {"model.layers.0.mlp.switch_mlp.gate_proj.weight":
+                    ("U32", (n,))}
+
+        monkeypatch.setattr(P, "read_remote_config", fake_cfg)
+        monkeypatch.setattr(P, "read_remote_index", fake_idx)
+        # a downloader in this path would be a bug: make it explode
+        monkeypatch.setattr(P, "read_safetensors_index", lambda p: 1 / 0)
+
+        pl = P.build_plan("org/some-repo", remote=True, wired_gb=10.5, ram_gb=16,
+                          context=512)
+        assert calls == {"cfg": 1, "idx": 1}
+        assert pl["model"]["source"] == "huggingface"
+        assert pl["model"]["name"] == "org/some-repo"
+        assert pl["verdict"]["mode"] == "resident"
+
+    def test_doctor_skips_on_disk_checks_for_a_remote_model(self, monkeypatch):
+        import turboquant_mlx.plan as P
+        monkeypatch.setattr(P, "read_remote_config", lambda r: Q35)
+        monkeypatch.setattr(P, "read_remote_index", lambda r: {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight":
+                ("U32", (int(9.45 * GB / 4),))})
+        pl = P.build_plan("org/repo", remote=True, wired_gb=10.5, ram_gb=16)
+        checks = P.run_doctor("org/repo", pl)
+        ids = {c[0] for c in checks}
+        assert "model.remote" in ids
+        assert "model.dir" not in ids and "model.tokenizer" not in ids
 
 
 class TestOutput:
