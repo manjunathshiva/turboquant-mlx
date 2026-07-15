@@ -149,13 +149,18 @@ from turboquant_mlx.stream.usage_profile import _MIN_ROUTINGS as _LEARN_MIN_ROUT
 
 
 def _save_usage(profile, path) -> None:
-    """atexit hook: merge this run into the decayed history. Never raises."""
+    """atexit hook: merge this run into the decayed history.
+
+    Never raises: this runs at interpreter shutdown, and a profile is an
+    optimisation — losing it must not turn a completed generation into a
+    traceback. Failures are reported rather than swallowed silently.
+    """
     try:
         if profile.routings and profile.update_on_disk(path):
             print(f"[stream] expert-usage profile updated: {path} "
                   f"(+{profile.routings:,} routings this run)")
-    except Exception:
-        pass
+    except Exception as exc:                       # noqa: BLE001 - see docstring
+        print(f"[stream] could not update expert-usage profile at {path}: {exc}")
 
 
 def _find_hotlist(model_path: str) -> str | None:
@@ -288,7 +293,10 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     # from a shipped hotlist — that is how a cold machine bootstraps its own
     # list while still benefiting from the shipped prior today.
     from turboquant_mlx.stream.usage_profile import UsageProfile, profile_path
-    profile_file = usage_file or profile_path(local_path)
+    # abspath: a bare relative --usage-file has no dirname, and the atexit hook
+    # runs after any os.chdir the host app did — both would silently lose it.
+    profile_file = (os.path.abspath(os.path.expanduser(usage_file))
+                    if usage_file else profile_path(local_path))
     history = UsageProfile.load(profile_file)
     profile = UsageProfile(history.num_experts) if learn_experts else None
 

@@ -120,7 +120,11 @@ class UsageProfile:
                 d = json.load(f)
         except (OSError, ValueError):
             return p                                  # absent/corrupt -> empty
-        if d.get("version") != _PROFILE_VERSION:
+        # A truncated/edited cache file can be valid JSON that is not an object
+        # ("[]", "null", "42"). d.get() would then raise AttributeError, which
+        # the clause above does not catch — crashing the loader at startup over
+        # a corrupt *optimisation* file.
+        if not isinstance(d, dict) or d.get("version") != _PROFILE_VERSION:
             return p
         try:
             p.num_experts = int(d["num_experts"])
@@ -153,20 +157,31 @@ class UsageProfile:
         read-only cache dir must not take the run down with it."""
         if not self._dirty and self.routings == 0:
             return False
+        tmp = None
         try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
+            # dirname("profile.json") is "" -> makedirs("") raises, and the
+            # OSError guard below turned that into a silent "never persisted".
+            # A bare relative --usage-file is a reasonable thing to pass.
+            d_name = os.path.dirname(path) or "."
+            os.makedirs(d_name, exist_ok=True)
             d = {
                 "version": _PROFILE_VERSION,
                 "num_experts": self.num_experts,
                 "routings": self.routings,
                 "counts": {str(k): v.tolist() for k, v in self._counts.items()},
             }
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+            fd, tmp = tempfile.mkstemp(dir=d_name, suffix=".tmp")
             with os.fdopen(fd, "w") as f:
                 json.dump(d, f)
             os.replace(tmp, path)                     # atomic
             return True
         except OSError:
+            # don't leave orphaned .tmp files in the user's cache dir
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
             return False
 
     def update_on_disk(self, path: str, decay: float = _DECAY) -> bool:

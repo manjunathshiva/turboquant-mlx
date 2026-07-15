@@ -10,7 +10,6 @@ import json
 import os
 
 import numpy as np
-import pytest
 
 from turboquant_mlx.stream.usage_profile import (
     _MIN_ROUTINGS,
@@ -100,6 +99,37 @@ class TestPersistence:
         f = tmp_path / "bad.json"
         f.write_text("{not json at all")
         assert UsageProfile.load(str(f)).routings == 0
+
+    def test_valid_json_that_is_not_an_object_does_not_crash(self, tmp_path):
+        """A truncated/edited cache file can be valid JSON but not a dict.
+        d.get() then raises AttributeError, which the OSError/ValueError guard
+        does not catch — crashing the loader at startup over an *optimisation*
+        file. (Review finding, PR #55.)"""
+        for payload in ("[]", "null", "42", '"a string"', "[1, 2, 3]"):
+            f = tmp_path / f"x{abs(hash(payload))}.json"
+            f.write_text(payload)
+            assert UsageProfile.load(str(f)).routings == 0
+
+    def test_bare_relative_filename_actually_persists(self, tmp_path, monkeypatch):
+        """dirname("profile.json") is "" -> makedirs("") raised -> the OSError
+        guard turned it into a SILENT never-saved. A bare --usage-file is a
+        reasonable thing to pass. (Review finding, PR #55.)"""
+        monkeypatch.chdir(tmp_path)
+        p = UsageProfile()
+        p.record(0, np.array([1, 1], dtype=np.int64))
+        assert p.save("profile.json") is True
+        assert (tmp_path / "profile.json").exists()
+        assert UsageProfile.load("profile.json").routings == 2
+
+    def test_failed_write_leaves_no_orphan_tmp(self, tmp_path, monkeypatch):
+        """A mid-write failure must not litter the cache dir with .tmp files."""
+        import json as _json
+        p = UsageProfile()
+        p.record(0, np.array([1], dtype=np.int64))
+        monkeypatch.setattr(_json, "dump",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("full")))
+        assert p.save(str(tmp_path / "u.json")) is False
+        assert not list(tmp_path.glob("*.tmp")), "orphaned temp file left behind"
 
     def test_wrong_version_is_ignored(self, tmp_path):
         f = tmp_path / "v.json"
