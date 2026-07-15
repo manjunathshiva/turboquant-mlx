@@ -135,6 +135,18 @@ def _text_config(cfg: dict) -> dict:
     return cfg.get("text_config", cfg)
 
 
+def _pos_int(value, fallback):
+    """Config values come from arbitrary HF repos — treat anything that is not a
+    positive integer as 'not set'. Guards the real cases: `sliding_window: -1`
+    (a negative window subtracted KV, under-predicting), and a fractional
+    `full_attention_interval` (int() -> 0 -> ZeroDivisionError)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return n if n > 0 else fallback
+
+
 def _attention_layers(cfg: dict) -> tuple:
     """(n_full_attention, n_sliding_attention, n_layers, note).
 
@@ -160,7 +172,9 @@ def _attention_layers(cfg: dict) -> tuple:
         bits = [f"{n_full}/{len(types)} full-attention"]
         if n_slide:
             bits.append(f"{n_slide} sliding")
-        return n_full, n_slide, n_layers, "hybrid: " + ", ".join(bits)
+        # layer_types is itself an authoritative layer count
+        return n_full, n_slide, n_layers or len(types), \
+            "hybrid: " + ", ".join(bits)
 
     pat = c.get("hybrid_override_pattern")
     if isinstance(pat, str) and "*" in pat:
@@ -168,8 +182,8 @@ def _attention_layers(cfg: dict) -> tuple:
         return n_full, 0, n_layers or len(pat), \
             f"Mamba hybrid: {n_full}/{len(pat)} attention layers"
 
-    if c.get("full_attention_interval") and n_layers:
-        iv = int(c["full_attention_interval"])
+    iv = _pos_int(c.get("full_attention_interval"), 0)
+    if iv and n_layers:
         return n_layers // iv, 0, n_layers, \
             f"hybrid: every {iv}th layer full-attention"
 
@@ -201,8 +215,11 @@ def kv_bytes(cfg: dict, context: int, kv_bits: int | None = None) -> tuple:
 
     total = n_full * context * per_layer_token
     if n_slide:
-        window = c.get("sliding_window") or context
-        total += n_slide * min(context, int(window)) * per_layer_token
+        # an absent/zero/negative/garbage window means "not windowed" -> full
+        # context. Never let it shrink the total: that under-predicts, and
+        # under-prediction is the direction that OOMs.
+        window = _pos_int(c.get("sliding_window"), context)
+        total += n_slide * min(context, window) * per_layer_token
         note += f" (window {window})"
     return total, (total / context if context else 0.0), note
 

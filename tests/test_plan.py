@@ -152,6 +152,54 @@ class TestKV:
         assert t8k - total == 2 * 4096 * per_layer_tok   # only full layers grew
 
 
+class TestMalformedConfigs:
+    """config.json comes from arbitrary HF repo ids — untrusted input. Review
+    findings (PR #52): a garbage value must degrade, never under-predict."""
+
+    BASE = {"num_hidden_layers": 4, "num_key_value_heads": 8, "head_dim": 64,
+            "layer_types": ["sliding_attention", "full_attention"] * 2}
+    PER_LAYER_TOK = 2 * 8 * 64 * 2
+
+    def _kv(self, ctx=4096, **over):
+        return kv_bytes({"text_config": {**self.BASE, **over}}, ctx)[0]
+
+    def test_full_window_is_the_floor_not_a_subtraction(self):
+        """`sliding_window: -1` made the sliding layers subtract KV — an
+        under-prediction. Any non-positive/garbage window means 'not windowed'."""
+        full_ctx = 4 * 4096 * self.PER_LAYER_TOK      # all 4 layers, no window
+        for bad in (-1, 0, None, "", "none", 3.4e38):
+            got = self._kv(sliding_window=bad)
+            assert got == full_ctx, f"sliding_window={bad!r} -> {got}"
+
+    def test_a_real_window_still_bounds_the_cost(self):
+        got = self._kv(sliding_window=128)
+        assert got == (2 * 4096 + 2 * 128) * self.PER_LAYER_TOK
+
+    def test_fractional_interval_does_not_divide_by_zero(self):
+        """int(0.5) == 0 -> ZeroDivisionError in the old code."""
+        for bad in (0, 0.5, -3, "x", None):
+            n_full, _, n_layers, _ = _attention_layers(
+                {"text_config": {"num_hidden_layers": 8,
+                                 "full_attention_interval": bad}})
+            assert (n_full, n_layers) == (8, 8)      # falls back to dense
+
+    def test_valid_interval_still_works(self):
+        n_full, _, _, note = _attention_layers(
+            {"text_config": {"num_hidden_layers": 8,
+                             "full_attention_interval": 4}})
+        assert n_full == 2 and "every 4th" in note
+
+    def test_layer_types_supplies_the_layer_count(self):
+        """num_hidden_layers missing: layer_types is itself authoritative, so
+        the projection should still resolve instead of going unknown."""
+        cfg = {"text_config": {k: v for k, v in self.BASE.items()
+                               if k != "num_hidden_layers"}}
+        _, _, n_layers, _ = _attention_layers(cfg)
+        assert n_layers == 4
+        total, per_tok, note = kv_bytes(cfg, 4096)
+        assert total and per_tok and "lacks" not in note
+
+
 class TestWorkspace:
     def test_scales_with_chunk_and_context(self):
         a = prefill_workspace_bytes(Q35, 21000, 2048)
