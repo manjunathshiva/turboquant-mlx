@@ -4,6 +4,61 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-07-15
+
+### Added
+
+- **Learning expert cache for streaming** (`--no-learn-experts` opts out,
+  `--usage-file` relocates it): the shipped `hot_experts.json` is one profile,
+  baked by whoever converted the model. TurboQuant now also records which
+  experts *your own* traffic routes to, persists that across runs, and pins from
+  it once it has seen enough evidence — so a streamed MoE gets faster the more
+  you use it, and adapts if your workload changes (chat → agent, another
+  language).
+
+  Precedence is explicit `--pin-file` > learned (once mature) > shipped
+  hotlist; below the maturity threshold a profile is noise (a few tokens would
+  pin whatever the greeting happened to touch), so the shipped prior still
+  wins — but recording starts at the first token, so a cold machine bootstraps
+  its own list while still benefiting from the shipped one. History decays on
+  merge so a workload change re-pins within a few runs. The emitted spec is the
+  same `{"pin": [[layer, expert], ...]}` schema as `hot_experts.json`, so it
+  feeds the existing pin/preload path unchanged — and a good learned profile can
+  simply be uploaded as a shipped hotlist.
+
+  The profile lives in `~/.cache/turboquant-mlx/usage/` (XDG- and
+  `TURBOQUANT_USAGE_DIR`-aware), **not** in the model directory: a model dir is
+  usually a shared, content-addressed HuggingFace snapshot, and a stale file
+  there would survive a re-download and silently mis-pin. A read-only cache dir
+  is never fatal — a profile is an optimisation, not a dependency.
+
+  Measured on a streamed ternary 35B (3 identical runs, 2 GB budget, fresh
+  profile): cache hit 75.5% → **78.0%**, disk read 8.4 → **7.5 GB (−11%)** once
+  the profile matures and takes over from the shipped list. **Decode speed was
+  flat** (13.05 → 13.07 tok/s) — that box is a 64 GB M4 Max whose page cache
+  holds the whole 9.4 GB model, so it is not disk-bound and a better pin cannot
+  help it. The −11% fewer reads is what converts to tok/s on a machine that *is*
+  disk-bound (a mini streaming a 30-50 GB build); that measurement is still
+  outstanding, and no speedup is claimed until it exists.
+
+### Documentation
+
+- **Reproducibility and `--prefill-step-size`.** Changing the prefill chunk size
+  can change a greedy answer by a token: measured on a ~3.9K-token prompt,
+  `--prefill-step-size 2048` produced "...which *explains why* the sky reads
+  blue" where 512/256/128 produced "...which *is why*...". Both are valid argmax
+  continuations — the chunk size only changes the order the GPU reduces in, and
+  fp16 rounding occasionally lands on the other side of a near-tie.
+
+  **This is a property of chunked prefill on Metal, not of TurboQuant**: the
+  same test on stock `mlx-community/Llama-3.2-1B-Instruct-4bit` (plain mlx-lm,
+  plain affine 4-bit, none of our kernels) forks the same way. Our own decode
+  and prefill MoE kernels are *bit-identical* to each other, now pinned by
+  `tests/test_kernel_determinism.py` — that is the invariant `--disk-cache`
+  checkpoint restores depend on, since a restore continues a prefill-built state
+  on the decode path. For byte-reproducible greedy output, hold
+  `--prefill-step-size` fixed; quality and correctness are unaffected.
+
 ## [0.14.1] - 2026-07-15
 
 ### Fixed
