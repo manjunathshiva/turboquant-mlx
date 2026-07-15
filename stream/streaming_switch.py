@@ -65,7 +65,7 @@ class ExpertCache:
     def __init__(self, reader, budget_bytes: int, *, prefetch_workers: int = 8,
                  prefetch_ahead: int = 1,
                  staging_budget_bytes: int = 1_500_000_000,
-                 pin_keys=None):
+                 pin_keys=None, usage_profile=None):
         self.reader = reader
         self.budget = budget_bytes
         self.cur = 0
@@ -114,6 +114,9 @@ class ExpertCache:
         # startup hotlist preload (ds4-style shipped hot-expert list)
         self.preload_experts = 0             # expert-projections read by preload()
         self.preload_bytes = 0               # bytes read by preload()
+        # learning cache (colibri #3): per-(layer, expert) routing counts for
+        # THIS user's traffic, persisted across runs and used to pin next time.
+        self._usage = usage_profile
 
     # -- speculative prefetch -----------------------------------------
     def register_layer(self, layer_idx: int, proj_keys: list):
@@ -157,6 +160,16 @@ class ExpertCache:
                         continue
                     self._inflight.add(ck)
                     self._pool.submit(self._prefetch_one, wkey, skey, e)
+
+    def record_usage(self, layer_idx: int, routed) -> None:
+        """One forward's flat routing array (repeats an expert once per token).
+
+        Counting the *unique* set instead would flatten the signal: a prefill
+        forward on a 256-expert MoE touches nearly every expert once, while the
+        hot ones are hot precisely because many tokens pick them.
+        """
+        if self._usage is not None:
+            self._usage.record(layer_idx, routed)
 
     # -- calibration trace (#2 frequencies / #3 co-activation) --------
     def set_trace(self, on: bool = True):
@@ -501,6 +514,7 @@ class StreamingSwitchLinear(nn.Module):
         # record the selection for calibration on decode steps (1 token).
         if self._is_trigger:
             self._cache.on_layer_start(self._layer_idx, sel)
+            self._cache.record_usage(self._layer_idx, idx_global)
             if n_tokens == 1:
                 self._cache.record_trace(self._layer_idx, sel)
         remap = {e: i for i, e in enumerate(sel)}
