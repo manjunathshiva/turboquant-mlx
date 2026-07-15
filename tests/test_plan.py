@@ -1,0 +1,313 @@
+"""Tests for the preflight planner (turboquant-plan / turboquant-doctor).
+
+The load-bearing tests are the FIELD ones: the projection is calibrated against
+what the 16 GB mini actually did, and those numbers are the whole reason to trust
+the tool. If a refactor drifts the calibration, these fail.
+"""
+
+import json
+import struct
+
+import pytest
+
+from turboquant_mlx.plan import (
+    _RESERVE_BYTES,
+    build_plan,
+    estimate_wss,
+    machine,
+    footprint,
+    kv_bytes_per_token,
+    prefill_workspace_bytes,
+    read_safetensors_index,
+    render,
+    run_doctor,
+)
+
+GB = 1e9
+
+# Qwen3.6-35B-A3B geometry (the real one, from the shipped config)
+Q35 = {
+    "model_type": "qwen3_5_moe",
+    "quantization": {"mode": "turboquant", "bits": 3, "group_size": 64},
+    "text_config": {
+        "num_hidden_layers": 40,
+        "hidden_size": 2048,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "num_experts": 256,
+        "num_experts_per_tok": 8,
+        # 10 of 40 layers are full attention (hybrid GatedDeltaNet)
+        "layer_types": (["linear_attention"] * 3 + ["full_attention"]) * 10,
+    },
+}
+
+
+def _write_model(tmp_path, cfg, tensors):
+    """Minimal on-disk model: config.json + one shard whose HEADER is real but
+    whose payload is zero-filled (the planner must never read the payload)."""
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    header, off = {}, 0
+    for name, (dtype, shape) in tensors.items():
+        n = 1
+        for d in shape:
+            n *= d
+        size = n * {"U32": 4, "F16": 2, "F32": 4}[dtype]
+        header[name] = {"dtype": dtype, "shape": list(shape),
+                        "data_offsets": [off, off + size]}
+        off += size
+    blob = json.dumps(header).encode()
+    with open(tmp_path / "model.safetensors", "wb") as f:
+        f.write(struct.pack("<Q", len(blob)))
+        f.write(blob)
+        # NOTE: no payload written. A planner that reads tensors breaks here.
+    (tmp_path / "tokenizer.json").write_text("{}")
+    return str(tmp_path)
+
+
+class TestFootprint:
+    def test_splits_experts_from_resident(self):
+        idx = {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (256, 768, 96)),
+            "model.layers.0.mlp.switch_mlp.gate_proj.scales": ("F16", (256, 768, 32)),
+            "model.layers.0.self_attn.q_proj.weight": ("U32", (2048, 96)),
+            "model.embed_tokens.weight": ("F16", (150000, 2048)),
+        }
+        fp = footprint(idx)
+        assert fp["expert_bytes"] > 0
+        assert fp["resident_bytes"] > 0
+        assert fp["total_bytes"] == fp["expert_bytes"] + fp["resident_bytes"]
+
+    def test_router_gate_is_not_an_expert(self):
+        # the router must stay resident — it is not a switch_mlp tensor
+        idx = {"model.layers.0.mlp.gate.weight": ("F16", (256, 2048))}
+        assert footprint(idx)["expert_bytes"] == 0
+
+    def test_header_only_never_reads_payload(self, tmp_path):
+        p = _write_model(tmp_path, Q35,
+                         {"model.embed_tokens.weight": ("F16", (1000, 64))})
+        idx = read_safetensors_index(p)          # payload absent from the file
+        assert idx["model.embed_tokens.weight"] == ("F16", (1000, 64))
+
+
+class TestKV:
+    def test_hybrid_counts_only_full_attention_layers(self):
+        per_tok, n_full, n_layers, note = kv_bytes_per_token(Q35)
+        assert (n_full, n_layers) == (10, 40)
+        # 2 (K+V) * 2 kv-heads * 256 head_dim * 10 layers * 2 bytes
+        assert per_tok == 2 * 2 * 256 * 10 * 2
+        assert "hybrid" in note
+
+    def test_field_measurement_32k(self):
+        """Ternary 35B measured 0.62 GB of KV at 32K. Predict within 10%, and
+        on the conservative side — a planner that under-predicts is a crash."""
+        per_tok, *_ = kv_bytes_per_token(Q35)
+        pred = per_tok * 32768 / GB
+        assert pred >= 0.62, "planner must not under-predict KV"
+        assert abs(pred - 0.62) / 0.62 < 0.10
+
+    def test_kv_bits_halves_at_8(self):
+        fp16, *_ = kv_bytes_per_token(Q35)
+        kv8, *_ = kv_bytes_per_token(Q35, kv_bits=8)
+        assert kv8 == pytest.approx(fp16 / 2)
+
+    def test_missing_geometry_returns_none(self):
+        per_tok, _, _, note = kv_bytes_per_token({"text_config": {}})
+        assert per_tok is None and "lacks" in note
+
+
+class TestWorkspace:
+    def test_scales_with_chunk_and_context(self):
+        a = prefill_workspace_bytes(Q35, 21000, 2048)
+        b = prefill_workspace_bytes(Q35, 21000, 128)
+        assert a == pytest.approx(b * 16)          # linear in chunk
+        c = prefill_workspace_bytes(Q35, 42000, 128)
+        assert c == pytest.approx(b * 2)           # linear in context
+
+
+class TestFieldCalibration:
+    """The mini datapoints. These are the reason the tool is trustworthy."""
+
+    def _plan(self, tmp_path, weight_gb, **kw):
+        # one fake expert tensor sized to hit the target total
+        n = int(weight_gb * GB / 4)
+        p = _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+        return build_plan(p, wired_gb=10.5, ram_gb=16, **kw)
+
+    def test_ternary_9_4gb_short_context_fits_default_cap(self, tmp_path):
+        """Field: 10.42 GB peak at 512 tokens, runs under the DEFAULT wired cap
+        with no sudo. The published model card promises exactly this."""
+        pl = self._plan(tmp_path, 9.45, context=512)
+        assert pl["projection"]["peak_bytes"] / GB == pytest.approx(10.42, abs=0.15)
+        assert pl["verdict"]["mode"] == "resident"
+        assert not pl["verdict"]["needs_wired_bump"], \
+            "must not tell users to sudo for the no-sudo build"
+
+    def test_down4_12_6gb_needs_the_wired_bump(self, tmp_path):
+        """Field: 12.6 GB build needs `sysctl iogpu.wired_limit_mb=13824`, and
+        then runs RESIDENT — it must NOT be told to stream."""
+        pl = self._plan(tmp_path, 12.59, context=8000, kv_bits=8)
+        assert pl["verdict"]["mode"] == "resident"
+        assert pl["verdict"]["needs_wired_bump"]
+        bump = [f for f in pl["flags"] if "iogpu.wired_limit_mb" in f]
+        assert bump, "should recommend the sysctl raise"
+        mb = int(bump[0].split("iogpu.wired_limit_mb=")[1].split()[0])
+        assert 13000 <= mb <= 14500, f"bump {mb} MiB is far from the field's 13824"
+
+    def test_long_agent_context_forces_a_small_prefill_step(self, tmp_path):
+        """Field: 21K context on the mini needs --prefill-step-size 128; the
+        2048 default OOMs."""
+        pl = self._plan(tmp_path, 12.59, context=21000, kv_bits=8)
+        assert pl["projection"]["prefill_step_size"] <= 256
+        assert any("prefill-step-size" in f for f in pl["flags"])
+
+    def test_roomy_machine_keeps_the_fast_default(self, tmp_path):
+        n = int(12.59 * GB / 4)
+        p = _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+        pl = build_plan(p, wired_gb=55.7, ram_gb=68.7, context=16384)
+        assert pl["verdict"]["mode"] == "resident"
+        assert not pl["verdict"]["needs_wired_bump"]
+        assert pl["projection"]["prefill_step_size"] == 2048
+
+    def test_model_far_past_ram_streams(self, tmp_path):
+        """A 122B-class build on a 16 GB mini: experts page from disk."""
+        pl = self._plan(tmp_path, 30.9, context=4096)
+        assert pl["verdict"]["mode"] == "streaming"
+        assert any("--streaming" in f for f in pl["flags"])
+        assert any("cache-budget-gb" in f for f in pl["flags"])
+
+    def test_reserve_does_not_double_count_kv_and_prefill(self):
+        """The projection counts KV and workspace explicitly, so the reserve
+        must be the *residue* (~1 GB measured), not serve.py's 2 GB budget."""
+        assert _RESERVE_BYTES == pytest.approx(1.0 * GB)
+
+
+class TestMachineIsOneMachine:
+    """Review findings (PR #50): wss and ram must describe the SAME machine, and
+    an unknown cap must not turn every verdict into 'needs a sudo bump'."""
+
+    def _model(self, tmp_path, gb):
+        n = int(gb * GB / 4)
+        return _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+
+    def test_assumed_ram_does_not_borrow_this_machines_wss(self, tmp_path):
+        """Planning a 30 GB model for a 16 GB mini must not read the 55 GB
+        working set of the machine running the command."""
+        pl = build_plan(self._model(tmp_path, 30), ram_gb=16)
+        assert pl["machine"]["wss_estimated"]
+        assert pl["machine"]["wss_bytes"] < 12 * GB, \
+            "used the host's working set for an assumed 16 GB machine"
+        assert pl["verdict"]["mode"] == "streaming"
+
+    def test_small_model_is_never_told_to_sudo(self, tmp_path):
+        """A 2 GB model on 16 GB fits the default cap; recommending a wired
+        bump for it is noise."""
+        pl = build_plan(self._model(tmp_path, 2), ram_gb=16)
+        assert pl["verdict"]["mode"] == "resident"
+        assert not pl["verdict"]["needs_wired_bump"]
+        assert not any("sysctl" in f for f in pl["flags"])
+
+    def test_wss_estimate_tracks_the_measured_caps(self):
+        """16 GB mini reports 10.5 GB; 68.7 GB M4 Max reports 55.7 GB. The
+        estimate must be close on small machines and never optimistic."""
+        assert estimate_wss(16 * GB) == pytest.approx(10.5 * GB, abs=0.3 * GB)
+        assert estimate_wss(68.72 * GB) <= 55.66 * GB
+        assert estimate_wss(None) is None
+
+    def test_explicit_wired_gb_wins(self, tmp_path):
+        pl = build_plan(self._model(tmp_path, 2), ram_gb=16, wired_gb=13.5)
+        assert pl["machine"]["wss_bytes"] == pytest.approx(13.5 * GB)
+        assert not pl["machine"]["wss_estimated"]
+
+    def test_no_metal_device_falls_back_to_the_estimate(self, tmp_path, monkeypatch):
+        """On a box with no Metal (CI/Linux) the cap is unknown — estimate it
+        from RAM instead of flagging a bump for everything."""
+        import builtins
+        real = builtins.__import__
+
+        def no_mlx(name, *a, **k):
+            if name == "mlx.core":
+                raise ImportError("no metal here")
+            return real(name, *a, **k)
+
+        monkeypatch.setattr(builtins, "__import__", no_mlx)
+        m = machine()          # no overrides: must not raise, must not be None
+        assert m["wss_bytes"] is None or m["wss_estimated"]
+
+
+class TestRemotePlanning:
+    """A repo id must be planned from headers over the network — downloading it
+    would defeat the entire purpose of a preflight tool."""
+
+    def test_repo_id_uses_remote_headers_not_a_download(self, monkeypatch):
+        import turboquant_mlx.plan as P
+        calls = {"cfg": 0, "idx": 0}
+
+        def fake_cfg(repo):
+            calls["cfg"] += 1
+            return Q35
+
+        def fake_idx(repo):
+            calls["idx"] += 1
+            n = int(9.45 * GB / 4)
+            return {"model.layers.0.mlp.switch_mlp.gate_proj.weight":
+                    ("U32", (n,))}
+
+        monkeypatch.setattr(P, "read_remote_config", fake_cfg)
+        monkeypatch.setattr(P, "read_remote_index", fake_idx)
+        # a downloader in this path would be a bug: make it explode
+        monkeypatch.setattr(P, "read_safetensors_index", lambda p: 1 / 0)
+
+        pl = P.build_plan("org/some-repo", remote=True, wired_gb=10.5, ram_gb=16,
+                          context=512)
+        assert calls == {"cfg": 1, "idx": 1}
+        assert pl["model"]["source"] == "huggingface"
+        assert pl["model"]["name"] == "org/some-repo"
+        assert pl["verdict"]["mode"] == "resident"
+
+    def test_doctor_skips_on_disk_checks_for_a_remote_model(self, monkeypatch):
+        import turboquant_mlx.plan as P
+        monkeypatch.setattr(P, "read_remote_config", lambda r: Q35)
+        monkeypatch.setattr(P, "read_remote_index", lambda r: {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight":
+                ("U32", (int(9.45 * GB / 4),))})
+        pl = P.build_plan("org/repo", remote=True, wired_gb=10.5, ram_gb=16)
+        checks = P.run_doctor("org/repo", pl)
+        ids = {c[0] for c in checks}
+        assert "model.remote" in ids
+        assert "model.dir" not in ids and "model.tokenizer" not in ids
+
+
+class TestOutput:
+    def test_render_and_doctor(self, tmp_path):
+        n = int(9.45 * GB / 4)
+        p = _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+        pl = build_plan(p, wired_gb=10.5, ram_gb=16, context=512)
+        text = render(pl)
+        assert "Verdict:" in text and "RESIDENT" in text
+        checks = run_doctor(p, pl)
+        ids = {c[0] for c in checks}
+        assert {"model.config", "model.weights", "model.tokenizer",
+                "fit.projection"} <= ids
+        assert all(s in ("pass", "warn", "fail") for _, s, _ in checks)
+
+    def test_json_is_serialisable(self, tmp_path):
+        n = int(9.45 * GB / 4)
+        p = _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+        pl = build_plan(p, wired_gb=10.5, ram_gb=16)
+        json.dumps(pl)          # must not raise
+        assert pl["schema"] == 1
+
+    def test_missing_config_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            build_plan(str(tmp_path))
