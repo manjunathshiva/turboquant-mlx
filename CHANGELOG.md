@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1] - 2026-07-15
+
+### Fixed
+
+- **`turboquant-plan`: KV geometry for Mamba hybrids and sliding-window
+  layers.** Found by sweeping the planner across all 16 published TurboQuant
+  repos. It ran on every one, but two families were wrong:
+  - **Nemotron-H** (`nemotron_h`) has no `layer_types` — its attention layers
+    live in `hybrid_override_pattern` (`MEMEMEM*EMEM…`, `*` = attention,
+    `M` = Mamba, `E` = MLP). The planner fell through to `num_hidden_layers`
+    and assumed all 88 layers were full attention. **Only 8 are** — an 11x KV
+    over-prediction that made the 120B look far heavier than it is
+    (88.0 → **8.0 KB/token**).
+  - **GPT-OSS and Gemma/DiffusionGemma** interleave `sliding_attention`
+    layers, which hold real KV capped at `sliding_window`. Only `full` layers
+    were counted — an **under-prediction**, the direction that OOMs.
+    DiffusionGemma 40.0 → **65.0 KB/token** (25 sliding layers, window 1024);
+    gpt-oss 36.0 → 36.6 (window 128).
+
+  `kv_bytes(cfg, context, kv_bits)` now returns the total at a context rather
+  than a flat per-token rate, since sliding layers stop growing at the window;
+  `_attention_layers()` centralises the three ways a config declares which
+  layers hold KV. The calibrated Qwen3.6-35B path is unchanged at exactly
+  20.0 KB/token, so the field validation (0.67 GB predicted vs 0.62 measured
+  at 32K) still holds.
+
+- **`turboquant-plan`: hardened config parsing.** `config.json` comes from
+  whatever HF repo id the caller passes, so a malformed value must degrade
+  rather than quietly under-predict. `sliding_window: -1` made sliding layers
+  *subtract* KV; a fractional `full_attention_interval` raised
+  `ZeroDivisionError` (`int(0.5)` → 0); and a config with `layer_types` but no
+  `num_hidden_layers` lost its projection unnecessarily. Anything that is not
+  a positive integer now means "not set". All 16 published repos re-swept
+  byte-identical — the guards touch only malformed configs.
+
 ## [0.14.0] - 2026-07-15
 
 ### Added
