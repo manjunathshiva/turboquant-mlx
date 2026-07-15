@@ -135,41 +135,76 @@ def _text_config(cfg: dict) -> dict:
     return cfg.get("text_config", cfg)
 
 
-def kv_bytes_per_token(cfg: dict, kv_bits: int | None = None) -> tuple:
-    """(bytes/token, n_full_attention_layers, n_layers, note).
+def _attention_layers(cfg: dict) -> tuple:
+    """(n_full_attention, n_sliding_attention, n_layers, note).
 
-    Hybrid models (Qwen3.5/3.6 GatedDeltaNet) only grow KV on their
-    full-attention layers — `layer_types` names them; `full_attention_interval`
-    is the fallback. Returns (None, ...) when the config doesn't say enough.
+    Three families, three different ways of saying which layers hold KV:
+
+    * `layer_types` — Qwen3.5/3.6 (`linear_attention` = GatedDeltaNet, fixed-size
+      recurrent state, no KV growth), GPT-OSS and Gemma (`sliding_attention`,
+      whose KV is real but capped at `sliding_window`).
+    * `hybrid_override_pattern` — Nemotron-H's Mamba hybrid, where `*` is an
+      attention layer and `M`/`E` are Mamba/MLP. Only 8 of its 88 layers are
+      attention; reading `num_hidden_layers` instead over-predicts KV by 11x.
+    * `full_attention_interval` — older hybrids.
+
+    Everything else is assumed dense full-attention.
     """
     c = _text_config(cfg)
     n_layers = c.get("num_hidden_layers")
+
+    types = c.get("layer_types")
+    if isinstance(types, list) and types:
+        n_full = sum(1 for t in types if "full" in str(t))
+        n_slide = sum(1 for t in types if "sliding" in str(t))
+        bits = [f"{n_full}/{len(types)} full-attention"]
+        if n_slide:
+            bits.append(f"{n_slide} sliding")
+        return n_full, n_slide, n_layers, "hybrid: " + ", ".join(bits)
+
+    pat = c.get("hybrid_override_pattern")
+    if isinstance(pat, str) and "*" in pat:
+        n_full = pat.count("*")
+        return n_full, 0, n_layers or len(pat), \
+            f"Mamba hybrid: {n_full}/{len(pat)} attention layers"
+
+    if c.get("full_attention_interval") and n_layers:
+        iv = int(c["full_attention_interval"])
+        return n_layers // iv, 0, n_layers, \
+            f"hybrid: every {iv}th layer full-attention"
+
+    return n_layers, 0, n_layers, "all layers full-attention"
+
+
+def kv_bytes(cfg: dict, context: int, kv_bits: int | None = None) -> tuple:
+    """(total_bytes_at_context, effective_bytes_per_token, note).
+
+    Full-attention layers grow with the context; sliding-window layers stop at
+    `sliding_window` tokens, so their cost is bounded — small, but ignoring them
+    under-predicts, and under-predicting is the direction that OOMs.
+    """
+    c = _text_config(cfg)
     n_kv = c.get("num_key_value_heads") or c.get("num_attention_heads")
     head_dim = c.get("head_dim")
     if head_dim is None and c.get("hidden_size") and c.get("num_attention_heads"):
         head_dim = c["hidden_size"] // c["num_attention_heads"]
+    n_full, n_slide, n_layers, note = _attention_layers(cfg)
     if not (n_layers and n_kv and head_dim):
-        return None, None, n_layers, "config lacks KV geometry"
-
-    note = "all layers full-attention"
-    types = c.get("layer_types")
-    if isinstance(types, list) and types:
-        n_full = sum(1 for t in types if "full" in str(t))
-        note = f"hybrid: {n_full}/{len(types)} full-attention layers"
-    elif c.get("full_attention_interval"):
-        iv = int(c["full_attention_interval"])
-        n_full = n_layers // iv
-        note = f"hybrid: every {iv}th layer full-attention"
-    else:
-        n_full = n_layers
+        return None, None, "config lacks KV geometry"
 
     itemsize = 2.0  # fp16 KV
     if kv_bits:
         # TurboQuant KV-quant stores kv_bits/16 of the fp16 payload (+ scales,
         # which are small); --kv-bits 8 halving KV matches the measured 35B.
         itemsize = 2.0 * (kv_bits / 16.0)
-    per_token = 2 * n_kv * head_dim * n_full * itemsize
-    return per_token, n_full, n_layers, note
+    per_layer_token = 2 * n_kv * head_dim * itemsize
+
+    total = n_full * context * per_layer_token
+    if n_slide:
+        window = c.get("sliding_window") or context
+        total += n_slide * min(context, int(window)) * per_layer_token
+        note += f" (window {window})"
+    return total, (total / context if context else 0.0), note
 
 
 def prefill_workspace_bytes(cfg: dict, context: int, step: int) -> float:
@@ -262,8 +297,9 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     mach = machine(wired_gb, ram_gb)
     c = _text_config(cfg)
 
-    kv_pt, n_full, n_layers, kv_note = kv_bytes_per_token(cfg, kv_bits)
-    kv_total = (kv_pt or 0) * context
+    kv_total, kv_pt, kv_note = kv_bytes(cfg, context, kv_bits)
+    _, _, n_layers, _ = _attention_layers(cfg)
+    kv_total = kv_total or 0
 
     wss = mach["wss_bytes"]
     ram = mach["ram_bytes"]
