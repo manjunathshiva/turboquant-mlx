@@ -16,7 +16,8 @@ from turboquant_mlx.plan import (
     estimate_wss,
     machine,
     footprint,
-    kv_bytes_per_token,
+    _attention_layers,
+    kv_bytes,
     prefill_workspace_bytes,
     read_safetensors_index,
     render,
@@ -92,8 +93,9 @@ class TestFootprint:
 
 class TestKV:
     def test_hybrid_counts_only_full_attention_layers(self):
-        per_tok, n_full, n_layers, note = kv_bytes_per_token(Q35)
-        assert (n_full, n_layers) == (10, 40)
+        n_full, n_slide, n_layers, note = _attention_layers(Q35)
+        assert (n_full, n_slide, n_layers) == (10, 0, 40)
+        _, per_tok, _ = kv_bytes(Q35, 1024)
         # 2 (K+V) * 2 kv-heads * 256 head_dim * 10 layers * 2 bytes
         assert per_tok == 2 * 2 * 256 * 10 * 2
         assert "hybrid" in note
@@ -101,19 +103,101 @@ class TestKV:
     def test_field_measurement_32k(self):
         """Ternary 35B measured 0.62 GB of KV at 32K. Predict within 10%, and
         on the conservative side — a planner that under-predicts is a crash."""
-        per_tok, *_ = kv_bytes_per_token(Q35)
-        pred = per_tok * 32768 / GB
+        total, *_ = kv_bytes(Q35, 32768)
+        pred = total / GB
         assert pred >= 0.62, "planner must not under-predict KV"
         assert abs(pred - 0.62) / 0.62 < 0.10
 
     def test_kv_bits_halves_at_8(self):
-        fp16, *_ = kv_bytes_per_token(Q35)
-        kv8, *_ = kv_bytes_per_token(Q35, kv_bits=8)
+        fp16, *_ = kv_bytes(Q35, 4096)
+        kv8, *_ = kv_bytes(Q35, 4096, kv_bits=8)
         assert kv8 == pytest.approx(fp16 / 2)
 
     def test_missing_geometry_returns_none(self):
-        per_tok, _, _, note = kv_bytes_per_token({"text_config": {}})
-        assert per_tok is None and "lacks" in note
+        total, _, note = kv_bytes({"text_config": {}}, 1024)
+        assert total is None and "lacks" in note
+
+    def test_mamba_hybrid_reads_the_override_pattern(self):
+        """Nemotron-H: only the '*' layers are attention. Counting
+        num_hidden_layers instead over-predicts KV by 11x."""
+        cfg = {"text_config": {
+            "num_hidden_layers": 88, "num_key_value_heads": 2, "head_dim": 128,
+            "hybrid_override_pattern":
+                "MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*"
+                "EMEMEMEMEM*EMEMEMEM*EMEMEMEME",
+        }}
+        n_full, _, n_layers, note = _attention_layers(cfg)
+        assert (n_full, n_layers) == (8, 88)
+        assert "Mamba" in note
+        _, per_tok, _ = kv_bytes(cfg, 4096)
+        assert per_tok == 2 * 2 * 128 * 8 * 2      # 8 attention layers, not 88
+
+    def test_sliding_window_layers_are_counted_but_bounded(self):
+        """GPT-OSS/Gemma sliding layers hold real KV capped at the window.
+        Ignoring them under-predicts, which is the direction that OOMs."""
+        cfg = {"text_config": {
+            "num_hidden_layers": 4, "num_key_value_heads": 8, "head_dim": 64,
+            "layer_types": ["sliding_attention", "full_attention"] * 2,
+            "sliding_window": 128,
+        }}
+        n_full, n_slide, _, note = _attention_layers(cfg)
+        assert (n_full, n_slide) == (2, 2)
+        assert "sliding" in note
+        per_layer_tok = 2 * 8 * 64 * 2
+        # at 4096 ctx: 2 full layers grow; 2 sliding stop at 128 tokens
+        total, _, _ = kv_bytes(cfg, 4096)
+        assert total == 2 * 4096 * per_layer_tok + 2 * 128 * per_layer_tok
+        # sliding cost must stop growing once past the window
+        t8k, *_ = kv_bytes(cfg, 8192)
+        assert t8k - total == 2 * 4096 * per_layer_tok   # only full layers grew
+
+
+class TestMalformedConfigs:
+    """config.json comes from arbitrary HF repo ids — untrusted input. Review
+    findings (PR #52): a garbage value must degrade, never under-predict."""
+
+    BASE = {"num_hidden_layers": 4, "num_key_value_heads": 8, "head_dim": 64,
+            "layer_types": ["sliding_attention", "full_attention"] * 2}
+    PER_LAYER_TOK = 2 * 8 * 64 * 2
+
+    def _kv(self, ctx=4096, **over):
+        return kv_bytes({"text_config": {**self.BASE, **over}}, ctx)[0]
+
+    def test_full_window_is_the_floor_not_a_subtraction(self):
+        """`sliding_window: -1` made the sliding layers subtract KV — an
+        under-prediction. Any non-positive/garbage window means 'not windowed'."""
+        full_ctx = 4 * 4096 * self.PER_LAYER_TOK      # all 4 layers, no window
+        for bad in (-1, 0, None, "", "none", 3.4e38):
+            got = self._kv(sliding_window=bad)
+            assert got == full_ctx, f"sliding_window={bad!r} -> {got}"
+
+    def test_a_real_window_still_bounds_the_cost(self):
+        got = self._kv(sliding_window=128)
+        assert got == (2 * 4096 + 2 * 128) * self.PER_LAYER_TOK
+
+    def test_fractional_interval_does_not_divide_by_zero(self):
+        """int(0.5) == 0 -> ZeroDivisionError in the old code."""
+        for bad in (0, 0.5, -3, "x", None):
+            n_full, _, n_layers, _ = _attention_layers(
+                {"text_config": {"num_hidden_layers": 8,
+                                 "full_attention_interval": bad}})
+            assert (n_full, n_layers) == (8, 8)      # falls back to dense
+
+    def test_valid_interval_still_works(self):
+        n_full, _, _, note = _attention_layers(
+            {"text_config": {"num_hidden_layers": 8,
+                             "full_attention_interval": 4}})
+        assert n_full == 2 and "every 4th" in note
+
+    def test_layer_types_supplies_the_layer_count(self):
+        """num_hidden_layers missing: layer_types is itself authoritative, so
+        the projection should still resolve instead of going unknown."""
+        cfg = {"text_config": {k: v for k, v in self.BASE.items()
+                               if k != "num_hidden_layers"}}
+        _, _, n_layers, _ = _attention_layers(cfg)
+        assert n_layers == 4
+        total, per_tok, note = kv_bytes(cfg, 4096)
+        assert total and per_tok and "lacks" not in note
 
 
 class TestWorkspace:
