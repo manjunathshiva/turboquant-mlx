@@ -137,6 +137,59 @@ pip install "turboquant-mlx-full[eval]"
 
 ## Quick Start
 
+### 0. Will it run on my Mac? (`turboquant-plan`)
+
+Before a multi-GB download, ask:
+
+```bash
+turboquant-plan --model manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64
+```
+
+```
+Projection at 16,384 tokens of context
+  weights              12.59 GB
+  KV cache             0.34 GB  (20.0 KB/token, hybrid: 10/40 full-attention layers)
+  prefill workspace    1.07 GB  (estimate, at --prefill-step-size 2048)
+  runtime reserve      1.00 GB  (buffer cache, activations, fragmentation)
+                       ----------------------------------
+  peak                 15.00 GB of 61.85 GB usable   46.85 GB headroom
+
+Verdict: ✅ RESIDENT — fits fully in memory
+```
+
+It reads **only safetensors headers** — no tensors are loaded, no engine starts —
+so it answers in milliseconds against a local dir or an HF repo id. Weights are
+exact; KV is derived from the config's attention geometry (hybrid models only
+grow KV on their full-attention layers); the prefill workspace is an estimate
+that scales with *both* chunk size and context.
+
+Planning for a machine you're not sitting at, and asking for the flags:
+
+```bash
+turboquant-plan --model <repo> --wired-gb 10.5 --ram-gb 16 --context 21000 --kv-bits 8
+```
+
+```
+Verdict: ⚠️  RESIDENT — fits, but only after raising the Metal wired cap
+
+Recommended:
+  sudo sysctl -w iogpu.wired_limit_mb=13721   (raises the 10.50 GB Metal cap —
+      the binding limit here, not your 16 GB of RAM; resets on reboot)
+  --prefill-step-size 128   (the default 2048 needs 1.38 GB of transient
+      workspace at this context)
+  --kv-bits 8
+```
+
+That is the 16 GB Mac mini recipe, *derived* rather than found by trial and error
+— the projection is calibrated against measurements on that machine (it predicts
+10.44 GB where the 9.4 GB ternary build measures 10.42, and recommends a wired
+limit within 1% of the one that actually works).
+
+`turboquant-doctor` runs the same projection plus a read-only readiness check —
+model files, tokenizer, quantization block, mlx/mlx-lm imports, machine limits —
+with stable check ids and exit codes (0 ok/warn, 1 won't fit or files missing,
+2 bad usage). Both take `--json` for automation.
+
 ### 1. Convert a model to TurboQuant format
 
 ```bash

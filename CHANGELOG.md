@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`turboquant-plan` / `turboquant-doctor` — preflight placement projection.**
+  Answers "will this model run on this Mac, and with what flags?" *before* a
+  multi-GB download or a five-minute load, by reading **only safetensors
+  headers** and `config.json` — it allocates no tensors, starts no engine, and
+  imports no model framework. Reports the exact weight split (total / streamable
+  experts / resident backbone), a KV projection derived from the config's
+  attention geometry (hybrid GatedDeltaNet models only grow KV on their
+  full-attention layers — 10 of 40 on Qwen3.6-35B), an estimate of the transient
+  prefill workspace (which scales with *both* chunk size and context), and a
+  verdict: resident / resident-after-a-wired-bump / streaming / won't-run —
+  plus the flags to use. `--wired-gb` / `--ram-gb` plan for a machine you are
+  not sitting at; `--json` is machine-readable; `turboquant-doctor` adds a
+  read-only readiness check (files, tokenizer, quantization block, mlx/mlx-lm)
+  with stable check ids and exit codes (0 ok/warn, 1 won't fit / missing,
+  2 usage). The projection is **calibrated against the 16 GB mini
+  measurements**, not guessed: it predicts a 10.44 GB peak where the 9.4 GB
+  ternary build measures 10.42 GB and correctly needs no `sudo`; it recommends
+  `iogpu.wired_limit_mb=13721` for the 12.6 GB down4 build where 13824 is what
+  works; and at 21K context it rejects the default 2048 prefill chunk that
+  OOMed in the field. The 0.13.0 auto-guards fix tight-memory serving at
+  runtime — this predicts it instead.
+
 ## [0.13.0] - 2026-07-13
 
 ### Added

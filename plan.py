@@ -1,0 +1,547 @@
+"""Preflight: will this model run on this Mac, and with what flags?
+
+`turboquant-plan` answers that **before** a multi-GB download or a five-minute
+load, by reading only safetensors *headers* and `config.json` — it allocates no
+tensors, starts no engine, and imports no model framework.
+
+Why this exists: the 0.13.0 auto-guards (`--metal-cache-limit-gb auto`,
+`--prompt-cache-max-gb auto`, `--cache-budget-gb auto`) fix tight-memory serving
+*at runtime*. They can't answer the question a user asks first — "will this fit,
+and what do I pass?" Every crash behind those guards was predictable from the
+model headers plus one machine number.
+
+The projection is deliberately explicit about what is exact and what is an
+estimate:
+
+  weights          EXACT   — summed from the safetensors headers
+  KV cache         DERIVED — 2 (K+V) x n_kv_heads x head_dim x full-attn layers
+                             x itemsize x context. Validated on the ternary 35B:
+                             predicts 0.67 GB at 32K vs 0.62 GB measured (+8%,
+                             i.e. conservative, which is what a planner should be).
+  prefill workspace ESTIMATE — chunk x context x n_attn_heads x 2 bytes, the
+                             transient attention scratch that scales with BOTH
+                             the chunk size and the context. Calibrated against
+                             the measured 16 GB mini boundary: at 21K context it
+                             puts --prefill-step-size 2048 over the wired cap
+                             (observed: OOM) and 256/128 under it (observed: runs).
+
+Usage:
+    turboquant-plan --model <path_or_repo>
+    turboquant-plan --model <path> --context 32768 --kv-bits 8
+    turboquant-plan --model <path> --wired-gb 13.5 --ram-gb 16   # plan for ANOTHER Mac
+    turboquant-plan --model <path> --json
+
+Exit codes: 0 = runnable (warnings allowed), 1 = won't fit / missing files,
+2 = bad usage.
+"""
+
+import argparse
+import glob
+import json
+import os
+import struct
+import subprocess
+import sys
+
+_ITEMSIZE = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
+             "F16": 2, "BF16": 2, "I16": 2, "U16": 2, "F8_E4M3": 1,
+             "F8_E5M2": 1, "I8": 1, "U8": 1, "BOOL": 1}
+
+_GB = 1e9
+
+# What we do NOT model line-by-line: the (capped) MLX buffer-reuse cache,
+# per-layer activations, and allocator fragmentation. Calibrated, not guessed:
+# the down4 35B measures a 13.60 GB peak on the mini against 12.59 GB of weights
+# and ~0.1 GB of KV, so the residue is ~0.9 GB. NOTE this is deliberately NOT the
+# 2 GB that serve.py/loader.py reserve — theirs has to *cover* KV and prefill
+# workspace, which this projection already counts explicitly; reusing 2 GB here
+# would double-count and wrongly report "streaming" for models that run resident.
+_RESERVE_BYTES = 1.0 * _GB
+_EXIT_OK, _EXIT_UNFIT, _EXIT_USAGE = 0, 1, 2
+
+
+# --------------------------------------------------------------------------
+# header-only model inspection
+# --------------------------------------------------------------------------
+
+def read_safetensors_index(model_path: str) -> dict:
+    """{tensor_name: (dtype, shape)} from shard headers. Opens each file, reads
+    the 8-byte length + JSON header, closes it. No payload is touched."""
+    shards = sorted(glob.glob(os.path.join(model_path, "*.safetensors")))
+    if not shards:
+        raise FileNotFoundError(f"no *.safetensors in {model_path}")
+    index = {}
+    for shard in shards:
+        with open(shard, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            header = json.loads(f.read(n))
+        for name, meta in header.items():
+            if name == "__metadata__":
+                continue
+            index[name] = (meta["dtype"], tuple(meta["shape"]))
+    return index
+
+
+def footprint(index: dict) -> dict:
+    """Exact byte split: total / streamable experts / always-resident."""
+    total = expert = 0
+    for name, (dtype, shape) in index.items():
+        n = 1
+        for d in shape:
+            n *= d
+        b = n * _ITEMSIZE.get(dtype, 4)
+        total += b
+        # what the streaming swap pages from disk (mirrors
+        # stream/loader.py:_streamed_expert_bytes)
+        if "switch_mlp" in name and (name.endswith(".weight")
+                                     or name.endswith(".scales")):
+            expert += b
+    return {"total_bytes": total, "expert_bytes": expert,
+            "resident_bytes": total - expert}
+
+
+def _text_config(cfg: dict) -> dict:
+    """Multimodal repos nest the LM config under text_config."""
+    return cfg.get("text_config", cfg)
+
+
+def kv_bytes_per_token(cfg: dict, kv_bits: int | None = None) -> tuple:
+    """(bytes/token, n_full_attention_layers, n_layers, note).
+
+    Hybrid models (Qwen3.5/3.6 GatedDeltaNet) only grow KV on their
+    full-attention layers — `layer_types` names them; `full_attention_interval`
+    is the fallback. Returns (None, ...) when the config doesn't say enough.
+    """
+    c = _text_config(cfg)
+    n_layers = c.get("num_hidden_layers")
+    n_kv = c.get("num_key_value_heads") or c.get("num_attention_heads")
+    head_dim = c.get("head_dim")
+    if head_dim is None and c.get("hidden_size") and c.get("num_attention_heads"):
+        head_dim = c["hidden_size"] // c["num_attention_heads"]
+    if not (n_layers and n_kv and head_dim):
+        return None, None, n_layers, "config lacks KV geometry"
+
+    note = "all layers full-attention"
+    types = c.get("layer_types")
+    if isinstance(types, list) and types:
+        n_full = sum(1 for t in types if "full" in str(t))
+        note = f"hybrid: {n_full}/{len(types)} full-attention layers"
+    elif c.get("full_attention_interval"):
+        iv = int(c["full_attention_interval"])
+        n_full = n_layers // iv
+        note = f"hybrid: every {iv}th layer full-attention"
+    else:
+        n_full = n_layers
+
+    itemsize = 2.0  # fp16 KV
+    if kv_bits:
+        # TurboQuant KV-quant stores kv_bits/16 of the fp16 payload (+ scales,
+        # which are small); --kv-bits 8 halving KV matches the measured 35B.
+        itemsize = 2.0 * (kv_bits / 16.0)
+    per_token = 2 * n_kv * head_dim * n_full * itemsize
+    return per_token, n_full, n_layers, note
+
+
+def prefill_workspace_bytes(cfg: dict, context: int, step: int) -> float:
+    """Transient attention scratch for one prefill chunk (ESTIMATE).
+
+    Scales with chunk size AND context — which is why a long agent turn can OOM
+    at a chunk size that was fine when the conversation was short.
+    """
+    c = _text_config(cfg)
+    heads = c.get("num_attention_heads") or 16
+    return float(step) * float(context) * float(heads) * 2.0
+
+
+# --------------------------------------------------------------------------
+# machine
+# --------------------------------------------------------------------------
+
+def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
+    """Metal working-set cap + system RAM. Overridable so you can plan for a
+    machine you're not sitting at ("will this run on my 16 GB mini?")."""
+    out = {"assumed": bool(wired_gb or ram_gb)}
+    if ram_gb:
+        out["ram_bytes"] = ram_gb * _GB
+    else:
+        try:
+            out["ram_bytes"] = float(subprocess.check_output(
+                ["sysctl", "-n", "hw.memsize"]).strip())
+        except Exception:
+            out["ram_bytes"] = None
+    if wired_gb:
+        out["wss_bytes"] = wired_gb * _GB
+    else:
+        try:
+            import mlx.core as mx
+            out["wss_bytes"] = float(
+                mx.device_info()["max_recommended_working_set_size"])
+        except Exception:
+            out["wss_bytes"] = None
+    return out
+
+
+# --------------------------------------------------------------------------
+# the plan
+# --------------------------------------------------------------------------
+
+def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None,
+               step: int | None = None, wired_gb: float | None = None,
+               ram_gb: float | None = None) -> dict:
+    cfg_path = os.path.join(model_path, "config.json")
+    if not os.path.isfile(cfg_path):
+        raise FileNotFoundError(f"{cfg_path} not found")
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+
+    index = read_safetensors_index(model_path)
+    fp = footprint(index)
+    mach = machine(wired_gb, ram_gb)
+    c = _text_config(cfg)
+
+    kv_pt, n_full, n_layers, kv_note = kv_bytes_per_token(cfg, kv_bits)
+    kv_total = (kv_pt or 0) * context
+
+    wss = mach["wss_bytes"]
+    ram = mach["ram_bytes"]
+    is_moe = fp["expert_bytes"] > 0
+    warnings, flags = [], []
+
+    # The Metal wired cap is NOT fixed — `sysctl iogpu.wired_limit_mb` raises it,
+    # which is exactly what the 16 GB mini does to run a 12.6 GB model resident.
+    # So the hard ceiling is RAM (minus what the OS needs), and the cap is a
+    # knob. Raising it too far starves the OS and can panic a small box, so cap
+    # the recommendation at 90% of RAM — the measured mini runs at 14 GiB / 16 GB
+    # (87.5%).
+    raisable = min(ram * 0.90, ram - 1.5 * _GB) if ram else None
+    ceiling = max(wss or 0, raisable or 0) or wss
+
+    def peak_at(s):
+        # weights + KV + this chunk's transient + a runtime reserve. The reserve
+        # is not slack: MLX's buffer-reuse cache alone grew ~80 MB per 1K prompt
+        # tokens on the mini (~1.7 GB at 21K) before --metal-cache-limit-gb auto
+        # capped it, and activations/fragmentation live here too. Same 2 GB the
+        # auto-guards reserve.
+        return (fp["total_bytes"] + kv_total
+                + prefill_workspace_bytes(cfg, context, s) + _RESERVE_BYTES)
+
+    # Largest chunk whose projection keeps real headroom under the (possibly
+    # raised) ceiling. The 0.95 is deliberate: a chunk size chosen to *just* fit
+    # is the crash we already shipped fixes for, and prefill throughput barely
+    # moves between 512 and 128 while peak transient scales linearly. Bias
+    # conservative — this tool exists to prevent OOMs, not to win benchmarks.
+    steps = [2048, 512, 256, 128] if step is None else [step]
+    chosen = None
+    for s in steps:
+        if step is not None or ceiling is None or peak_at(s) <= ceiling * 0.95:
+            chosen = s
+            break
+    if chosen is None:
+        chosen = steps[-1]
+    peak = peak_at(chosen)
+    workspace = prefill_workspace_bytes(cfg, context, chosen)
+
+    # ---- verdict -------------------------------------------------------
+    needs_bump = False
+    if wss is None and ram is None:
+        mode, ok = "unknown", True
+        warnings.append("no Metal device info — machine limits unknown")
+    elif wss and peak <= wss:
+        mode, ok = "resident", True
+    elif ceiling and peak <= ceiling:
+        mode, ok, needs_bump = "resident", True, True
+    elif is_moe and ceiling and (fp["resident_bytes"] + 0.5 * _GB + kv_total
+                                 + workspace + _RESERVE_BYTES) <= ceiling:
+        mode, ok = "streaming", True
+        needs_bump = bool(wss and (fp["resident_bytes"] + 0.5 * _GB + kv_total
+                                   + workspace + _RESERVE_BYTES) > wss)
+    else:
+        mode, ok = "no-fit", False
+
+    # ---- recommended flags --------------------------------------------
+    if needs_bump and ram:
+        want = min(peak + 0.5 * _GB, raisable)
+        mb = int(want / (1024**2))
+        flags.append(f"sudo sysctl -w iogpu.wired_limit_mb={mb}   "
+                     f"(raises the {_gb(wss)} Metal cap — the binding limit "
+                     f"here, not your {ram/_GB:.0f} GB of RAM; resets on reboot)")
+    if mode == "streaming":
+        flags.append("--streaming   (weights exceed even the raised cap; "
+                     "experts page from disk)")
+        budget = max(0.5, ((ceiling or 0) * 0.8 - fp["resident_bytes"]
+                           - _RESERVE_BYTES) / _GB)
+        flags.append(f"--cache-budget-gb auto   (~{budget:.1f} GB here)")
+    if chosen != 2048:
+        flags.append(f"--prefill-step-size {chosen}   (the default 2048 needs "
+                     f"{_gb(prefill_workspace_bytes(cfg, context, 2048))} of "
+                     f"transient workspace at this context)")
+    if kv_bits:
+        flags.append(f"--kv-bits {kv_bits}")
+    elif kv_total > 1.0 * _GB:
+        flags.append("--kv-bits 8   (KV is over 1 GB at this context; "
+                     "halves it)")
+
+    if mode == "no-fit" and is_moe:
+        warnings.append("even streaming does not fit — the resident backbone "
+                        "alone exceeds what this machine can wire")
+    if mode == "resident" and ceiling and peak > ceiling * 0.93:
+        warnings.append("tight: under ~7% headroom — a longer context or a "
+                        "background app can still push it over")
+
+    return {
+        "schema": 1,
+        "model": {
+            "path": model_path,
+            "name": os.path.basename(os.path.abspath(model_path)),
+            "type": cfg.get("model_type") or c.get("model_type"),
+            "quantization": cfg.get("quantization", {}).get("mode"),
+            "bits": cfg.get("quantization", {}).get("bits"),
+            "group_size": cfg.get("quantization", {}).get("group_size"),
+            "expert_down_bits": cfg.get("quantization", {}).get(
+                "expert_down_bits"),
+            "n_layers": n_layers,
+            "n_experts": c.get("num_experts"),
+            "experts_per_tok": c.get("num_experts_per_tok"),
+            "is_moe": is_moe,
+            **fp,
+        },
+        "machine": mach,
+        "projection": {
+            "context": context,
+            "kv_bits": kv_bits,
+            "kv_bytes_per_token": kv_pt,
+            "kv_bytes": kv_total,
+            "kv_note": kv_note,
+            "prefill_step_size": chosen,
+            "prefill_workspace_bytes": workspace,
+            "runtime_reserve_bytes": _RESERVE_BYTES,
+            "peak_bytes": peak,
+            "ceiling_bytes": ceiling,
+            "headroom_bytes": (ceiling - peak) if ceiling else None,
+        },
+        "verdict": {"mode": mode, "runnable": ok, "needs_wired_bump": needs_bump},
+        "flags": flags,
+        "warnings": warnings,
+    }
+
+
+# --------------------------------------------------------------------------
+# rendering
+# --------------------------------------------------------------------------
+
+def _gb(b) -> str:
+    return "?" if b is None else f"{b / _GB:.2f} GB"
+
+
+def render(p: dict) -> str:
+    m, mach, pr, v = p["model"], p["machine"], p["projection"], p["verdict"]
+    L = []
+    L.append(f"TurboQuant plan — {m['name']}")
+    L.append("")
+    L.append("Model")
+    q = f"{m['quantization']} {m['bits']}-bit g{m['group_size']}" if m[
+        "quantization"] else "unquantized"
+    if m.get("expert_down_bits"):
+        q += f", expert down_proj {m['expert_down_bits']}-bit"
+    L.append(f"  {'type':<20} {m['type']}  ({q})")
+    if m["is_moe"]:
+        L.append(f"  {'MoE':<20} {m['n_experts']} experts, "
+                 f"top-{m['experts_per_tok']}, {m['n_layers']} layers")
+    L.append(f"  {'weights (exact)':<20} {_gb(m['total_bytes'])}")
+    if m["is_moe"]:
+        L.append(f"  {'  experts':<20} {_gb(m['expert_bytes'])}  (streamable)")
+        L.append(f"  {'  resident':<20} {_gb(m['resident_bytes'])}  "
+                 f"(attention, embeddings, routers)")
+    L.append("")
+    L.append("Machine" + ("  (assumed, not this one)" if mach["assumed"] else ""))
+    L.append(f"  {'Metal working set':<20} {_gb(mach['wss_bytes'])}   "
+             f"← the real ceiling")
+    L.append(f"  {'system RAM':<20} {_gb(mach['ram_bytes'])}")
+    L.append("")
+    L.append(f"Projection at {pr['context']:,} tokens of context")
+    L.append(f"  {'weights':<20} {_gb(m['total_bytes'])}")
+    kvb = f"  ({pr['kv_bytes_per_token']/1024:.1f} KB/token, {pr['kv_note']})" \
+        if pr["kv_bytes_per_token"] else f"  ({pr['kv_note']})"
+    L.append(f"  {'KV cache':<20} {_gb(pr['kv_bytes'])}{kvb}")
+    L.append(f"  {'prefill workspace':<20} {_gb(pr['prefill_workspace_bytes'])}"
+             f"  (estimate, at --prefill-step-size {pr['prefill_step_size']})")
+    L.append(f"  {'runtime reserve':<20} {_gb(pr['runtime_reserve_bytes'])}"
+             f"  (buffer cache, activations, fragmentation)")
+    L.append(f"  {'':<20} {'-' * 34}")
+    head = ""
+    if pr["headroom_bytes"] is not None:
+        head = (f"   {_gb(pr['headroom_bytes'])} headroom"
+                if pr["headroom_bytes"] > 0 else
+                f"   OVER by {_gb(-pr['headroom_bytes'])}")
+    L.append(f"  {'peak':<20} {_gb(pr['peak_bytes'])}"
+             f" of {_gb(pr['ceiling_bytes'])} usable{head}")
+    L.append("")
+    icon = {"resident": "✅", "streaming": "⚠️ ", "no-fit": "❌",
+            "unknown": "❔"}[v["mode"]]
+    label = {"resident": "RESIDENT — fits fully in memory",
+             "streaming": "STREAMING — too big to hold; experts page from disk",
+             "no-fit": "WILL NOT RUN on this machine",
+             "unknown": "UNKNOWN — could not read the Metal working set"}[v["mode"]]
+    if v["mode"] == "resident" and v.get("needs_wired_bump"):
+        label = "RESIDENT — fits, but only after raising the Metal wired cap"
+        icon = "⚠️ "
+    L.append(f"Verdict: {icon} {label}")
+    for w in p["warnings"]:
+        L.append(f"  ! {w}")
+    if p["flags"]:
+        L.append("")
+        L.append("Recommended:")
+        for f in p["flags"]:
+            L.append(f"  {f}")
+    return "\n".join(L)
+
+
+# --------------------------------------------------------------------------
+# doctor — readiness, not just arithmetic
+# --------------------------------------------------------------------------
+
+def run_doctor(model_path: str, plan: dict) -> list:
+    """[(check_id, status, message)] with stable ids for automation."""
+    checks = []
+
+    def add(cid, ok, msg, warn=False):
+        checks.append((cid, "warn" if warn and not ok else
+                       ("pass" if ok else "fail"), msg))
+
+    add("model.dir", os.path.isdir(model_path), f"model directory {model_path}")
+    add("model.config", os.path.isfile(os.path.join(model_path, "config.json")),
+        "config.json present")
+    shards = glob.glob(os.path.join(model_path, "*.safetensors"))
+    add("model.weights", bool(shards), f"{len(shards)} safetensors shard(s)")
+
+    tok = any(os.path.isfile(os.path.join(model_path, f)) for f in
+              ("tokenizer.json", "tokenizer.model", "tokenizer_config.json"))
+    add("model.tokenizer", tok, "tokenizer files present")
+
+    q = plan["model"]["quantization"]
+    add("model.turboquant", q == "turboquant",
+        f"quantization: {q}" if q == "turboquant" else
+        f"quantization block: {q or 'none'} — not a TurboQuant model "
+        f"(a plain MLX model runs with mlx_lm, not turboquant)")
+
+    try:
+        import mlx.core as mx
+        add("env.mlx", True, f"mlx {getattr(mx, '__version__', '?')}")
+    except Exception as e:
+        add("env.mlx", False, f"mlx not importable: {e}")
+
+    try:
+        import mlx_lm
+        add("env.mlx_lm", True, f"mlx-lm {getattr(mlx_lm, '__version__', '?')}")
+    except Exception as e:
+        add("env.mlx_lm", False, f"mlx-lm not importable: {e}")
+
+    mach = plan["machine"]
+    add("machine.wss", mach["wss_bytes"] is not None,
+        f"Metal working set {_gb(mach['wss_bytes'])}")
+
+    v = plan["verdict"]["mode"]
+    pk = _gb(plan["projection"]["peak_bytes"])
+    if plan["verdict"].get("needs_wired_bump"):
+        msg = (f"placement: {v} — peak {pk} exceeds the current "
+               f"{_gb(mach['wss_bytes'])} Metal cap; needs the sysctl raise below")
+        add("fit.projection", False, msg, warn=True)
+    else:
+        add("fit.projection", plan["verdict"]["runnable"],
+            f"placement: {v} — peak {pk} vs working set {_gb(mach['wss_bytes'])}")
+
+    if plan["model"]["is_moe"] and v == "streaming":
+        add("fit.hotlist",
+            os.path.isfile(os.path.join(model_path, "hot_experts.json")),
+            "hot_experts.json (warm-starts the streaming cache)", warn=True)
+    return checks
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+def _resolve(path: str) -> str:
+    p = os.path.expanduser(path)
+    if os.path.isdir(p):
+        return p
+    from turboquant_mlx.generate import resolve_model_path
+    return resolve_model_path(path)
+
+
+def _common_args(ap):
+    ap.add_argument("--model", required=True, help="local dir or HF repo id")
+    ap.add_argument("--context", type=int, default=16384,
+                    help="context length to plan for (default 16384)")
+    ap.add_argument("--kv-bits", type=int, default=None,
+                    help="plan with TurboQuant KV quantization")
+    ap.add_argument("--prefill-step-size", type=int, default=None,
+                    help="force a chunk size instead of picking the largest safe one")
+    ap.add_argument("--wired-gb", type=float, default=None,
+                    help="assume this Metal working set (plan for another Mac)")
+    ap.add_argument("--ram-gb", type=float, default=None,
+                    help="assume this much system RAM")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="turboquant-plan",
+        description="Will this model run on this Mac, and with what flags? "
+                    "Reads only safetensors headers — no tensors are loaded.")
+    _common_args(ap)
+    args = ap.parse_args(argv)
+    try:
+        path = _resolve(args.model)
+        p = build_plan(path, context=args.context, kv_bits=args.kv_bits,
+                       step=args.prefill_step_size, wired_gb=args.wired_gb,
+                       ram_gb=args.ram_gb)
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return _EXIT_UNFIT
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return _EXIT_USAGE
+    print(json.dumps(p, indent=2) if args.json else render(p))
+    return _EXIT_OK if p["verdict"]["runnable"] else _EXIT_UNFIT
+
+
+def doctor_main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="turboquant-doctor",
+        description="Read-only readiness check: model files, environment, and "
+                    "whether the projected placement is runnable.")
+    _common_args(ap)
+    args = ap.parse_args(argv)
+    try:
+        path = _resolve(args.model)
+        p = build_plan(path, context=args.context, kv_bits=args.kv_bits,
+                       step=args.prefill_step_size, wired_gb=args.wired_gb,
+                       ram_gb=args.ram_gb)
+    except Exception as e:
+        if args.json:
+            print(json.dumps({"schema": 1, "checks": [
+                ["model.readable", "fail", str(e)]]}, indent=2))
+        else:
+            print(f"✗ model.readable   {e}", file=sys.stderr)
+        return _EXIT_UNFIT
+
+    checks = run_doctor(path, p)
+    if args.json:
+        print(json.dumps({"schema": 1, "verdict": p["verdict"],
+                          "checks": [list(c) for c in checks],
+                          "flags": p["flags"]}, indent=2))
+    else:
+        print(f"turboquant-doctor — {p['model']['name']}\n")
+        icon = {"pass": "✓", "warn": "!", "fail": "✗"}
+        for cid, status, msg in checks:
+            print(f"  {icon[status]} {cid:<20} {msg}")
+        if p["flags"]:
+            print("\nRecommended:")
+            for f in p["flags"]:
+                print(f"  {f}")
+    return _EXIT_OK if not any(s == "fail" for _, s, _ in checks) else _EXIT_UNFIT
+
+
+if __name__ == "__main__":
+    sys.exit(main())
