@@ -52,9 +52,11 @@ def test_decode_and_prefill_kernels_are_bit_identical(bits, group_size, ternary)
         layer.weight, layer.scales, layer.codebook, x, idx,
         layer.bits, layer.group_size, trit=layer.trit)
 
-    # the prefill kernel sees one row per (token, expert) routing
-    x_rows = mx.broadcast_to(x.reshape(1, -1), (k, layer.input_dims))
-    x_rows = mx.array(x_rows.tolist(), dtype=mx.float16)
+    # The prefill kernel sees one row per (token, expert) routing. Materialise
+    # the broadcast: at the real call site x_rows comes from a reshape of a real
+    # tensor, so a strided view would be testing a shape we never actually pass.
+    x_rows = mx.contiguous(
+        mx.broadcast_to(x.reshape(1, -1), (k, layer.input_dims)))
     prefill = polar_multi_gather_qmv(
         layer.weight, layer.scales, layer.codebook, x_rows, idx,
         layer.bits, layer.group_size, trit=layer.trit)
