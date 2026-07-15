@@ -188,6 +188,26 @@ That is the 16 GB Mac mini recipe, *derived* rather than found by trial and erro
 10.44 GB where the 9.4 GB ternary build measures 10.42, and recommends a wired
 limit within 1% of the one that actually works).
 
+### A note on reproducibility and `--prefill-step-size`
+
+Changing the prefill chunk size can change a greedy answer by a token — measured
+on a ~3.9K-token prompt, `--prefill-step-size 2048` produced "...which *explains
+why* the sky reads blue" where 512/256/128 produced "...which *is why* the sky
+reads blue". Both are valid argmax continuations; the chunk size only changes the
+order the GPU reduces in, and fp16 rounding occasionally lands on the other side
+of a near-tie.
+
+**This is a property of chunked prefill on Metal, not of TurboQuant.** The same
+test on stock `mlx-community/Llama-3.2-1B-Instruct-4bit` — plain mlx-lm, plain
+affine 4-bit, none of our kernels — forks the same way. Our own decode and
+prefill MoE kernels are *bit-identical* to each other
+(`tests/test_kernel_determinism.py`), which is what keeps `--disk-cache`
+checkpoint restores consistent.
+
+Practical upshot: for byte-reproducible greedy output, hold `--prefill-step-size`
+fixed across runs. Everything else — quality, correctness, coherence — is
+unaffected.
+
 `turboquant-doctor` runs the same projection plus a read-only readiness check —
 model files, tokenizer, quantization block, mlx/mlx-lm imports, machine limits —
 with stable check ids and exit codes (0 ok/warn, 1 won't fit or files missing,
