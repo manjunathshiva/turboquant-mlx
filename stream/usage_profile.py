@@ -181,6 +181,10 @@ class UsageProfile:
                 try:
                     os.unlink(tmp)
                 except OSError:
+                    # Best-effort only. We are already on the failure path of an
+                    # optional cache write; a stray temp file is a far smaller
+                    # problem than raising out of save() and taking a completed
+                    # generation down with it.
                     pass
             return False
 
