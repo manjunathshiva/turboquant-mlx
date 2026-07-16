@@ -437,6 +437,32 @@ class TestPartialCache:
         (tmp_path / "model.safetensors").write_bytes(b"")
         assert is_complete_checkpoint(str(tmp_path)) is False
 
+    @pytest.mark.parametrize("payload", [
+        [],                                   # top-level list: no .get
+        ["a"],
+        "hello",                              # top-level str
+        42,
+        None,
+        {"weight_map": ["a.safetensors"]},    # weight_map not a dict: no .values
+        {"weight_map": "a.safetensors"},
+        {"weight_map": {"t0": 5}},            # non-str value: os.path.join
+        {"weight_map": {"t0": []}},           # unhashable value: set()
+        {"weight_map": {"t0": None}},
+    ])
+    def test_malformed_index_degrades_instead_of_raising(self, tmp_path, payload):
+        """The index is fetched from an arbitrary repo id — untrusted input.
+        Every shape here raised an uncaught AttributeError/TypeError."""
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(payload))
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is False
+
+    def test_empty_weight_map_falls_back_to_globbing(self, tmp_path):
+        """An index with nothing to say must not veto a shard that is present."""
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {}}))
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is True
+
     def test_missing_dir_is_not_a_checkpoint(self, tmp_path):
         assert is_complete_checkpoint(str(tmp_path / "nope")) is False
 

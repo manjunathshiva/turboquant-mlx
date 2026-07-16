@@ -617,14 +617,20 @@ def is_complete_checkpoint(path: str) -> bool:
         return False
     index_file = os.path.join(path, "model.safetensors.index.json")
     if os.path.isfile(index_file):
+        # The index comes from an arbitrary repo id — untrusted input. Every
+        # shape below is a real observed failure: a top-level list/str/int has
+        # no .get, a non-dict weight_map has no .values, an unhashable value
+        # breaks set(), and a non-str value breaks os.path.join. An index we
+        # cannot read is an index we cannot verify against, so it does not get
+        # to vouch for the checkpoint.
         try:
             with open(index_file) as f:
                 weight_map = json.load(f).get("weight_map") or {}
-        except (json.JSONDecodeError, OSError):
+            shards = set(weight_map.values())
+            if shards:
+                return all(os.path.isfile(os.path.join(path, s)) for s in shards)
+        except (ValueError, OSError, AttributeError, TypeError):
             return False
-        shards = set(weight_map.values())
-        if shards:
-            return all(os.path.isfile(os.path.join(path, s)) for s in shards)
     return bool(glob.glob(os.path.join(path, "*.safetensors")))
 
 
