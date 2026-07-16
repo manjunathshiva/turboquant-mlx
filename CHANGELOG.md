@@ -4,6 +4,26 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`turboquant-plan`/`turboquant-doctor` on a HuggingFace repo id worked once,
+  then failed forever** with `error: no *.safetensors in ...`. Planning a repo
+  fetches its `config.json`, and that alone creates a snapshot directory in the
+  HF cache. The next run got a cache hit on that directory, took it for a
+  downloaded model, and died looking for weights that were never there — the
+  tool poisoning its own cache. A cache hit is now used only once it proves it
+  holds the whole checkpoint; otherwise planning stays on the network, where it
+  belongs.
+
+  Same check closes a quieter hole: a **partially downloaded** model (some
+  shards present, interrupted transfer) had its weights summed from only the
+  headers that arrived, so a half-fetched 30 GB model would report ~15 GB and a
+  confident `RESIDENT` verdict — the exact false green light this tool exists to
+  prevent. A local path is still planned on request, but now carries a warning
+  that the numbers are under-counted.
+
 ## [0.15.0] - 2026-07-15
 
 ### Added

@@ -17,6 +17,8 @@ from turboquant_mlx.plan import (
     machine,
     footprint,
     _attention_layers,
+    _resolve,
+    is_complete_checkpoint,
     kv_bytes,
     prefill_workspace_bytes,
     read_safetensors_index,
@@ -395,3 +397,100 @@ class TestOutput:
     def test_missing_config_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             build_plan(str(tmp_path))
+
+
+class TestPartialCache:
+    """Planning a repo id caches config.json, which creates a snapshot dir with
+    no shards in it. Trusting that dir made `turboquant-plan --model <repo>`
+    work once and then fail forever — it took its own cache droppings for a
+    downloaded model. A cache hit now has to prove it holds the weights."""
+
+    def _index(self, tmp_path, shards):
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {f"t{i}": s for i, s in enumerate(shards)}}))
+
+    def test_config_only_snapshot_is_not_a_checkpoint(self, tmp_path):
+        (tmp_path / "config.json").write_text("{}")
+        self._index(tmp_path, ["model-00001-of-00002.safetensors"])
+        assert is_complete_checkpoint(str(tmp_path)) is False
+
+    def test_interrupted_download_is_not_a_checkpoint(self, tmp_path):
+        """The dangerous case: some shards present. Sizes would be summed from
+        only those headers, so a half-downloaded model reports half its weight
+        and a falsely confident RESIDENT verdict."""
+        self._index(tmp_path, ["a.safetensors", "b.safetensors"])
+        (tmp_path / "a.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is False
+
+    def test_all_shards_present_is_a_checkpoint(self, tmp_path):
+        self._index(tmp_path, ["a.safetensors", "b.safetensors"])
+        (tmp_path / "a.safetensors").write_bytes(b"")
+        (tmp_path / "b.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is True
+
+    def test_single_shard_without_index_is_a_checkpoint(self, tmp_path):
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is True
+
+    def test_corrupt_index_is_not_a_checkpoint(self, tmp_path):
+        (tmp_path / "model.safetensors.index.json").write_text("{not json")
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is False
+
+    @pytest.mark.parametrize("payload", [
+        [],                                   # top-level list: no .get
+        ["a"],
+        "hello",                              # top-level str
+        42,
+        None,
+        {"weight_map": ["a.safetensors"]},    # weight_map not a dict: no .values
+        {"weight_map": "a.safetensors"},
+        {"weight_map": {"t0": 5}},            # non-str value: os.path.join
+        {"weight_map": {"t0": []}},           # unhashable value: set()
+        {"weight_map": {"t0": None}},
+    ])
+    def test_malformed_index_degrades_instead_of_raising(self, tmp_path, payload):
+        """The index is fetched from an arbitrary repo id — untrusted input.
+        Every shape here raised an uncaught AttributeError/TypeError."""
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(payload))
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is False
+
+    def test_empty_weight_map_falls_back_to_globbing(self, tmp_path):
+        """An index with nothing to say must not veto a shard that is present."""
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {}}))
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        assert is_complete_checkpoint(str(tmp_path)) is True
+
+    def test_missing_dir_is_not_a_checkpoint(self, tmp_path):
+        assert is_complete_checkpoint(str(tmp_path / "nope")) is False
+
+    def test_partial_cache_hit_falls_back_to_remote(self, tmp_path, monkeypatch):
+        """The regression itself: a snapshot with no shards must send the repo
+        id back to the network, not be planned as a local model."""
+        (tmp_path / "config.json").write_text("{}")
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "snapshot_download",
+                            lambda *a, **k: str(tmp_path))
+        target, remote = _resolve("some/repo")
+        assert (target, remote) == ("some/repo", True)
+
+    def test_complete_cache_hit_is_used_locally(self, tmp_path, monkeypatch):
+        (tmp_path / "model.safetensors").write_bytes(b"")
+        import huggingface_hub
+        monkeypatch.setattr(huggingface_hub, "snapshot_download",
+                            lambda *a, **k: str(tmp_path))
+        assert _resolve("some/repo") == (str(tmp_path), False)
+
+    def test_explicit_local_path_warns_when_shards_are_missing(self, tmp_path):
+        """A local path is the user's word, so it is planned — but the numbers
+        are undercounted and the plan has to say so."""
+        n = int(9.45 * GB / 4)
+        p = _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+        self._index(tmp_path, ["model.safetensors", "missing.safetensors"])
+        pl = build_plan(p, wired_gb=10.5, ram_gb=16)
+        assert any("UNDER-counted" in w for w in pl["warnings"])
+        assert "UNDER-counted" in render(pl)
