@@ -394,6 +394,12 @@ profile preloads in 0.3 s and lifts the cache hit rate 74 → 82%, cutting
 critical-path disk reads 30%. `--no-hotlist` opts out; `--wire-memory`
 (opt-in) wires weights + expert cache against memory pressure.
 
+That 35B lift is the roomy case (a large cache budget relative to the experts).
+The gain shrinks when the cache is a small fraction of a much larger expert set —
+on a genuinely disk-bound 122B it falls to ~4% fewer disk reads and **no speed
+change**; see the measured note under [Tuning the streaming reader](#tuning-the-streaming-reader-v061).
+Pinning helps hit-rate and disk, not throughput; disk bandwidth is the wall.
+
 > **Note**: `mlx_lm.server` is intended for development and local use, not
 > production. It does not implement authentication or rate limiting.
 
@@ -907,6 +913,9 @@ A larger cache keeps more experts resident, raising the hit-rate and cutting SSD
 #### Tuning the streaming reader (`v0.6.1`)
 
 Once the cache policy is reasonable, **disk bandwidth is the wall** — for MoE decode the LRU + 8-worker parallel-read pool is already near-optimal, so the big levers are faster storage (Thunderbolt/NVMe) and fewer bytes/token (a hybrid build, a bigger `--cache-budget-gb`), not the read algorithm. A few knobs squeeze the rest:
+
+> **How much can a smarter cache policy actually buy? (measured, 122B on a 16 GB mini.)** The 0.15.0 **learning expert cache** (`learn_experts=True`, default) records which experts *your* traffic routes to and pins from that profile once mature — the adaptive cousin of a shipped `hot_experts.json`. On the genuinely disk-bound case it was built for — `Qwen3.5-122B-A10B-tq3a-tqTe-g64` (30.9 GB, `F_NOCACHE`, auto budget 4.3 GB), learned pins vs pure LRU over identical prompts — it lifted the cache hit rate **54.0 → 55.9%** and cut expert bytes read **84.4 → 81.0 GB (−4.0%)**, but decode speed stayed **inside run-to-run noise** (two byte-identical unpinned runs themselves varied ±7%). The reason is structural, and it is the same wall: 4.3 GB of cache against **27 GB of experts is 16%**, and 256-expert top-8 routing is too spread for a small pin to beat recency. At **~0.47 GB/token off the SSD**, trimming 4% is nothing. **The pin keeps better experts and reads a little less disk; it does not make streaming faster.** Faster storage and fewer bytes/token do — the learned profile's real value is warm-starting the cache (skipping the cold-record run), not throughput.
+
 
 | Knob | Default | What it does |
 |------|---------|--------------|
