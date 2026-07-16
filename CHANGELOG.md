@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+
+- Recorded the **measured** learning-cache result on a genuinely disk-bound 122B
+  (`Qwen3.5-122B-A10B-tq3a-tqTe-g64`, 30.9 GB, `F_NOCACHE`, on a 16 GB mini):
+  learned pins vs pure LRU lift the cache hit rate 54.0 → 55.9% and cut expert
+  bytes read 84.4 → 81.0 GB (−4.0%), but decode speed stays inside run-to-run
+  noise. Confirms the 0.15.0 "no speedup" claim on the hardware built to show a
+  benefit — pinning helps hit-rate and disk, not throughput; disk bandwidth is
+  the wall. No code change.
+
 ## [0.15.1] - 2026-07-16
 
 ### Fixed
