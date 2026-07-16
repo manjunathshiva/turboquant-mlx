@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.1] - 2026-07-16
 
 ### Fixed
 
@@ -23,6 +23,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   confident `RESIDENT` verdict — the exact false green light this tool exists to
   prevent. A local path is still planned on request, but now carries a warning
   that the numbers are under-counted.
+
+- **A malformed `model.safetensors.index.json` now degrades instead of raising.**
+  The index is fetched from an arbitrary repo id, so it is untrusted input: a
+  top-level list/string/number, a non-dict `weight_map`, or a non-string shard
+  name each raised an uncaught `AttributeError`/`TypeError` out of the new
+  completeness check. An index that cannot be read no longer gets to vouch for
+  the checkpoint.
 
 ## [0.15.0] - 2026-07-15
 
