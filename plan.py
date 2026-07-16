@@ -300,6 +300,7 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
 def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None,
                step: int | None = None, wired_gb: float | None = None,
                ram_gb: float | None = None, remote: bool = False) -> dict:
+    incomplete = False
     if remote:
         cfg = read_remote_config(model_path)
         index = read_remote_index(model_path)
@@ -310,6 +311,10 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         with open(cfg_path) as f:
             cfg = json.load(f)
         index = read_safetensors_index(model_path)
+        # An explicit local path is taken at the user's word — but if shards are
+        # missing, every byte below is undercounted and the verdict is optimistic
+        # in the one direction that gets someone an OOM instead of an answer.
+        incomplete = not is_complete_checkpoint(model_path)
     fp = footprint(index)
     mach = machine(wired_gb, ram_gb)
     c = _text_config(cfg)
@@ -322,6 +327,9 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     ram = mach["ram_bytes"]
     is_moe = fp["expert_bytes"] > 0
     warnings, flags = [], []
+    if incomplete:
+        warnings.append("shards are missing from this directory — the download "
+                        "looks incomplete, so every size below is UNDER-counted")
 
     # The Metal wired cap is NOT fixed — `sysctl iogpu.wired_limit_mb` raises it,
     # which is exactly what the 16 GB mini does to run a 12.6 GB model resident.
@@ -587,18 +595,53 @@ def run_doctor(model_path: str, plan: dict) -> list:
 # CLI
 # --------------------------------------------------------------------------
 
+def is_complete_checkpoint(path: str) -> bool:
+    """Does this directory hold every weight shard, not just some of them?
+
+    Two ways a directory can look like a model and not be one:
+
+    1. It has no shards at all. Planning a repo id caches `config.json`, and
+       that alone creates a snapshot dir — so `turboquant-plan --model <repo>`
+       used to succeed once and then fail forever, because the second run took
+       its own cache droppings for a downloaded model.
+    2. It has *some* shards, from a download that was interrupted. This is the
+       dangerous one: the weight total is summed from whatever headers are
+       present, so a half-downloaded 30 GB model would report ~15 GB and a
+       confident "RESIDENT" verdict — precisely the false green light this
+       tool exists to prevent.
+
+    The index's weight_map names every shard the checkpoint needs, so when it's
+    there, use it. Without one, a single-shard checkpoint is all-or-nothing.
+    """
+    if not os.path.isdir(path):
+        return False
+    index_file = os.path.join(path, "model.safetensors.index.json")
+    if os.path.isfile(index_file):
+        try:
+            with open(index_file) as f:
+                weight_map = json.load(f).get("weight_map") or {}
+        except (json.JSONDecodeError, OSError):
+            return False
+        shards = set(weight_map.values())
+        if shards:
+            return all(os.path.isfile(os.path.join(path, s)) for s in shards)
+    return bool(glob.glob(os.path.join(path, "*.safetensors")))
+
+
 def _resolve(path: str) -> tuple:
     """(target, remote). A repo id is planned over the network from its headers —
     never by downloading it, which would defeat the entire point of the tool.
-    A local cache hit is used directly when one exists."""
+    A local cache hit is used only once it proves it holds the whole checkpoint;
+    a partial one falls back to the network rather than misreporting the size."""
     p = os.path.expanduser(path)
     if os.path.isdir(p):
-        return p, False
+        return p, False                     # an explicit local path is the user's word
     try:                                    # already downloaded? use the cache
         from huggingface_hub import snapshot_download
-        return snapshot_download(path, local_files_only=True), False
+        local = snapshot_download(path, local_files_only=True)
     except Exception:
         return path, True                   # plan it remotely, headers only
+    return (local, False) if is_complete_checkpoint(local) else (path, True)
 
 
 def _common_args(ap):
