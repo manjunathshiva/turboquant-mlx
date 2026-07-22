@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Fused KV decode+attend Metal kernel** (`turboquant_mlx.kernels.kv_decode_attend`,
+  opt-in via `layers.enable_fused_attend`). At each decode token it reads the
+  **packed** TurboQuant KV cache directly and runs a FlashAttention-style
+  online-softmax pass — decoding K/V on the fly instead of materializing the
+  fp16 tensors that `dequantize -> scaled_dot_product_attention` builds. The
+  inverse-Hadamard rotation is kept outside the kernel via an orthonormal
+  identity (rotate the query once, un-rotate the output once), so the
+  per-token rotation collapses too. Numerically equivalent to the dequant path
+  (cosine 1.0; same fp16 rounding). Split-K / flash-decoding layout keeps the
+  GPU saturated at long context. Measured end-to-end decode speedup **over the
+  standard TQ-KV path**, byte-identical greedy output: **1.49×** on Llama-3.2-1B
+  at 4.2K (70.5 → 105.2 t/s), 1.09× on the hybrid Qwen3.6-35B-A3B (only 10/40
+  layers are full-attention); the isolated attention-layer win reaches ≈10× at
+  32K. Scope: decode-only (`S_q=1`), batch 1, single-tier
+  (`min_tokens_before_quant=0`), bit-packed K/V, equal K/V head dims that are a
+  multiple of 32; prefill and non-applicable steps fall back to the standard
+  path. Plain causal attention only — enabling it on an attention-sink /
+  sliding-window model raises rather than returning wrong output. Not yet wired
+  into `turboquant-serve`. Parity + guard tests in `tests/test_fused_kv_attend.py`.
+
 ### Documentation
 
 - Recorded the **measured** learning-cache result on a genuinely disk-bound 122B

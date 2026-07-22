@@ -117,6 +117,9 @@ class TurboQuantKVCache:
         self._v_bits = int(v_bits)
         self._group_size = int(group_size)
         self._seed = int(seed)
+        # Opt-in fused decode+attend Metal kernel (reads packed KV directly,
+        # skips the fp16 dequantize). Set via enable_fused_attend().
+        self._use_fused_attend = False
 
         # Precompute K codebook
         self._k_codebook_f32, self._k_boundaries_f32 = get_codebook(
@@ -225,6 +228,59 @@ class TurboQuantKVCache:
             v_deq.astype(mx.float32), signs.astype(mx.float32), block_size
         )
         return v_deq.astype(mx.float16)
+
+    def _fused_applicable(self, B, num_steps):
+        """True when the fused decode+attend kernel can serve this step.
+
+        Requires: opt-in flag; a single new token (decode); batch 1; single tier
+        (no fp16 attention-sink window); equal K/V head dims that are a multiple
+        of 32; and bit-packed (2^bits) codebooks — never trit for KV.
+        """
+        return (
+            self._use_fused_attend
+            and num_steps == 1
+            and B == 1
+            and self._min_tokens_before_quant == 0
+            and self._k_head_dim is not None
+            and self._k_head_dim == self._v_head_dim
+            and self._k_head_dim % 32 == 0
+        )
+
+    def fused_attend(self, queries, scale):
+        """Fused decode attention straight from packed storage.
+
+        ``queries``: (1, n_q_heads, 1, D). Returns (1, n_q_heads, 1, D) fp16.
+        Rotation stays outside the kernel via the orthonormal identity; the
+        model's ``scale`` is folded into the pre-rotated query so the kernel's
+        baked 1/sqrt(D) reproduces it.
+        """
+        from turboquant_mlx.kernels.kv_decode_attend import kv_decode_attend
+
+        B, n_q, S_q, D = queries.shape
+        b_total = self.offset  # threshold == 0 -> all tokens are in Tier B
+
+        q_rot = self._rotate(
+            queries.astype(mx.float32), self._k_signs.astype(mx.float32),
+            self._k_block_size,
+        ).astype(mx.float16).reshape(n_q, D)
+        # fold the model scale into q so the kernel's baked 1/sqrt(D) == scale
+        q_rot = q_rot * mx.array(scale * math.sqrt(D), dtype=mx.float16)
+
+        out = kv_decode_attend(
+            q_rot,
+            mx.contiguous(self._tq_keys[0][0, :, :b_total, :]),
+            mx.contiguous(self._tq_keys[1][0, :, :b_total, :]),
+            self._k_codebook_f16,
+            mx.contiguous(self._tq_values[0][0, :, :b_total, :]),
+            mx.contiguous(self._tq_values[1][0, :, :b_total, :]),
+            self._v_codebook_f16,
+            self._k_bits, self._v_bits, self._k_gs, self._v_gs,
+        ).reshape(1, n_q, 1, D)
+        out = self._unrotate(
+            out.astype(mx.float32), self._v_signs.astype(mx.float32),
+            self._v_block_size,
+        )
+        return out.astype(mx.float16)
 
     def update_and_fetch(self, keys, values):
         """Store new KV across two tiers, return float16 for SDPA.
@@ -341,6 +397,11 @@ class TurboQuantKVCache:
             self._tq_values[1][..., b_prev:b_new, :] = v_scales
 
         self.offset = new_offset
+
+        # Fused decode path: the token is stored; skip the fp16 dequantize and
+        # signal the patched SDPA seam (keys is None) to run the fused kernel.
+        if self._fused_applicable(B, num_steps):
+            return None, None
 
         # Fetch: concat Tier A (fp16) + Tier B (dequantized)
         b_total = max(0, new_offset - threshold)
@@ -556,6 +617,62 @@ class TurboQuantKVCache:
 
         return create_attention_mask(N, self.offset, return_array=return_array,
                                      window_size=window_size)
+
+
+_FUSED_PATCH_INSTALLED = False
+
+
+def install_fused_attend_patch():
+    """Route the model's SDPA seam to the fused kernel on fused decode steps.
+
+    mlx-lm models call ``scaled_dot_product_attention(q, k, v, cache=..., ...)``
+    (imported into each model module). When a fused-enabled TurboQuantKVCache
+    served a decode step it returned ``(None, None)`` from ``update_and_fetch``;
+    here ``keys is None`` is the signal to run ``cache.fused_attend``. All other
+    calls fall through to the original. Idempotent; call after model load.
+    """
+    global _FUSED_PATCH_INSTALLED
+    if _FUSED_PATCH_INSTALLED:
+        return
+    import sys
+    import mlx_lm.models.base as base
+
+    orig = base.scaled_dot_product_attention
+
+    def patched(queries, keys, values, cache=None, scale=1.0, mask=None,
+                sinks=None):
+        if keys is None and isinstance(cache, TurboQuantKVCache):
+            # update_and_fetch skipped the fp16 dequant before this call
+            # revealed mask/sinks. The fused kernel does plain causal decode
+            # (a single query attends to all stored tokens), so it cannot honor
+            # attention sinks or a sliding-window array mask. Fail loud rather
+            # than return silently wrong output — the user opted in explicitly.
+            if sinks is not None or (mask is not None and not isinstance(mask, str)):
+                raise RuntimeError(
+                    "fused KV decode+attend is incompatible with attention "
+                    "sinks or a non-causal/sliding-window mask; do not call "
+                    "enable_fused_attend() for this model."
+                )
+            return cache.fused_attend(queries, scale)
+        return orig(queries, keys, values, cache=cache, scale=scale, mask=mask,
+                    sinks=sinks)
+
+    base.scaled_dot_product_attention = patched
+    for name, mod in list(sys.modules.items()):
+        if (name.startswith("mlx_lm.models.")
+                and getattr(mod, "scaled_dot_product_attention", None) is orig):
+            mod.scaled_dot_product_attention = patched
+    _FUSED_PATCH_INSTALLED = True
+
+
+def enable_fused_attend(caches):
+    """Turn on the fused decode+attend path for every TurboQuantKVCache in the
+    list (and install the SDPA patch). Other cache types are ignored."""
+    install_fused_attend_patch()
+    for c in caches:
+        if isinstance(c, TurboQuantKVCache):
+            c._use_fused_attend = True
+    return caches
 
 
 def make_turboquant_cache(
