@@ -282,6 +282,27 @@ class TurboQuantKVCache:
         )
         return out.astype(mx.float16)
 
+    def fused_fallback_fetch(self):
+        """Full fp16 (keys, values) for a fused-cache decode step that turned
+        out to need sink / mask semantics the kernel can't honor.
+
+        ``update_and_fetch`` already stored the token and returned
+        ``(None, None)`` to skip the dequantize; the SDPA seam calls this to
+        reconstruct the dequantized cache and fall back to standard attention.
+        Only the compressed tier exists here (fused requires
+        ``min_tokens_before_quant == 0``).
+        """
+        b_total = self.offset
+        k = self._tq_dequantize(
+            self._tq_keys[0][..., :b_total, :], self._tq_keys[1][..., :b_total, :],
+            self._k_signs, self._k_block_size, self._k_gs, self._k_head_dim,
+            self._k_bits, self._k_codebook_f16)
+        v = self._tq_dequantize(
+            self._tq_values[0][..., :b_total, :], self._tq_values[1][..., :b_total, :],
+            self._v_signs, self._v_block_size, self._v_gs, self._v_head_dim,
+            self._v_bits, self._v_codebook_f16)
+        return k, v
+
     def update_and_fetch(self, keys, values):
         """Store new KV across two tiers, return float16 for SDPA.
 
@@ -640,16 +661,15 @@ def install_fused_attend_patch():
                 sinks=None):
         if keys is None and isinstance(cache, TurboQuantKVCache):
             # update_and_fetch skipped the fp16 dequant before this call
-            # revealed mask/sinks. The fused kernel does plain causal decode
-            # (a single query attends to all stored tokens), so it cannot honor
-            # attention sinks or a sliding-window array mask. Fail loud rather
-            # than return silently wrong output — the user opted in explicitly.
+            # revealed mask/sinks. The fused kernel does plain causal decode (a
+            # single query attends to all stored tokens), so it cannot honor
+            # attention sinks or a sliding-window array mask. Fall back to the
+            # standard dequantize+SDPA path for those steps (correct, just
+            # without the fused speedup) so --kv-fused is safe on any model.
             if sinks is not None or (mask is not None and not isinstance(mask, str)):
-                raise RuntimeError(
-                    "fused KV decode+attend is incompatible with attention "
-                    "sinks or a non-causal/sliding-window mask; do not call "
-                    "enable_fused_attend() for this model."
-                )
+                k, v = cache.fused_fallback_fetch()
+                return orig(queries, k, v, cache=cache, scale=scale, mask=mask,
+                            sinks=sinks)
             return cache.fused_attend(queries, scale)
         return orig(queries, keys, values, cache=cache, scale=scale, mask=mask,
                     sinks=sinks)

@@ -8,6 +8,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`turboquant-serve --kv-fused`** — enable the fused KV decode+attend kernel on
+  the server. Requires KV quantization and `--kv-min-tokens 0` (single-tier); a
+  non-zero sink window keeps decode on the standard path and the flag warns. On
+  attention-sink / sliding-window layers the fused path **gracefully falls back**
+  to dequantize+SDPA for that step (the earlier fail-loud guard became a
+  fallback via `TurboQuantKVCache.fused_fallback_fetch`), so it is safe to enable
+  on any model including GPT-OSS. The startup banner reports fused on/inactive.
+
 - **Fused KV decode+attend Metal kernel** (`turboquant_mlx.kernels.kv_decode_attend`,
   opt-in via `layers.enable_fused_attend`). At each decode token it reads the
   **packed** TurboQuant KV cache directly and runs a FlashAttention-style
@@ -24,9 +32,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   32K. Scope: decode-only (`S_q=1`), batch 1, single-tier
   (`min_tokens_before_quant=0`), bit-packed K/V, equal K/V head dims that are a
   multiple of 32; prefill and non-applicable steps fall back to the standard
-  path. Plain causal attention only — enabling it on an attention-sink /
-  sliding-window model raises rather than returning wrong output. Not yet wired
-  into `turboquant-serve`. Parity + guard tests in `tests/test_fused_kv_attend.py`.
+  path. Plain causal attention only — on attention-sink / sliding-window layers
+  it gracefully falls back to dequantize+SDPA (see `--kv-fused` below). Parity +
+  guard tests in `tests/test_fused_kv_attend.py`.
 
 ### Documentation
 

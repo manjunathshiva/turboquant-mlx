@@ -91,6 +91,24 @@ def test_extract_rejects_bits_with_split():
         _extract_kv_args(["--kv-bits", "3", "--kv-k-bits", "8", "--kv-v-bits", "3"])
 
 
+def test_extract_kv_fused_flag():
+    kv, remaining = _extract_kv_args(
+        ["--model", "foo", "--kv-k-bits", "8", "--kv-v-bits", "3", "--kv-fused"]
+    )
+    assert kv["fused"] is True
+    assert remaining == ["--model", "foo"]  # flag peeled off
+
+
+def test_extract_kv_fused_defaults_off():
+    kv, _ = _extract_kv_args(["--kv-bits", "3"])
+    assert kv["fused"] is False
+
+
+def test_extract_kv_fused_without_quant_errors():
+    with pytest.raises(SystemExit):
+        _extract_kv_args(["--model", "foo", "--kv-fused"])
+
+
 def test_extract_rejects_unpaired_split():
     with pytest.raises(SystemExit):
         _extract_kv_args(["--kv-k-bits", "8"])
