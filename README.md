@@ -511,6 +511,7 @@ turboquant-serve \
 | `--kv-bits N` | Symmetric K=V=N (legacy; not recommended below 3) |
 | `--kv-min-tokens N` | Keep first N cached tokens in fp16 (sink protection) |
 | `--kv-group-size G` | Hadamard rotation group size (default 64) |
+| `--kv-fused` | Use the fused decode+attend Metal kernel (experimental; needs `--kv-min-tokens 0`; see [Fused decode+attend](#fused-decodeattend-kernel-experimental)) |
 
 These are processed by `turboquant-serve` and stripped before the remaining
 flags forward to `mlx_lm.server`. See [KV Cache Compression](#kv-cache-compression)
@@ -719,15 +720,24 @@ dequant path at 32K in a per-layer microbenchmark); the end-to-end gain scales
 with the full-attention-layer fraction × context length, so hybrid MoEs
 (Qwen3.5's GatedDeltaNet layers are untouched) see less than dense models.
 
+Or enable it while serving with `--kv-fused` (see the
+[serve KV flags](#compress-the-kv-cache-while-serving)):
+
+```bash
+turboquant-serve --model ./model-tq3 --kv-k-bits 8 --kv-v-bits 3 \
+    --kv-min-tokens 0 --kv-fused
+```
+
 **Scope / limits.** Decode only (`S_q=1`), batch 1, single-tier
 (`min_tokens_before_quant=0`, no fp16 sink window), bit-packed K/V, and equal
 K/V head dims that are a multiple of 32. Prefill and any non-applicable step
 transparently fall back to the standard path. The kernel performs plain causal
-attention, so it is **not** compatible with attention sinks or a sliding-window
-mask — enabling it on such a model raises a clear error rather than returning
-wrong output. (Sink/sliding layers use `RotatingKVCache` and never convert to
-`TurboQuantKVCache` anyway; the guard covers the GPT-OSS full-attention-with-sinks
-case.) Not yet wired into `turboquant-serve`.
+attention, so on a layer that needs attention sinks or a sliding-window mask it
+**gracefully falls back** to the standard dequantize+SDPA path for that step
+(correct output, just without the fused speedup) — so it is safe to enable on
+any model, including GPT-OSS. (Sink/sliding layers mostly use `RotatingKVCache`
+and never convert to `TurboQuantKVCache`; the fallback covers the GPT-OSS
+full-attention-with-sinks case.)
 
 ### Compatibility
 
@@ -738,7 +748,7 @@ case.) Not yet wired into `turboquant-serve`.
 | Linear attention | Yes | `ArraysCache` (Qwen3.5 GatedDeltaNet) is left untouched |
 | Hybrid architectures | Yes | Per-layer cache type is preserved |
 | Prompt-first conversion | Yes | Process prompt with FP16, convert before generation |
-| Fused decode+attend | Experimental | Opt-in `enable_fused_attend`; standard causal decode only (see above) |
+| Fused decode+attend | Experimental | Opt-in (`enable_fused_attend` / serve `--kv-fused`); standard causal decode, graceful dequant fallback on sink/sliding layers (see above) |
 
 ---
 

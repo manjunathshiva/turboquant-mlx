@@ -143,16 +143,28 @@ def test_update_and_fetch_skips_dequant_when_fused():
     assert cache.offset == 17  # token was still stored
 
 
-def test_patch_fails_loud_on_sinks():
+def test_patch_falls_back_to_dequant_on_sinks():
+    """With sinks present, the seam must dequantize + call standard SDPA (the
+    kernel can't honor sinks) — correct output, not a crash."""
     install_fused_attend_patch()
     import mlx_lm.models.base as base
+    S, D = 64, 128
+    mx.random.seed(4)
     cache = TurboQuantKVCache(k_bits=8, v_bits=3, group_size=64,
-                             min_tokens_before_quant=0)
+                              min_tokens_before_quant=0)
     cache.update_and_fetch(
-        mx.random.normal((1, 4, 8, 128)).astype(mx.float16),
-        mx.random.normal((1, 4, 8, 128)).astype(mx.float16))
-    q = mx.random.normal((1, 4, 1, 128)).astype(mx.float16)
+        mx.random.normal((1, 4, S, D)).astype(mx.float16),
+        mx.random.normal((1, 4, S, D)).astype(mx.float16))
+    mx.eval(cache._tq_keys, cache._tq_values)
+    cache._use_fused_attend = True
+    q = mx.random.normal((1, 4, 1, D)).astype(mx.float16)
     sinks = mx.zeros((4,), dtype=mx.float16)
-    with pytest.raises(RuntimeError, match="attention sinks"):
-        base.scaled_dot_product_attention(q, None, None, cache=cache,
-                                          scale=1.0, mask=None, sinks=sinks)
+    scale = 1.0 / math.sqrt(D)
+
+    got = base.scaled_dot_product_attention(q, None, None, cache=cache,
+                                            scale=scale, mask=None, sinks=sinks)
+    # reference: same standard SDPA over the dequantized cache with sinks
+    k, v = cache.fused_fallback_fetch()
+    ref = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale, sinks=sinks)
+    mx.eval(got, ref)
+    assert _cos(got, ref) > 0.99999

@@ -471,6 +471,7 @@ def _extract_kv_args(argv):
     parser.add_argument("--kv-v-bits", type=int, default=None)
     parser.add_argument("--kv-min-tokens", type=int, default=0)
     parser.add_argument("--kv-group-size", type=int, default=64)
+    parser.add_argument("--kv-fused", action="store_true")
     ns, remaining = parser.parse_known_args(argv)
 
     if ns.kv_bits is not None and (
@@ -488,7 +489,23 @@ def _extract_kv_args(argv):
         sys.exit(2)
 
     if ns.kv_bits is None and ns.kv_k_bits is None:
+        if ns.kv_fused:
+            sys.stderr.write(
+                "ERROR: --kv-fused requires KV quantization "
+                "(--kv-bits or --kv-k-bits/--kv-v-bits)\n"
+            )
+            sys.exit(2)
         return None, remaining
+
+    # The fused decode+attend kernel only engages on single-tier caches; a
+    # non-zero sink window keeps decode on the standard dequant path, so warn
+    # rather than silently do nothing.
+    if ns.kv_fused and ns.kv_min_tokens > 0:
+        sys.stderr.write(
+            "WARNING: --kv-fused has no effect with --kv-min-tokens > 0 "
+            "(the fp16 sink window forces the standard dequant path); "
+            "use --kv-min-tokens 0 to engage the fused kernel\n"
+        )
 
     kv_config = dict(
         tq_bits=ns.kv_bits,
@@ -496,6 +513,7 @@ def _extract_kv_args(argv):
         v_bits=ns.kv_v_bits,
         group_size=ns.kv_group_size,
         min_tokens_before_quant=ns.kv_min_tokens,
+        fused=ns.kv_fused,
     )
     return kv_config, remaining
 
@@ -669,13 +687,21 @@ def _patch_kv_cache(kv_config) -> None:
     import mlx_lm.server as _server_mod
     from turboquant_mlx.layers.polar_kv_cache import (
         convert_cache_to_turboquant,
+        enable_fused_attend,
     )
+
+    # `fused` is a serve-level toggle, not a convert_cache_to_turboquant kwarg.
+    kv_config = dict(kv_config)
+    fused = kv_config.pop("fused", False)
 
     _orig_make = _server_mod.make_prompt_cache
 
     def _tq_make_prompt_cache(model, *args, **kwargs):
         cache = _orig_make(model, *args, **kwargs)
-        return convert_cache_to_turboquant(cache, **kv_config)
+        cache = convert_cache_to_turboquant(cache, **kv_config)
+        if fused:
+            enable_fused_attend(cache)
+        return cache
 
     _server_mod.make_prompt_cache = _tq_make_prompt_cache
 
@@ -934,10 +960,18 @@ def main() -> None:
             desc = f"K=V={kv_config['tq_bits']}-bit"
         else:
             desc = f"K={kv_config['k_bits']}-bit, V={kv_config['v_bits']}-bit"
+        fused_note = ""
+        if kv_config.get("fused"):
+            fused_note = (
+                ", fused=on (decode+attend Metal kernel; falls back to dequant "
+                "on attention-sink/sliding-window layers)"
+                if kv_config["min_tokens_before_quant"] == 0
+                else ", fused=requested but INACTIVE (needs --kv-min-tokens 0)"
+            )
         sys.stderr.write(
             f"[turboquant-serve] TurboQuant KV cache: {desc}, "
             f"group={kv_config['group_size']}, "
-            f"sink={kv_config['min_tokens_before_quant']} "
+            f"sink={kv_config['min_tokens_before_quant']}{fused_note} "
             "(forces single-stream serving)\n"
         )
     if disk_cache_config is not None:
