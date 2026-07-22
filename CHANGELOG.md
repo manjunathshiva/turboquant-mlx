@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-22
+
 ### Added
 
 - **`turboquant-serve --kv-fused`** — enable the fused KV decode+attend kernel on
