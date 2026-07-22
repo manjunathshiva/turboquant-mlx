@@ -107,6 +107,25 @@ def test_applicability_guards():
     assert not c2._fused_applicable(B=1, num_steps=1)
 
 
+def test_enable_fused_attend_flips_flag_and_is_idempotent():
+    caches = [
+        TurboQuantKVCache(k_bits=8, v_bits=3, group_size=64,
+                          min_tokens_before_quant=0),
+        "not-a-cache",  # non-cache entries (e.g. RotatingKVCache) are ignored
+        TurboQuantKVCache(k_bits=4, v_bits=3, group_size=64,
+                          min_tokens_before_quant=0),
+    ]
+    out = enable_fused_attend(caches)
+    assert out is caches
+    assert caches[0]._use_fused_attend and caches[2]._use_fused_attend
+    # installs the SDPA-seam patch exactly once (idempotent)
+    import mlx_lm.models.base as base
+    assert getattr(base.scaled_dot_product_attention, "_turboquant_fused", False)
+    first = base.scaled_dot_product_attention
+    enable_fused_attend(caches)  # second call must not re-wrap
+    assert base.scaled_dot_product_attention is first
+
+
 def test_update_and_fetch_skips_dequant_when_fused():
     cache = TurboQuantKVCache(k_bits=8, v_bits=3, group_size=64,
                               min_tokens_before_quant=0)

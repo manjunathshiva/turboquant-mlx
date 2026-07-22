@@ -619,9 +619,6 @@ class TurboQuantKVCache:
                                      window_size=window_size)
 
 
-_FUSED_PATCH_INSTALLED = False
-
-
 def install_fused_attend_patch():
     """Route the model's SDPA seam to the fused kernel on fused decode steps.
 
@@ -629,15 +626,15 @@ def install_fused_attend_patch():
     (imported into each model module). When a fused-enabled TurboQuantKVCache
     served a decode step it returned ``(None, None)`` from ``update_and_fetch``;
     here ``keys is None`` is the signal to run ``cache.fused_attend``. All other
-    calls fall through to the original. Idempotent; call after model load.
+    calls fall through to the original. Idempotent (the installed wrapper is
+    tagged and re-detected, so it survives module reloads); call after load.
     """
-    global _FUSED_PATCH_INSTALLED
-    if _FUSED_PATCH_INSTALLED:
-        return
     import sys
     import mlx_lm.models.base as base
 
     orig = base.scaled_dot_product_attention
+    if getattr(orig, "_turboquant_fused", False):
+        return  # already installed
 
     def patched(queries, keys, values, cache=None, scale=1.0, mask=None,
                 sinks=None):
@@ -657,12 +654,12 @@ def install_fused_attend_patch():
         return orig(queries, keys, values, cache=cache, scale=scale, mask=mask,
                     sinks=sinks)
 
+    patched._turboquant_fused = True
     base.scaled_dot_product_attention = patched
     for name, mod in list(sys.modules.items()):
         if (name.startswith("mlx_lm.models.")
                 and getattr(mod, "scaled_dot_product_attention", None) is orig):
             mod.scaled_dot_product_attention = patched
-    _FUSED_PATCH_INSTALLED = True
 
 
 def enable_fused_attend(caches):
