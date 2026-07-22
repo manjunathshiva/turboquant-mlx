@@ -679,6 +679,56 @@ The penalty also **grows with context** on small-KV models. A community long-con
 
 The fp16 decode advantage *widens* with context — 1.14× at 65 tokens → 1.35× at 2.5K → 2.75× at 14.5K → **6.6× at 63K**. So on small-active MoEs, use KV compression to *fit* longer contexts in less RAM (2.08 GB saved at 63K) — not to speed them up. The flip to *faster* shows up only on **GPT-OSS-120B** (8.7 vs 6.4 t/s). The similarly-sized **Qwen3.5-122B does *not* flip** — run resident on a 64 GB M4 Max, fp16 KV beats mixed K8/V3 at every context (1.07× at 256 → 1.20× at 4096; [#19](https://github.com/manjunathshiva/turboquant-mlx/pull/19)) — so the speed-up isn't a general 120B-class property; it's specific to GPT-OSS-120B's KV geometry.
 
+### Fused decode+attend kernel (experimental)
+
+The "speed flip" penalty above is almost entirely the **dequantize** step: at
+each decode token the compressed cache is expanded to fp16 before
+`scaled_dot_product_attention` runs, and at long context that materialization —
+not the attention math — is the wall. The fused kernel removes it.
+
+`turboquant_mlx.kernels.kv_decode_attend` is a hand-written Metal kernel that
+reads the **packed** cache directly and runs a FlashAttention-style
+online-softmax pass, decoding K/V on the fly and never building the fp16
+tensors. The inverse-Hadamard rotation is kept outside the kernel via an
+orthonormal identity (rotate the query once, un-rotate the output once), so the
+per-token rotation cost collapses too. It is numerically equivalent to the
+dequantize+SDPA path (cosine 1.0 vs it, same fp16-rounding error as always).
+
+Opt in per prompt-cache — it patches the model's SDPA seam and flips a flag on
+each `TurboQuantKVCache`:
+
+```python
+from turboquant_mlx.layers import convert_cache_to_turboquant, enable_fused_attend
+from mlx_lm.models.cache import make_prompt_cache
+
+cache = convert_cache_to_turboquant(make_prompt_cache(model),
+                                    k_bits=8, v_bits=3, group_size=64)
+enable_fused_attend(cache)          # decode steps now use the fused kernel
+```
+
+Measured decode speedup **over the standard TQ-KV (dequant+SDPA) path**, greedy,
+byte-identical output:
+
+| Model | Context | TQ-KV shipped | TQ-KV fused | Speedup |
+|-------|---------|--------------:|------------:|--------:|
+| Llama-3.2-1B (D=64, full-attn) | 4.2K | 70.5 t/s | 105.2 t/s | **1.49×** |
+| Qwen3.6-35B-A3B (hybrid, 10/40 full-attn) | 2.1K | 40.2 t/s | 43.9 t/s | 1.09× |
+
+The isolated attention-layer speedup grows with context (≈10× over the shipped
+dequant path at 32K in a per-layer microbenchmark); the end-to-end gain scales
+with the full-attention-layer fraction × context length, so hybrid MoEs
+(Qwen3.5's GatedDeltaNet layers are untouched) see less than dense models.
+
+**Scope / limits.** Decode only (`S_q=1`), batch 1, single-tier
+(`min_tokens_before_quant=0`, no fp16 sink window), bit-packed K/V, and equal
+K/V head dims that are a multiple of 32. Prefill and any non-applicable step
+transparently fall back to the standard path. The kernel performs plain causal
+attention, so it is **not** compatible with attention sinks or a sliding-window
+mask — enabling it on such a model raises a clear error rather than returning
+wrong output. (Sink/sliding layers use `RotatingKVCache` and never convert to
+`TurboQuantKVCache` anyway; the guard covers the GPT-OSS full-attention-with-sinks
+case.) Not yet wired into `turboquant-serve`.
+
 ### Compatibility
 
 | Feature | Supported | Notes |
@@ -688,6 +738,7 @@ The fp16 decode advantage *widens* with context — 1.14× at 65 tokens → 1.35
 | Linear attention | Yes | `ArraysCache` (Qwen3.5 GatedDeltaNet) is left untouched |
 | Hybrid architectures | Yes | Per-layer cache type is preserved |
 | Prompt-first conversion | Yes | Process prompt with FP16, convert before generation |
+| Fused decode+attend | Experimental | Opt-in `enable_fused_attend`; standard causal decode only (see above) |
 
 ---
 
