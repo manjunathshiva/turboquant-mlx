@@ -9,9 +9,7 @@ builds and runs on the real XS.2 layer schedule (mixed dense/MoE, mixed
 full/sliding attention, per-layer head counts).
 """
 import mlx.core as mx
-import pytest
 
-import turboquant_mlx.compat  # noqa: F401 — registers the laguna dispatch on import
 from turboquant_mlx.models.laguna import Model, ModelArgs
 
 
@@ -59,6 +57,7 @@ def _tiny_config():
 
 def test_get_classes_resolves_laguna():
     """Importing compat aliases our module so mlx-lm dispatch finds it."""
+    import turboquant_mlx.compat  # noqa: F401 — registers the laguna dispatch
     from mlx_lm.utils import _get_classes
 
     model_cls, args_cls = _get_classes({"model_type": "laguna"})

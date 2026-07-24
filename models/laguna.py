@@ -27,18 +27,14 @@ also handles the transformers in-memory packed ``experts.gate_up_proj`` layout t
 logit-parity harness feeds it).
 """
 
-import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    scaled_dot_product_attention,
-)
+import mlx_lm.models.base as base
+from mlx_lm.models.base import BaseModelArgs, create_attention_mask
 from mlx_lm.models.cache import KVCache, RotatingKVCache
 from mlx_lm.models.rope_utils import YarnRoPE
 from mlx_lm.models.switch_layers import SwitchGLU
@@ -149,7 +145,7 @@ class Attention(nn.Module):
         if cache is not None:
             k, v = cache.update_and_fetch(k, v)
 
-        out = scaled_dot_product_attention(
+        out = base.scaled_dot_product_attention(
             q, k, v, cache=cache, scale=self.scale, mask=mask
         )
         out = out.transpose(0, 2, 1, 3)  # (B, L, H, D)
