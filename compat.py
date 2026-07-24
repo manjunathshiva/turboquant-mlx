@@ -83,4 +83,76 @@ def _patch_nemotron_h_pattern():
                 break
 
 
+def _register_laguna_model():
+    """Register the MLX Laguna model so mlx-lm's ``_get_classes`` can find it.
+
+    mlx-lm dispatches a checkpoint's ``model_type`` via
+    ``importlib.import_module(f"mlx_lm.models.{model_type}")``. Poolside's Laguna
+    architecture has no upstream mlx-lm module yet, so we alias our
+    implementation into ``sys.modules`` under that name — ``importlib`` consults
+    ``sys.modules`` first, so this makes ``load_turboquant`` (and plain mlx-lm)
+    resolve ``laguna`` to our ``Model`` / ``ModelArgs``. Idempotent, and
+    self-disables the moment mlx-lm ships native Laguna support.
+    """
+    import sys
+
+    if "mlx_lm.models.laguna" in sys.modules:
+        return
+    try:
+        import mlx_lm.models.laguna  # noqa: F401 — native support exists; defer
+        return
+    except ImportError:
+        pass
+
+    from turboquant_mlx.models import laguna as _laguna
+
+    sys.modules["mlx_lm.models.laguna"] = _laguna
+
+
+def _patch_glm47_tool_name_strip():
+    """Strip whitespace off GLM-style parsed tool-call function names.
+
+    mlx-lm's glm47 parser (also selected for Laguna, whose template is
+    ``laguna_glm_thinking_v5``) pulls the name with
+    ``re.compile(r"^(.*?)<arg_key>", re.DOTALL)`` and does not strip it. The
+    wire format puts the name on its own line::
+
+        <tool_call>list_dir
+        <arg_key>path</arg_key><arg_value>/tmp</arg_value>
+        </tool_call>
+
+    so the name comes back as ``"list_dir\\n"``. Two things break: agent
+    harnesses fail to match the tool by name, and the untrimmed name misses in
+    ``_get_string_arg_names``, so string arguments get run through
+    ``_deserialize`` and a value like ``"2024"`` silently becomes an int.
+
+    Self-disables once upstream strips the name itself.
+    """
+    try:
+        from mlx_lm.tool_parsers import glm47
+    except ImportError:
+        return
+
+    if getattr(glm47, "_tq_name_strip_patched", False):
+        return
+
+    orig = glm47.parse_tool_call
+
+    def parse_tool_call(text, tools=None):
+        result = orig(text, tools)
+        name = result.get("name")
+        if isinstance(name, str) and name != name.strip():
+            stripped = name.strip()
+            # re-resolve arguments with the correct name so string args that
+            # were wrongly deserialized come back as strings
+            result = orig(text.replace(name, stripped, 1), tools)
+            result["name"] = stripped
+        return result
+
+    glm47.parse_tool_call = parse_tool_call
+    glm47._tq_name_strip_patched = True
+
+
 _patch_nemotron_h_pattern()
+_register_laguna_model()
+_patch_glm47_tool_name_strip()

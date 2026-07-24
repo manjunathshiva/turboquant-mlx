@@ -199,6 +199,19 @@ def load_turboquant(model_path, lazy=False, fast=False):
     # Load tokenizer
     tokenizer = load_tokenizer(model_path)
 
+    # A tokenizer exposes only its single eos_token_id, but a model may declare
+    # several turn terminators in generation_config.json (Laguna ends a turn
+    # with </assistant>, not 〈|EOS|〉). Without this the model runs past the end
+    # of its turn and answers again.
+    from .sampling import apply_generation_config_eos
+
+    added = apply_generation_config_eos(tokenizer, model_path)
+    if added:
+        names = ", ".join(
+            f"{tid} ({tokenizer.decode([tid])!r})" for tid in sorted(added)
+        )
+        print(f"[INFO] Added EOS from generation_config.json: {names}")
+
     return model, tokenizer
 
 
@@ -256,6 +269,13 @@ def main():
              "prevents low-bit thinking models from re-emitting their answer.",
     )
     parser.add_argument(
+        "--stop", action="append", metavar="TOKEN", default=None,
+        help="Extra stop token to terminate generation on, as a token string "
+             "('</assistant>') or a token id ('24'). Repeatable. The model's "
+             "generation_config.json terminators are applied automatically; "
+             "use this only for one-off overrides. Must be a single token.",
+    )
+    parser.add_argument(
         "--rep-ctx", type=int, default=256,
         help="Repetition penalty context window in tokens (default: 256). "
              "Only used when --rep-penalty is set.",
@@ -306,6 +326,17 @@ def main():
     mode = "fast (QJL disabled)" if args.fast else "accurate (QJL enabled)"
     print(f"[INFO] Loading TurboQuant model from {args.model} [{mode}]")
     model, tokenizer = load_turboquant(args.model, fast=args.fast)
+
+    if args.stop:
+        from .sampling import resolve_stop_token
+
+        for tok in args.stop:
+            try:
+                tid = resolve_stop_token(tokenizer, tok)
+            except ValueError as e:
+                parser.error(f"--stop {e}")
+            tokenizer.add_eos_token(str(tid))
+            print(f"[INFO] Stop token: {tid} ({tokenizer.decode([tid])!r})")
 
     # Apply chat template if available
     prompt = args.prompt

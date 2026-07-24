@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-24
+
+### Added
+
+- **Poolside Laguna support** (`model_type: "laguna"`) — MLX port in
+  `models/laguna.py` (per-layer query-head counts, 3:1 full/sliding attention,
+  partial+YaRN RoPE on global layers, per-head softplus attention gate, QK-norm,
+  sigmoid router with selection-only correction bias, dense layer 0). Registered
+  through `compat.py` so `convert`/`generate`/`serve` resolve it. Logit parity
+  vs transformers CPU/fp32 is 2e-7. `Model.sanitize` handles both the on-disk
+  per-expert layout (`experts.{i}.gate_proj.weight`, singular `shared_expert`)
+  and the transformers in-memory packed layout.
+- **`turboquant-generate --stop`** — register an extra terminator for one run,
+  as a token string (`--stop '</assistant>'`) or id (`--stop 24`). Repeatable.
+
+### Fixed
+
+- **EOS ids declared in `generation_config.json` are now honored.** A tokenizer
+  exposes only its single `eos_token_id`, so models declaring several turn
+  terminators (Laguna ends a turn with `</assistant>` = 24, not `〈|EOS|〉` = 2)
+  lost all but the first: generation ran past the end of the turn and the model
+  answered the same question two or three more times, up to `--max-tokens`.
+  `load_turboquant` now unions the model's declared ids into the tokenizer, so
+  `generate`, `serve` (resident and streaming) and `evaluate` all stop correctly.
+- **GLM-style tool-call function names are stripped.** mlx-lm's `glm47` tool
+  parser (auto-selected for Laguna and GLM-4.7) captured the function name with
+  a trailing newline (`"list_dir\n"`), so agent harnesses failed to match the
+  tool and string arguments were wrongly deserialized. `compat.py` patches the
+  parser to strip the name (self-disables once upstream fixes it).
+
 ## [0.16.0] - 2026-07-22
 
 ### Added
