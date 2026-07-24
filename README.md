@@ -1176,6 +1176,48 @@ prompts, so this hybrid handles long-context retrieval (e.g. password-
 recall over 4000+ tokens of context) without the kernel argument-validation
 crash that affected earlier builds.
 
+### Poolside Laguna (33B MoE for agentic coding)
+
+[Laguna-XS.2](https://huggingface.co/poolside/Laguna-XS.2) is Poolside's 33B
+Mixture-of-Experts (256 experts, top-8, 3B active) built for **agentic coding
+and long-horizon work on a local machine**. It is a custom architecture —
+mixed sliding-window / global attention in a 3:1 ratio, per-head attention
+gating, QK-norm, partial+YaRN RoPE on the global layers, and a sigmoid router
+with a selection-only correction bias. `mlx-lm` has **no native `laguna`
+model**; the MLX port and loader ship here (registered via `compat.py`), with
+logit-parity of 2e-7 against the transformers reference.
+
+```bash
+# Convert bf16 -> TurboQuant 3-bit. bf16 (~67 GB) exceeds 64 GB RAM, so use --streaming.
+python -m turboquant_mlx.convert \
+    --hf-path poolside/Laguna-XS.2 \
+    --mlx-path ./laguna-xs2-tq3-g64 \
+    --bits 3 --group-size 64 --streaming
+
+# Generate. Laguna's generation_config ships top_p 1.0; ALWAYS pass --top-p 0.9
+# or the untruncated 100k-vocab tail injects rare junk tokens.
+python -m turboquant_mlx.generate \
+    --model ./laguna-xs2-tq3-g64 \
+    --prompt "Write a mergesort in Python." --temp 0.7 --top-p 0.9
+
+# Serve (agentic use). Do NOT pass --kv-bits: 30/40 layers are sliding-window(512)
+# so KV is already tiny (peak 16.8 GB @2K -> 19.4 GB @31K); KV-quant saves nothing
+# here and can cost up to ~4x decode.
+turboquant-serve --model ./laguna-xs2-tq3-g64 --port 8080 \
+    --temp 0.7 --top-p 0.9 --prompt-concurrency 1 \
+    --chat-template-args '{"enable_thinking": false}'
+```
+
+- **Runs on a 32 GB Mac** at 13.8 GB on disk / ~16 GB peak; MMLU-Redux 76.9 %,
+  GSM8K 79.0 % (3-bit, no-think), and passes the Opencode observe→read→edit→verify
+  loop.
+- **Tool calls are GLM-XML**, not Hermes-JSON; `mlx-lm`'s `glm47` parser is
+  auto-selected and patched here for a trailing-newline function-name bug.
+- **3-bit vs 4-bit**: this data-free codebook 3-bit build is 4 GB smaller than
+  MLX-native affine 4-bit but ~2× slower per token (codebook decode + online
+  Hadamard rotation, not bandwidth). Prefer it when memory-bound; prefer affine
+  4-bit for the fastest interactive loop.
+
 ---
 
 ## How It Works
@@ -1218,6 +1260,7 @@ Options:
 | Qwen3.5-MoE / Qwen3.6-35B-A3B | `qwen3_5_moe` | Yes (256 experts) | Tested (122B, 35B-A3B); 35B streams on a 16 GB Mac mini |
 | Qwen3-MoE | `qwen3_moe` | Yes (128 experts, top-8) | Tested — Qwen3-235B-A22B converted to a hybrid **tq3a-tq2e** build (70.5 GB) on a 16 GB Mac mini via `--streaming`; streams and passes 5/6 quality probes on a 64 GB Mac |
 | Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
+| Poolside Laguna (SWA + global attn, per-head gating) | `laguna` | Yes (256 experts, top-8) | Tested (XS.2 33B: convert + generate + Opencode agentic pass at 3-bit). Custom arch — MLX port + loader shipped here (mlx-lm has no native `laguna`); logit-parity 2e-7 vs transformers |
 | DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
 | DiffusionGemma (block-diffusion MoE, via **mlx-vlm**) | `diffusion_gemma` | Yes (128 experts, top-8) | Tested (26B-A4B: convert + block-diffusion sampler, coherent at 3-bit — [HF](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)). **Experimental**: decode is much slower than native 4-bit until a batched codebook gather-GEMM kernel lands |
 

@@ -1,5 +1,6 @@
 """Sampling helpers for TurboQuant-MLX."""
 
+from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 import mlx.core as mx
@@ -104,3 +105,61 @@ def eos_token_ids(tokenizer) -> set:
         return set(ids)
     primary = getattr(tokenizer, "eos_token_id", None)
     return {primary} if primary is not None else set()
+
+
+def resolve_stop_token(tokenizer, token: str) -> int:
+    """Resolve a user-supplied stop token to a single token id.
+
+    Accepts an id (``"24"``) or a token string (``"</assistant>"``). Raises
+    ValueError for anything that is not exactly one token.
+
+    ``TokenizerWrapper.add_eos_token`` cannot be trusted to validate this: it
+    falls back to ``convert_tokens_to_ids``, which returns the **UNK id** for
+    unknown text rather than None, so a typo would silently make UNK terminal
+    and truncate generation at the first unknown token.
+    """
+    if token.lstrip("-").isdigit():
+        return int(token)
+
+    ids = tokenizer.encode(token, add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError(
+            f"{token!r} is {len(ids)} tokens for this tokenizer; only "
+            "single-token stops are supported"
+        )
+    unk = getattr(tokenizer, "unk_token_id", None)
+    if unk is not None and ids[0] == unk and token != getattr(tokenizer, "unk_token", None):
+        raise ValueError(f"{token!r} is not a token for this tokenizer")
+    return ids[0]
+
+
+def apply_generation_config_eos(tokenizer, model_path) -> set:
+    """Union the model's ``generation_config.json`` EOS ids into ``tokenizer``.
+
+    A tokenizer only ever exposes its *single* ``eos_token_id``, but a model may
+    declare several terminators in ``generation_config.json`` — e.g. Laguna ends
+    an assistant turn with ``</assistant>`` (24) and only uses ``〈|EOS|〉`` (2)
+    at document level. Without this, generation runs straight past the end of
+    the turn and the model answers again.
+
+    Returns the ids that were added (empty when there was nothing new).
+    """
+    import json
+
+    cfg_file = Path(model_path) / "generation_config.json"
+    if not cfg_file.exists():
+        return set()
+    try:
+        raw = json.loads(cfg_file.read_text()).get("eos_token_id")
+    except (json.JSONDecodeError, OSError):
+        return set()
+    if raw is None:
+        return set()
+
+    wanted = {raw} if isinstance(raw, int) else set(raw)
+    added = wanted - eos_token_ids(tokenizer)
+    for tid in added:
+        # add_eos_token accepts an id as a string; it is the only public hook
+        # TokenizerWrapper gives us for extending the terminator set.
+        tokenizer.add_eos_token(str(tid))
+    return added
