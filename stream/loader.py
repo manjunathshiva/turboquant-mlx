@@ -25,6 +25,47 @@ from .streaming_switch import ExpertCache, StreamingSwitchLinear
 
 _PROJS = ("gate_proj", "up_proj", "down_proj")
 
+# Attribute name of the stacked-expert container on an MoE block, by convention.
+# qwen3_5_moe/deepseek call it `switch_mlp`; laguna's LagunaMoE holds a plain
+# mlx-lm `SwitchGLU` at `experts`. The name is also the weight-key segment
+# (`...mlp.<name>.gate_proj.weight`), so whichever attribute matched has to be
+# the one the reader is pointed at — hence _find_switch returns both.
+# `shared_experts` is deliberately absent: it is a dense always-on MLP that must
+# stay resident, and its projections are PolarQuantizedLinear anyway.
+_SWITCH_ATTRS = ("switch_mlp", "experts")
+
+
+def _find_switch(mlp):
+    """Return ``(attr_name, module)`` for an MoE block's stacked-expert container.
+
+    ``(None, None)`` when the block has none (dense layer, or an expert container
+    holding something other than quantized switch projections). The type check is
+    deliberate here: the caller splices ``attr_name`` into a weight key and hands
+    it to the reader, so claiming a container whose projections aren't quantized
+    switch layers would point the reader at a tensor that doesn't exist.
+    """
+    if mlp is None:
+        return None, None
+    for name in _SWITCH_ATTRS:
+        sm = getattr(mlp, name, None)
+        if sm is None:
+            continue
+        if any(isinstance(getattr(sm, p, None), PolarQuantizedSwitchLinear)
+               for p in _PROJS):
+            return name, sm
+    return None, None
+
+
+def _has_switch(mlp) -> bool:
+    """True if this mlp looks like an MoE block, by container presence alone.
+
+    Deliberately looser than :func:`_find_switch`: routing changes (K-reduction)
+    only need to know "is this a router-driven MoE block", and apply equally to
+    quantized and unquantized experts.
+    """
+    return mlp is not None and any(
+        getattr(mlp, name, None) is not None for name in _SWITCH_ATTRS)
+
 # When the model file fits comfortably in RAM, trusting the OS page cache makes
 # LRU-eviction re-reads come back from warm RAM instead of disk — measured 2.44x
 # faster decode on a streamed 35B-A3B (scripts/flash_moe/trust_os_ab.py). When
@@ -84,7 +125,7 @@ def _cap_active_experts(layers, max_active: int) -> None:
     changed = []
     for layer in layers:
         mlp = getattr(layer, "mlp", None)
-        if mlp is None or not hasattr(mlp, "top_k") or not hasattr(mlp, "switch_mlp"):
+        if mlp is None or not hasattr(mlp, "top_k") or not _has_switch(mlp):
             continue
         native = int(mlp.top_k)
         new_k = min(native, max_active)
@@ -358,7 +399,7 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     swapped = 0
     pin_keys: set = set()
     for i, layer in enumerate(layers):
-        sm = getattr(layer.mlp, "switch_mlp", None)
+        sm_name, sm = _find_switch(getattr(layer, "mlp", None))
         if sm is None:
             continue
         proj_keys = []
@@ -368,8 +409,8 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                 continue
             cb, sg = res.codebook, res.signs
             mx.eval(cb, sg)  # tiny — pin resident, let the rest of res be freed
-            wkey = f"{prefix}.{i}.mlp.switch_mlp.{proj}.weight"
-            skey = f"{prefix}.{i}.mlp.switch_mlp.{proj}.scales"
+            wkey = f"{prefix}.{i}.mlp.{sm_name}.{proj}.weight"
+            skey = f"{prefix}.{i}.mlp.{sm_name}.{proj}.scales"
             for e in pin_layers.get(i, ()):  # pin every projection of a hot expert
                 pin_keys.add((wkey, e))
             st = StreamingSwitchLinear(
