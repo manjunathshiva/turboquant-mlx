@@ -17,6 +17,12 @@ import time
 
 import mlx.core as mx
 
+from turboquant_mlx.cache_budget import (
+    KV_RESERVE_BYTES,
+    RUNTIME_OVERHEAD_BYTES,
+    auto_cache_budget,
+    projected_peak_bytes,
+)
 from turboquant_mlx.expert_naming import SWITCH_ATTRS, is_streamed_expert_key
 from turboquant_mlx.generate import load_turboquant, resolve_model_path
 from turboquant_mlx.layers.polar_switch_linear import PolarQuantizedSwitchLinear
@@ -141,12 +147,9 @@ def _cap_active_experts(layers, max_active: int) -> None:
 
 
 # Auto cache budget (ds4-style): size the expert cache from what the GPU can
-# actually keep resident — a fraction of Metal's max recommended working set,
-# minus the resident (non-expert) weights, minus a reserve for the KV cache
-# and the transient prefill workspace — instead of a fixed guess.
-_AUTO_WSS_FRACTION = 0.8
-_AUTO_RESERVE_BYTES = int(2.0e9)
-_AUTO_MIN_BUDGET_BYTES = int(0.5e9)
+# actually keep resident, rather than a fixed guess. The arithmetic and the
+# measured constants behind it are in cache_budget.py, shared with plan.py.
+_AUTO_RESERVE_BYTES = RUNTIME_OVERHEAD_BYTES + KV_RESERVE_BYTES
 
 _SAFETENSORS_ITEMSIZE = {"U32": 4, "I32": 4, "F32": 4, "F16": 2, "BF16": 2,
                          "U8": 1}
@@ -168,15 +171,13 @@ def _streamed_expert_bytes(reader) -> int:
 
 def _auto_cache_budget(model_bytes: int, expert_bytes: int,
                        wss_bytes: int) -> int:
-    """Pure budget math (unit-testable without a model): what's left of the
-    working-set fraction after the resident weights and the reserve, clamped
-    to [floor, all experts] — a budget past every expert buys nothing."""
+    """Pure budget math (unit-testable without a model).
+
+    The arithmetic lives in cache_budget.py so that plan.py predicts exactly
+    what happens here — those two drifted apart once already.
+    """
     resident = max(0, model_bytes - expert_bytes)
-    budget = int(_AUTO_WSS_FRACTION * wss_bytes) - resident - _AUTO_RESERVE_BYTES
-    # expert_bytes is the hard ceiling and must win over the floor: when the
-    # experts themselves are smaller than the minimum budget, the floor would
-    # otherwise hand back a budget larger than everything it could ever hold.
-    return min(expert_bytes, max(_AUTO_MIN_BUDGET_BYTES, budget))
+    return auto_cache_budget(wss_bytes, resident, expert_bytes)
 
 
 # A model repo may ship its own routing profile alongside the weights (the
@@ -312,11 +313,12 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
         budget_bytes = _auto_cache_budget(resident_bytes + expert_bytes,
                                           expert_bytes, wss)
         cache_budget_gb = budget_bytes / 1e9
-        print(f"[stream] auto budget: {_AUTO_WSS_FRACTION:.0%} × working set "
-              f"{wss / 1e9:.1f} GB − resident {resident_bytes / 1e9:.1f} GB − "
-              f"reserve {_AUTO_RESERVE_BYTES / 1e9:.1f} GB -> cache "
+        print(f"[stream] auto budget: working set {wss / 1e9:.1f} GB − "
+              f"resident {resident_bytes / 1e9:.1f} GB − reserve "
+              f"{_AUTO_RESERVE_BYTES / 1e9:.1f} GB -> cache "
               f"{cache_budget_gb:.1f} GB (experts on disk: "
-              f"{expert_bytes / 1e9:.1f} GB)")
+              f"{expert_bytes / 1e9:.1f} GB, projected peak "
+              f"{projected_peak_bytes(budget_bytes, resident_bytes) / 1e9:.1f} GB)")
     if wire_memory:
         wss = mx.device_info()["max_recommended_working_set_size"]
         want = int(min(wss, resident_bytes + cache_budget_gb * 1e9

@@ -9,10 +9,10 @@ import argparse
 
 import pytest
 
+from turboquant_mlx.cache_budget import MIN_BUDGET_BYTES as _AUTO_MIN_BUDGET_BYTES
+from turboquant_mlx.cache_budget import projected_peak_bytes
 from turboquant_mlx.stream.loader import (
-    _AUTO_MIN_BUDGET_BYTES,
     _AUTO_RESERVE_BYTES,
-    _AUTO_WSS_FRACTION,
     _auto_cache_budget,
     _streamed_expert_bytes,
 )
@@ -20,13 +20,21 @@ from turboquant_mlx.stream.loader import (
 
 def test_auto_budget_mini_case():
     # 16 GB mini serving the 122B ternary: model ~31 GB of which ~28 GB is
-    # experts, working set ~11.5 GB. Expected: 0.8*11.5 - 3 - 2 = ~4.2 GB —
-    # matching the hand-tuned known-good --cache-budget-gb 4.
+    # experts, working set ~11.5 GB.
+    #
+    # This used to assert 0.8*wss - resident - 2 GB = ~4.2 GB, chosen to match
+    # a hand-tuned --cache-budget-gb 4. A later sweep on the same class of
+    # machine showed that reserve was double-counted (a 20% haircut *and* a
+    # 2 GB subtraction) and cost real throughput, so the budget is now derived
+    # from the measured peak model instead: everything the working set has,
+    # minus the resident weights, minus what a run actually needs on top.
     b = _auto_cache_budget(model_bytes=31_000_000_000,
                            expert_bytes=28_000_000_000,
                            wss_bytes=11_500_000_000)
-    assert b == int(0.8 * 11_500_000_000) - 3_000_000_000 - _AUTO_RESERVE_BYTES
-    assert 3.5e9 < b < 5e9
+    assert b == 11_500_000_000 - 3_000_000_000 - _AUTO_RESERVE_BYTES
+    assert 5e9 < b < 6e9
+    # and the thing that actually matters: it still fits
+    assert projected_peak_bytes(b, 3_000_000_000) < 11_500_000_000
 
 
 def test_auto_budget_clamps_to_all_experts_on_roomy_machine():
@@ -91,8 +99,11 @@ def test_stream_generate_budget_arg_type():
         _budget_arg("lots")
 
 
-def test_wss_fraction_sane():
-    assert 0.5 <= _AUTO_WSS_FRACTION <= 0.9
+def test_reserve_sane():
+    """The reserve replaced the working-set fraction. Too small and a streaming
+    run peaks over the Metal cap; too large and it repeats the mistake it was
+    written to fix."""
+    assert 2.0e9 <= _AUTO_RESERVE_BYTES <= 4.0e9
 
 
 def test_auto_budget_experts_smaller_than_floor_cap_at_experts():

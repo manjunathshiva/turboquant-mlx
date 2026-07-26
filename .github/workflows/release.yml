@@ -69,6 +69,36 @@ jobs:
       - name: Check distribution metadata
         run: twine check dist/*
 
+      # The same guard ci.yml runs, repeated here on the tarball that actually
+      # gets published. `twine check` validates metadata, not contents: 0.17.0
+      # and 0.18.0 both passed it while shipping without the `models/`
+      # subpackage, which broke every console script on install. CI gates main
+      # and tags come from main, so this is belt-and-braces — but this is the
+      # job whose output reaches users, so this is where it must not be skipped.
+      - name: Verify sdist carries every declared package
+        run: |
+          python - <<'PY'
+          import glob, sys, tarfile, tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              packages = tomllib.load(f)["tool"]["setuptools"]["packages"]
+          tar = glob.glob("dist/*.tar.gz")[0]
+          with tarfile.open(tar) as t:
+              names = set(t.getnames())
+          root = min(names, key=len).split("/")[0]
+
+          missing = []
+          for p in packages:
+              sub = "" if p == "turboquant_mlx" else p.split(".", 1)[1]
+              sub = sub.replace(".", "/")
+              path = f"{root}/{sub}/__init__.py" if sub else f"{root}/__init__.py"
+              if path not in names:
+                  missing.append(f"{p} ({path})")
+          if missing:
+              sys.exit(f"sdist {tar} is missing declared package(s): {missing}")
+          print(f"sdist carries all {len(packages)} declared packages")
+          PY
+
       - name: Verify tag matches package version
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
