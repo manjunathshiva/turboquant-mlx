@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Laguna's experts are recognised as streamable by the planner and the cache
+  budget.** The module swap already handled both container names
+  (`switch_mlp` and mlx-lm's `SwitchGLU` at `experts`), but the two places that
+  *count* expert bytes — `plan.py:footprint` and
+  `stream/loader.py:_streamed_expert_bytes` — still matched `switch_mlp` alone.
+  Laguna therefore streamed correctly while reporting **zero** streamable bytes:
+  `turboquant-plan` called a streamable model resident-only and printed
+  "❌ WILL NOT RUN" for a 16 GB Mac that in fact runs Laguna-S-2.1 at a 7.3 GB
+  peak, and `--cache-budget-gb auto` sized its cache from a resident figure that
+  wrongly included all 26.4 GB of experts (explicit `--cache-budget-gb` was
+  unaffected). The rule now lives in one place, `expert_naming.py`, imported by
+  both. `experts` matches only anchored as `.mlp.experts.`, so the dense
+  always-on `shared_experts` MLP stays resident as it must.
+- **`stream/repack_experts.py` no longer corrupts routing on a Laguna
+  checkpoint.** Its expert-stack branch matched the container by `switch_mlp`
+  while the router branch matched `mlp.gate.*` unconditionally, so on Laguna it
+  permuted the router rows and left the expert stacks in place — for all 47 MoE
+  layers. The tool's correctness argument is that the two move *together*
+  (a relabeling); permuting one alone is a rerouting. The output loaded cleanly
+  and passed every shape assertion, so the damage was silent.
+- **`stream/calibrate_experts.py` sizes the hot-expert pin list correctly on
+  Laguna.** `_model_expert_info` returned 0 bytes/expert, so the
+  `used + cost > cap` budget check never fired and *every* expert was written
+  to `hot_experts.json` claiming ~0 GB — which the streaming loader then tries
+  to pin into a wired cache sized for a fraction of it.
+
 ## [0.17.0] - 2026-07-24
 
 ### Added

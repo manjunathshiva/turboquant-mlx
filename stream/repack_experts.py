@@ -36,6 +36,8 @@ import struct
 
 import mlx.core as mx
 
+from turboquant_mlx.expert_naming import is_expert_container_key
+
 _LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
 
 
@@ -47,12 +49,19 @@ def _st_metadata(path):
 
 
 def _reorder_axis0_keys(name: str) -> bool:
-    """True if this tensor's axis 0 is the expert axis and must be permuted."""
+    """True if this tensor's axis 0 is the expert axis and must be permuted.
+
+    The expert stacks and the router rows must agree: permuting one without the
+    other stops being a relabeling and starts being a rerouting. Matching the
+    container by ``switch_mlp`` alone missed laguna's ``mlp.experts``, which
+    permuted the router rows below while leaving the expert stacks in place —
+    a checkpoint that loads cleanly and routes every token to the wrong expert.
+    """
     if name.endswith(("gate_proj.weight", "gate_proj.scales",
                        "up_proj.weight", "up_proj.scales",
                        "down_proj.weight", "down_proj.scales")):
-        return "switch_mlp" in name
-    # router (NOT switch_mlp.*_proj): mlp.gate.weight / .bias / correction bias
+        return is_expert_container_key(name)
+    # router (NOT the expert projections): mlp.gate.weight / .bias / correction
     return name.endswith(("mlp.gate.weight", "mlp.gate.bias",
                           "mlp.gate.e_score_correction_bias"))
 

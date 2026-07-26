@@ -47,6 +47,8 @@ import struct
 import subprocess
 import sys
 
+from turboquant_mlx.expert_naming import is_streamed_expert_key
+
 _ITEMSIZE = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
              "F16": 2, "BF16": 2, "I16": 2, "U16": 2, "F8_E4M3": 1,
              "F8_E5M2": 1, "I8": 1, "U8": 1, "BOOL": 1}
@@ -121,10 +123,10 @@ def footprint(index: dict) -> dict:
             n *= d
         b = n * _ITEMSIZE.get(dtype, 4)
         total += b
-        # what the streaming swap pages from disk (mirrors
-        # stream/loader.py:_streamed_expert_bytes)
-        if "switch_mlp" in name and (name.endswith(".weight")
-                                     or name.endswith(".scales")):
+        # what the streaming swap pages from disk — same rule as
+        # stream/loader.py:_streamed_expert_bytes, now shared so they can't
+        # drift again (they did: both missed laguna's `mlp.experts`)
+        if is_streamed_expert_key(name):
             expert += b
     return {"total_bytes": total, "expert_bytes": expert,
             "resident_bytes": total - expert}

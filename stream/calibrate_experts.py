@@ -29,6 +29,8 @@ import json
 import time
 from collections import Counter, defaultdict
 
+from turboquant_mlx.expert_naming import is_streamed_expert_key
+
 # A spread of tasks so the routing trace reflects general use, not one domain.
 CALIB_PROMPTS = [
     "Write a detailed, well-structured 300-word essay on the history of the printing press.",
@@ -83,9 +85,7 @@ def _model_expert_info(model_path):
     seen = 0
     num_experts = 0
     for key, loc in r._index.items():
-        if "switch_mlp" not in key:
-            continue
-        if not (key.endswith(".weight") or key.endswith(".scales")):
+        if not is_streamed_expert_key(key):
             continue
         num_experts = loc.shape[0]
         per = 1
