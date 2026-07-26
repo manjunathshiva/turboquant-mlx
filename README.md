@@ -36,6 +36,10 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | Nemotron-3-Super-120B-A12B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **Nemotron-3-Super-120B-A12B** | **TurboQuant** | **3** | **—** | **~50 GB** | **18.7 tok/s** |
 | **[Nemotron-3-Super-120B-A12B (hybrid for 48GB)](https://huggingface.co/manjunathshiva/Nemotron-3-Super-120B-A12B-tq3a-tq2e-g32)** | **TQ 3-attn / 2-experts, gs=32** | **2/3 mix** | **—** | **~36 GB** | **~27.2 tok/s** |
+| **[Laguna-XS.2 (33B agentic coder)](https://huggingface.co/manjunathshiva/Laguna-XS.2-tq3-g64)** | **TurboQuant, gs=64** | **3** | **—** | **13.8 GB** | **46.8 tok/s · 32 GB Mac · Opencode pass** |
+| Laguna-S-2.1 (118B) | BF16 (original) | 16 | — | ~219 GB | *Doesn't fit 64GB* |
+| Laguna-S-2.1 (118B) | [Affine 4-bit](https://huggingface.co/mlx-community/Laguna-S-2.1-4bit) | 4 | — | ~64 GB | *Exceeds Metal's ~56 GB working set — won't load* |
+| **[Laguna-S-2.1 (118B, ternary experts)](https://huggingface.co/manjunathshiva/Laguna-S-2.1-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **~27 GB** | **~12.5 tok/s · fully resident on 64 GB with ~25 GB spare · Opencode pass** |
 
 ## Key Results — KV Cache Compression
 
@@ -1176,7 +1180,13 @@ prompts, so this hybrid handles long-context retrieval (e.g. password-
 recall over 4000+ tokens of context) without the kernel argument-validation
 crash that affected earlier builds.
 
-### Poolside Laguna (33B MoE for agentic coding)
+### Poolside Laguna (33B and 118B MoE for agentic coding)
+
+Two models share this architecture: **XS.2** (33B) and **S-2.1** (118B). The port
+covers both; the licence does **not** — XS.2 is Apache-2.0, S-2.1 is OpenMDW-1.1.
+Check per repo before redistributing derived weights.
+
+#### Laguna-XS.2 (33B)
 
 [Laguna-XS.2](https://huggingface.co/poolside/Laguna-XS.2) is Poolside's 33B
 Mixture-of-Experts (256 experts, top-8, 3B active) built for **agentic coding
@@ -1217,6 +1227,56 @@ turboquant-serve --model ./laguna-xs2-tq3-g64 --port 8080 \
   MLX-native affine 4-bit but ~2× slower per token (codebook decode + online
   Hadamard rotation, not bandwidth). Prefer it when memory-bound; prefer affine
   4-bit for the fastest interactive loop.
+
+#### Laguna-S-2.1 (118B) — ternary experts, resident on a 64 GB Mac
+
+[Laguna-S-2.1](https://huggingface.co/poolside/Laguna-S-2.1) is the 118B sibling
+(256 experts, top-10 + 1 shared, `moe_intermediate` 1024, 48 layers). At bf16 it
+is ~219 GB. **Ternary (1.58-bit) experts bring it to ~27 GB, which is the only
+build of this model that runs resident on a 64 GB Mac** — affine 4-bit (~64 GB)
+exceeds Metal's ~56 GB working set and won't load at all, and TurboQuant's own
+3-bit (48 GB) peaks at 52.7 GB and starves the OS.
+
+```bash
+python -m turboquant_mlx.convert --hf-path poolside/Laguna-S-2.1 \
+    --mlx-path ./laguna-s21-tqTe-g64 \
+    --attn-bits 3 --ternary-experts --group-size 64 --streaming
+
+# Resident on 64 GB. --no-think matters: Laguna reasons out loud by default, so
+# a plain generate call can spend its whole budget deliberating and never answer.
+python -m turboquant_mlx.generate --model ./laguna-s21-tqTe-g64 \
+    --prompt "Write a mergesort in Python." \
+    --temp 0.7 --top-p 0.9 --max-tokens 1024 --no-think
+```
+
+- **~30 GB peak resident, ~12.5 tok/s** on an M4 Max, leaving ~25 GB for the OS.
+- **MMLU-Redux 79.5 %, GSM8K 82.5 %** — at 1.58-bit experts this 118B still edges
+  the 33B XS.2 at 3-bit (76.9 / 79.0). The larger, wider expert pool absorbs the
+  deeper quantization.
+- **Passes Opencode agentic coding at 1.58-bit**, where the 512-wide-expert 35B
+  ternary build fails the same harness. Expert **width** (1024 vs 512), not just
+  count, is what sustains sub-2-bit — see [Sub-2-bit ternary experts](#key-results--weight-compression).
+
+**Expert streaming** works on Laguna too, so 27 GB resident is not the floor —
+only 2.28 GB of this model has to stay resident, the other 26.42 GB pages from
+disk on demand:
+
+```bash
+python -m turboquant_mlx.stream.stream_generate --model ./laguna-s21-tqTe-g64 \
+    --cache-budget-gb 4 --max-active-experts 0 --prompt "..." --max-tokens 256
+```
+
+Measured on an M4 Max with a 4 GB expert cache: **peak 7.3 GB** (RSS 6.6 GB),
+141 of 144 expert projections streamed, ~5 tok/s, 56.8 % cache hit rate — a
+footprint that fits a **16 GB Mac mini**. Use `--max-active-experts 0` to keep
+native top-10 routing (lowering it reads less from disk but changes which experts
+run, and breaks agentic tool-calling).
+
+> Requires `turboquant-mlx-full >= 0.18.0`. Earlier versions matched expert
+> tensors by the `switch_mlp` name only, so Laguna's `mlp.experts` container
+> counted as resident: `turboquant-plan` reported "won't run" on small Macs and
+> `--cache-budget-gb auto` sized itself from a bad figure. Explicit
+> `--cache-budget-gb` was unaffected.
 
 ---
 
@@ -1260,7 +1320,7 @@ Options:
 | Qwen3.5-MoE / Qwen3.6-35B-A3B | `qwen3_5_moe` | Yes (256 experts) | Tested (122B, 35B-A3B); 35B streams on a 16 GB Mac mini |
 | Qwen3-MoE | `qwen3_moe` | Yes (128 experts, top-8) | Tested — Qwen3-235B-A22B converted to a hybrid **tq3a-tq2e** build (70.5 GB) on a 16 GB Mac mini via `--streaming`; streams and passes 5/6 quality probes on a 64 GB Mac |
 | Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
-| Poolside Laguna (SWA + global attn, per-head gating) | `laguna` | Yes (256 experts, top-8) | Tested (XS.2 33B: convert + generate + Opencode agentic pass at 3-bit). Custom arch — MLX port + loader shipped here (mlx-lm has no native `laguna`); logit-parity 2e-7 vs transformers |
+| Poolside Laguna (SWA + global attn, per-head gating) | `laguna` | Yes (256 experts, top-8/top-10) | Tested (XS.2 33B at 3-bit; S-2.1 118B at ternary 1.58-bit — both convert + generate + Opencode agentic pass; expert streaming wired for both). Custom arch — MLX port + loader shipped here (mlx-lm has no native `laguna`); logit-parity 2e-7 vs transformers |
 | DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
 | DiffusionGemma (block-diffusion MoE, via **mlx-vlm**) | `diffusion_gemma` | Yes (128 experts, top-8) | Tested (26B-A4B: convert + block-diffusion sampler, coherent at 3-bit — [HF](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)). **Experimental**: decode is much slower than native 4-bit until a batched codebook gather-GEMM kernel lands |
 
