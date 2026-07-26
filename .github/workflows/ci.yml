@@ -64,6 +64,33 @@ jobs:
           python -m pip install --upgrade pip build twine
           python -m build --sdist
           python -m twine check dist/*.tar.gz
+      # The tests run from the source tree, so a subpackage missing from
+      # pyproject's `packages` list passes every test and still ships broken
+      # (0.17.0/0.18.0 shipped without `models/`, killing every console script
+      # on a fresh install). Assert the artifact itself carries each one.
+      - name: sdist contents
+        run: |
+          python - <<'PY'
+          import glob, sys, tarfile, tomllib
+
+          with open("pyproject.toml", "rb") as f:
+              packages = tomllib.load(f)["tool"]["setuptools"]["packages"]
+          tar = glob.glob("dist/*.tar.gz")[0]
+          with tarfile.open(tar) as t:
+              names = set(t.getnames())
+          root = min(names, key=len).split("/")[0]
+
+          missing = []
+          for p in packages:
+              sub = "" if p == "turboquant_mlx" else p.split(".", 1)[1]
+              sub = sub.replace(".", "/")
+              path = f"{root}/{sub}/__init__.py" if sub else f"{root}/__init__.py"
+              if path not in names:
+                  missing.append(f"{p} ({path})")
+          if missing:
+              sys.exit(f"sdist {tar} is missing declared package(s): {missing}")
+          print(f"sdist carries all {len(packages)} declared packages")
+          PY
       - uses: actions/upload-artifact@v7
         with:
           name: sdist
