@@ -165,7 +165,8 @@ def test_real_laguna_index_if_present():
         "~/RandD/laguna-s21-tqTe-g64/model.safetensors.index.json")
     if not os.path.exists(path):
         return
-    keys = json.load(open(path))["weight_map"]
+    with open(path) as f:
+        keys = json.load(f)["weight_map"]
     streamed = [k for k in keys if is_streamed_expert_key(k)]
     assert streamed, "no streamable experts found in a real Laguna MoE repo"
     assert not any("shared_experts" in k for k in streamed)
