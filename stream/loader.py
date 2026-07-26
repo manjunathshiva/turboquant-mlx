@@ -17,6 +17,7 @@ import time
 
 import mlx.core as mx
 
+from turboquant_mlx.expert_naming import SWITCH_ATTRS, is_streamed_expert_key
 from turboquant_mlx.generate import load_turboquant, resolve_model_path
 from turboquant_mlx.layers.polar_switch_linear import PolarQuantizedSwitchLinear
 
@@ -32,7 +33,8 @@ _PROJS = ("gate_proj", "up_proj", "down_proj")
 # the one the reader is pointed at — hence _find_switch returns both.
 # `shared_experts` is deliberately absent: it is a dense always-on MLP that must
 # stay resident, and its projections are PolarQuantizedLinear anyway.
-_SWITCH_ATTRS = ("switch_mlp", "experts")
+# Shared with plan.py so the module swap and the byte accounting agree.
+_SWITCH_ATTRS = SWITCH_ATTRS
 
 
 def _find_switch(mlp):
@@ -152,12 +154,10 @@ _SAFETENSORS_ITEMSIZE = {"U32": 4, "I32": 4, "F32": 4, "F16": 2, "BF16": 2,
 
 def _streamed_expert_bytes(reader) -> int:
     """Total on-disk bytes of the tensors the streaming swap pages from disk
-    (MoE switch_mlp weight/scales) — everything else stays resident."""
+    (per-expert weight/scales) — everything else stays resident."""
     total = 0
     for key, loc in reader._index.items():
-        if "switch_mlp" not in key:
-            continue
-        if not (key.endswith(".weight") or key.endswith(".scales")):
+        if not is_streamed_expert_key(key):
             continue
         n = 1
         for d in loc.shape:
