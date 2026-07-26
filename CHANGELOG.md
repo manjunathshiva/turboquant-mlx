@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-07-26
+
+Hotfix. **0.17.0 and 0.18.0 installed from PyPI cannot run any command** — the
+`models/` subpackage that 0.17.0 added for Poolside Laguna was never listed in
+`pyproject.toml`, so it was absent from the distribution. `compat.py` imports
+`turboquant_mlx.models.laguna` at module scope with no guard and eleven modules
+import `compat`, so `turboquant-generate`, `turboquant-convert`,
+`turboquant-serve` and `stream_generate` all raised
+`ModuleNotFoundError: No module named 'turboquant_mlx.models'` on first import.
+`turboquant-plan` and `turboquant-doctor` were unaffected — they are the only
+entry points that do not import `compat`. Upgrade from 0.17.0 or 0.18.0.
+
+### Fixed
+
+- **`turboquant_mlx.models` is included in the distribution.** The flat-package
+  layout (the repo root *is* the `turboquant_mlx` package) means subpackages
+  cannot be auto-discovered and must be enumerated in `[tool.setuptools]
+  packages`; `models/` was not. Nothing caught it because the test suite runs
+  from the source tree, where the directory is present regardless of what gets
+  packaged.
+
+### Added
+
+- **Two guards against a repeat.** `tests/test_packaging.py` cross-checks the
+  declared package list against the subpackages actually on disk (in both
+  directions), and CI's `build sdist` job now asserts the built tarball really
+  contains an `__init__.py` for every declared package. The second is the one
+  that tests the artifact rather than the source tree — verified against the
+  published 0.18.0 tarball, which it rejects.
+
 ## [0.18.0] - 2026-07-26
 
 Expert streaming on Poolside Laguna. A MoE block names its stacked-expert
