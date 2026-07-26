@@ -6,8 +6,23 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-26
+
+Expert streaming on Poolside Laguna. A MoE block names its stacked-expert
+container either `switch_mlp` (qwen3_5_moe, deepseek) or, as a plain mlx-lm
+`SwitchGLU`, `experts` (laguna, gpt-oss). Four places had to know that and only
+one did — so Laguna could not be streamed, planned, repacked or calibrated
+correctly. The rule now lives in one module, `expert_naming.py`, imported by all
+four. Laguna-S-2.1 (118B) streams on a 16 GB Mac at a measured 7.3 GB peak.
+
 ### Fixed
 
+- **Expert streaming engages on Laguna models at all.** `load_streaming` looked
+  for the expert container under `switch_mlp` only, so on Laguna it swapped
+  **zero** projections and silently fell back to loading the whole model
+  resident — harmless on a 64 GB Mac, an out-of-memory crash on a 16 GB one.
+  Check the loader's `[stream] swapped N expert projections` line: `swapped 0`
+  means streaming did not engage.
 - **Laguna's experts are recognised as streamable by the planner and the cache
   budget.** The module swap already handled both container names
   (`switch_mlp` and mlx-lm's `SwitchGLU` at `experts`), but the two places that
