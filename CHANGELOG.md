@@ -6,6 +6,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`--cache-budget-gb auto` is no longer double-conservative, and `plan` now
+  predicts what the loader actually does.** The two computed the budget
+  differently: `plan.py` sized from the cap a `sysctl` bump *could* reach and
+  subtracted a 1 GB reserve, while `stream/loader.py` sized from the cap the
+  machine has and subtracted 2 GB. On a 16 GB M4 mini planning Laguna-S-2.1,
+  `turboquant-plan` advertised "~9.1 GB here" where the loader chose 5.89 GB —
+  and 9.1 GB would have peaked near 12.4 GB against that machine's 12.71 GB
+  cap. The arithmetic now lives in one module, `cache_budget.py`, imported by
+  both, and sizes from the *current* working set: a default must not assume a
+  sysctl the user was never told to run.
+
+  The formula also stopped taking 80% of the working set *and* subtracting a
+  2 GB reserve, which double-counted safety. A `--cache-budget-gb` sweep on
+  that mini (2/4/5.89/6/8 GB) put mlx's peak at **cache budget + 3.33 GB**
+  every time, within 40 MB, so the budget is now derived from that measured
+  relation rather than a blanket fraction. `auto` picks **7.4 GB** where it
+  used to pick 5.89 on the same machine; measured throughput across that range
+  was 1.36 → 1.58 tok/s. `turboquant-plan` prints the projected peak alongside
+  the budget so the number can be checked against a real run.
+
+### Fixed
+
+- **`turboquant-plan --model ~/typo` says the directory is missing.** Anything
+  that was not a directory was handed to the Hub, so a mistyped path came back
+  as "Repo id must be in the form 'repo_name' or 'namespace/repo_name'" — which
+  sends you looking for a naming rule when a directory is simply not there.
+- **`release.yml` verifies sdist contents too.** The guard added in 0.18.1 ran
+  only in `ci.yml`; the job whose output actually reaches PyPI now runs it as
+  well.
+
 ## [0.18.1] - 2026-07-26
 
 Hotfix. **0.17.0 and 0.18.0 installed from PyPI cannot run any command** — the

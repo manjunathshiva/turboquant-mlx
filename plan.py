@@ -47,6 +47,7 @@ import struct
 import subprocess
 import sys
 
+from turboquant_mlx.cache_budget import auto_cache_budget, projected_peak_bytes
 from turboquant_mlx.expert_naming import is_streamed_expert_key
 
 _ITEMSIZE = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
@@ -394,9 +395,16 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     if mode == "streaming":
         flags.append("--streaming   (weights exceed even the raised cap; "
                      "experts page from disk)")
-        budget = max(0.5, ((ceiling or 0) * 0.8 - fp["resident_bytes"]
-                           - _RESERVE_BYTES) / _GB)
-        flags.append(f"--cache-budget-gb auto   (~{budget:.1f} GB here)")
+        # Predict what the loader will choose, by calling the same function it
+        # calls. Note `wss`, not `ceiling`: the loader sizes against the cap
+        # this machine has right now, and a default must not assume the user
+        # ran a sysctl they were never told to run. Getting that wrong is how
+        # this line came to advertise 9.1 GB where the loader picked 5.89.
+        budget_bytes = auto_cache_budget(wss or 0, fp["resident_bytes"],
+                                         fp["expert_bytes"])
+        peak_bytes = projected_peak_bytes(budget_bytes, fp["resident_bytes"])
+        flags.append(f"--cache-budget-gb auto   (~{budget_bytes / _GB:.1f} GB "
+                     f"here, peaking near {peak_bytes / _GB:.1f} GB)")
     if chosen != 2048:
         flags.append(f"--prefill-step-size {chosen}   (the default 2048 needs "
                      f"{_gb(prefill_workspace_bytes(cfg, context, 2048))} of "
@@ -644,6 +652,15 @@ def _resolve(path: str) -> tuple:
     p = os.path.expanduser(path)
     if os.path.isdir(p):
         return p, False                     # an explicit local path is the user's word
+    # Something that is clearly meant as a path, and isn't one, is a typo — not
+    # a repo id. Handing it to the hub gets you "Repo id must be in the form
+    # 'repo_name' or 'namespace/repo_name'", which sends you looking for a
+    # naming rule when the real problem is a directory that isn't there.
+    if os.path.isabs(p) or path.startswith((".", "~")) or path.count("/") > 1:
+        raise FileNotFoundError(
+            f"no such directory: {p}\n"
+            "(looks like a local path; an HF repo id would be "
+            "'namespace/repo_name' with no leading '/', '.' or '~')")
     try:                                    # already downloaded? use the cache
         from huggingface_hub import snapshot_download
         local = snapshot_download(path, local_files_only=True)

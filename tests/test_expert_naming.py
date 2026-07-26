@@ -2,13 +2,17 @@
 
 The companion to ``test_stream_switch_attr.py``: that one pins the *module*
 swap, this one pins the *byte accounting* over the same two naming conventions.
-Both halves have to agree, and once they didn't — the swap learned laguna's
-``mlp.experts`` container while ``plan.py`` and ``_streamed_expert_bytes`` kept
-matching only ``switch_mlp``. Laguna therefore streamed correctly but reported
-zero streamable bytes, so ``turboquant-plan`` called a streamable model
-resident-only (❌ on a 16 GB Mac that in fact runs it at a 7.3 GB peak) and
-``--cache-budget-gb auto`` sized its cache from a resident figure that wrongly
-included all 28.7 GB of experts.
+Both halves have to agree, and in every release up to and including 0.18.0
+neither did — all four call sites matched ``switch_mlp`` alone, so on laguna's
+``mlp.experts`` container the swap replaced nothing and the accounting counted
+nothing.
+
+Fixing the swap first (mid-branch) left the accounting still wrong for a while,
+and it is worth knowing what that half alone costs: laguna streams correctly
+but reports zero streamable bytes, so ``turboquant-plan`` calls a streamable
+model resident-only (❌ on a 16 GB Mac that in fact runs it at a 7.3 GB peak)
+and ``--cache-budget-gb auto`` sizes its cache from a resident figure that
+wrongly includes all 28.7 GB of experts. Both halves ship fixed in 0.18.0.
 """
 
 import json
