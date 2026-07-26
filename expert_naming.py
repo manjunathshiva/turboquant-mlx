@@ -32,12 +32,20 @@ SWITCH_ATTRS = ("switch_mlp", "experts")
 STREAMED_SUFFIXES = (".weight", ".scales")
 
 
+def is_expert_container_key(key: str) -> bool:
+    """True if this key lives in a stacked-expert container, so its axis 0 is
+    the expert axis. Says nothing about *which* tensor — see the callers.
+
+    Excludes ``shared_experts``: it is a dense always-on MLP with no expert
+    axis at all.
+    """
+    return "switch_mlp" in key or ".mlp.experts." in key
+
+
 def is_streamed_expert_key(key: str) -> bool:
     """True if this safetensors key is a per-expert tensor the swap pages in.
 
     Excludes ``shared_experts`` (dense, always resident) and the resident
     codebook/signs of a quantized expert layer.
     """
-    if not key.endswith(STREAMED_SUFFIXES):
-        return False
-    return "switch_mlp" in key or ".mlp.experts." in key
+    return key.endswith(STREAMED_SUFFIXES) and is_expert_container_key(key)

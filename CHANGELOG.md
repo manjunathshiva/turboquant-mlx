@@ -21,6 +21,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   unaffected). The rule now lives in one place, `expert_naming.py`, imported by
   both. `experts` matches only anchored as `.mlp.experts.`, so the dense
   always-on `shared_experts` MLP stays resident as it must.
+- **`stream/repack_experts.py` no longer corrupts routing on a Laguna
+  checkpoint.** Its expert-stack branch matched the container by `switch_mlp`
+  while the router branch matched `mlp.gate.*` unconditionally, so on Laguna it
+  permuted the router rows and left the expert stacks in place — for all 47 MoE
+  layers. The tool's correctness argument is that the two move *together*
+  (a relabeling); permuting one alone is a rerouting. The output loaded cleanly
+  and passed every shape assertion, so the damage was silent.
+- **`stream/calibrate_experts.py` sizes the hot-expert pin list correctly on
+  Laguna.** `_model_expert_info` returned 0 bytes/expert, so the
+  `used + cost > cap` budget check never fired and *every* expert was written
+  to `hot_experts.json` claiming ~0 GB — which the streaming loader then tries
+  to pin into a wired cache sized for a fraction of it.
 
 ## [0.17.0] - 2026-07-24
 

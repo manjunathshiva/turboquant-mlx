@@ -113,6 +113,51 @@ def test_plan_and_loader_agree_on_the_same_index():
             _Reader(idx)), f"plan/loader disagree on {template}"
 
 
+def test_calibrate_expert_cost_is_nonzero_for_either_container(tmp_path):
+    """`_model_expert_info` sizes the hot-expert pin list. Returning 0 bytes per
+    expert makes the `used + cost > cap` budget check never fire, so *every*
+    expert lands in hot_experts.json claiming ~0 GB — and the loader then tries
+    to pin the whole expert stack into a wired cache sized for a fraction of it."""
+    import mlx.core as mx
+
+    from turboquant_mlx.stream.calibrate_experts import _model_expert_info
+
+    for container in ("switch_mlp", "experts"):
+        d = tmp_path / container
+        d.mkdir()
+        t = {}
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            t[f"model.layers.0.mlp.{container}.{proj}.weight"] = mx.zeros(
+                (8, 4, 2), dtype=mx.uint32)
+            t[f"model.layers.0.mlp.{container}.{proj}.scales"] = mx.zeros(
+                (8, 4, 1), dtype=mx.float16)
+        mx.eval(*t.values())
+        mx.save_safetensors(str(d / "model.safetensors"), t)
+        (d / "config.json").write_text("{}")
+
+        cost, num_experts = _model_expert_info(str(d))
+        assert num_experts == 8, f"{container}: expert axis not found"
+        assert cost > 0, f"{container}: 0 bytes/expert defeats the pin budget"
+
+
+def test_router_and_experts_are_classified_consistently():
+    """Cross-module invariant: any layer whose router rows repack_experts will
+    permute must also have expert stacks it will permute. Violating this is not
+    a missed optimization — it reroutes every token."""
+    from turboquant_mlx.stream.repack_experts import _reorder_axis0_keys
+
+    for container in ("switch_mlp", "experts"):
+        router = "model.layers.0.mlp.gate.weight"
+        expert = f"model.layers.0.mlp.{container}.gate_proj.weight"
+        assert _reorder_axis0_keys(router), "router always permutes"
+        assert _reorder_axis0_keys(expert), (
+            f"router permutes but mlp.{container} experts do not — "
+            "the checkpoint would load fine and route to the wrong expert")
+    # and the dense always-on MLP must stay put under either scheme
+    assert not _reorder_axis0_keys(
+        "model.layers.0.mlp.shared_experts.gate_proj.weight")
+
+
 def test_real_laguna_index_if_present():
     """Against the actual converted repo when it's on this machine — the case
     that was wrong in the field. Skipped in CI."""
@@ -125,3 +170,21 @@ def test_real_laguna_index_if_present():
     assert streamed, "no streamable experts found in a real Laguna MoE repo"
     assert not any("shared_experts" in k for k in streamed)
     assert all(k.endswith((".weight", ".scales")) for k in streamed)
+
+    # repack's per-layer invariant, over real key names: no layer may have its
+    # router permuted without its experts. Before the fix this held for 0 of 47.
+    import collections
+    import re
+
+    from turboquant_mlx.stream.repack_experts import _reorder_axis0_keys
+
+    layer_re = re.compile(r"\.layers\.(\d+)\.")
+    router, expert = collections.Counter(), collections.Counter()
+    for k in keys:
+        m = layer_re.search(k)
+        if not m or not _reorder_axis0_keys(k):
+            continue
+        (router if ".mlp.gate." in k else expert)[int(m.group(1))] += 1
+    orphaned = sorted(l for l in router if expert[l] == 0)
+    assert not orphaned, (
+        f"layers {orphaned} would permute the router but not the experts")
