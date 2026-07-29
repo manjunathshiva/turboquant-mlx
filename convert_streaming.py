@@ -142,7 +142,14 @@ def convert_streaming(
     )
 
     print(f"[INFO] Loading model from {hf_path} (lazy)")
-    model, tokenizer, config = load(hf_path, return_config=True, lazy=True)
+    model, tokenizer, config = load(
+        hf_path,
+        # Custom tokenizer classes (e.g. Kimi K3's tokenization_kimi.py) need
+        # the local code opt-in; local files were already inspected by the user.
+        tokenizer_config={"trust_remote_code": True},
+        return_config=True,
+        lazy=True,
+    )
     arch = config.get("model_type", "unknown")
     print(f"[INFO] Streaming TurboQuant convert: {bits}-bit, gs={group_size}, "
           f"arch={arch}, shard={max_file_size_gb} GB")

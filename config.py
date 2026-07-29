@@ -79,11 +79,24 @@ class TurboQuantConfig:
         Attention-block linears use ``attn_bits`` when set; MLP / MoE expert
         linears use ``mlp_bits`` when set; everything else (and either
         override left as None) falls back to ``bits``.
+
+        Always-on MoE plumbing that lives under the ``mlp`` block — shared
+        experts and latent-MoE projections (Kimi K3's
+        ``routed_expert_{down,up}_proj``) — is exempted from the ``mlp_bits``
+        tier: unlike a routed expert (1 of 896, top-16), these run on every
+        token, so dropping them to a sub-2-bit expert tier costs quality on
+        the whole stream for a rounding-error size saving.
         """
-        for p in path.split("."):
+        parts = path.split(".")
+        for p in parts:
             if p in ("self_attn", "attention", "linear_attn"):
                 return self.attn_bits if self.attn_bits is not None else self.bits
             if p in ("mlp", "feed_forward"):
+                if any(
+                    q == "shared_experts" or q.startswith("routed_expert_")
+                    for q in parts
+                ):
+                    return self.bits
                 return self.mlp_bits if self.mlp_bits is not None else self.bits
         return self.bits
 

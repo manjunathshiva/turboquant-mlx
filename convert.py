@@ -78,6 +78,9 @@ def convert(
     print(f"[INFO] Loading model from {hf_path}")
     model, tokenizer, config = load(
         hf_path,
+        # Custom tokenizer classes (e.g. Kimi K3's tokenization_kimi.py) need
+        # the local code opt-in; local files were already inspected by the user.
+        tokenizer_config={"trust_remote_code": True},
         return_config=True,
         lazy=True,
     )

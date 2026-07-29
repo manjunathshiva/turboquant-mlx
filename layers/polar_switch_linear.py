@@ -284,6 +284,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
         float_weight: mx.array = None,
         bias: mx.array = None,
         ternary: bool = False,
+        weight_shape: tuple = None,
     ) -> "PolarQuantizedSwitchLinear":
         """Create from an existing SwitchLinear with FP16/BF16 weights.
 
@@ -296,21 +297,36 @@ class PolarQuantizedSwitchLinear(nn.Module):
             group_size: Elements per quantization group.
             seed: Random seed for Hadamard rotation signs.
             needs_rotation: Whether this layer needs online input rotation.
-            float_weight: Optional pre-dequantized weight (N, out, in) float.
+            float_weight: Optional pre-dequantized weight (N, out, in) float,
+                or a callable ``f(e) -> (out, in) float`` for per-expert lazy
+                dequantization (pass ``weight_shape`` alongside).
             bias: Optional bias tensor (N, out) float.
+            weight_shape: (N, out, in), required when float_weight is callable.
 
         Returns:
             New PolarQuantizedSwitchLinear with quantized expert weights.
         """
-        if float_weight is not None:
+        if callable(float_weight):
+            # Per-expert dequant source: float_weight(e) -> (out, in) float.
+            # Keeps peak memory at one expert instead of the whole stacked
+            # tensor (~30 GB for an 896-expert layer, measured).
+            if weight_shape is None:
+                raise ValueError("weight_shape required with a callable float_weight")
+            get_expert = float_weight
+            num_experts, output_dims, input_dims = weight_shape
+            has_bias = bias is not None
+        elif float_weight is not None:
             weight_3d = float_weight
+            get_expert = lambda e: weight_3d[e]  # noqa: E731
+            num_experts, output_dims, input_dims = weight_3d.shape
             has_bias = bias is not None
         else:
             weight_3d = switch_linear.weight
+            get_expert = lambda e: weight_3d[e]  # noqa: E731
+            num_experts, output_dims, input_dims = weight_3d.shape
             has_bias = "bias" in switch_linear
             if has_bias:
                 bias = switch_linear.bias
-        num_experts, output_dims, input_dims = weight_3d.shape
 
         if input_dims % group_size != 0:
             raise ValueError(
@@ -340,7 +356,7 @@ class PolarQuantizedSwitchLinear(nn.Module):
 
         # Process experts one-by-one, eval each to flush graph immediately
         for e in range(num_experts):
-            expert_w = weight_3d[e]  # view into (output_dims, input_dims)
+            expert_w = get_expert(e)  # (output_dims, input_dims)
             result = polar_quantize_weight(
                 expert_w,
                 bits=bits,
@@ -358,7 +374,8 @@ class PolarQuantizedSwitchLinear(nn.Module):
             del result, expert_w
 
         # Free original weight reference
-        del weight_3d
+        del get_expert
+        weight_3d = None  # release stacked source if one was materialized
 
         # Create layer
         layer = cls(
