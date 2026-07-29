@@ -141,9 +141,17 @@ def _cap_active_experts(layers, max_active: int) -> None:
             mlp.top_k = new_k
             changed.append(native)
     if changed:
-        print(f"[stream] K-reduction: capped router top_k {changed[0]}->{min(changed[0], max_active)} "
+        native = changed[0]
+        print(f"[stream] K-reduction: capped router top_k {native}->{min(native, max_active)} "
               f"on {len(changed)} MoE blocks (~2x less disk I/O; pass "
               f"max_active_experts=0 / --max-active-experts 0 to use native routing)")
+        if native > 2 * max_active:
+            # Halving K was measured byte-identical (Qwen 8->4); deeper cuts
+            # are unvalidated. Kimi K3's native top-16 at the default cap of 4
+            # would be a 4x truncation — flag it rather than silently degrade.
+            print(f"[stream] WARNING: top_k cut {native}->{max_active} is more "
+                  f"aggressive than the validated 2x — quality may degrade; "
+                  f"consider --max-active-experts {native // 2} or higher")
 
 
 # Auto cache budget (ds4-style): size the expert cache from what the GPU can
