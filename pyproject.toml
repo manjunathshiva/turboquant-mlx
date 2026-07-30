@@ -51,6 +51,8 @@ dependencies = [
 eval = ["datasets", "transformers"]
 dev = ["pytest", "build", "twine"]
 vlm = ["mlx-vlm>=0.6.3"]
+# Kimi K3 ships a tiktoken-based tokenizer that needs blobfile to load.
+kimi = ["tiktoken", "blobfile"]
 
 [project.urls]
 Homepage = "https://github.com/manjunathshiva/turboquant-mlx"
