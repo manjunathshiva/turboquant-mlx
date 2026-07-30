@@ -436,9 +436,12 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                 scales_key=skey,
                 cache=cache,
                 layer_idx=i,
-                # one trigger per layer fires the next-layer prefetch; gate_proj
-                # is first in _PROJS so it fires with maximum lead time.
-                is_trigger=(proj == _PROJS[0]),
+                # One trigger per layer fires the same-layer miss fan-out and
+                # the next-layer prefetch. It must be the FIRST projection the
+                # MoE block EXECUTES — SwitchGLU runs up_proj, then gate_proj,
+                # then down_proj — or every up_proj miss is read serially
+                # before the fan-out even fires.
+                is_trigger=(proj == "up_proj"),
                 trit=res.trit,
             )
             setattr(sm, proj, st)
