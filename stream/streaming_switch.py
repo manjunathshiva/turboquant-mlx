@@ -99,7 +99,7 @@ class ExpertCache:
         self._staging_cap = max(0, int(staging_budget_bytes))
         self._staging: "OrderedDict[tuple, tuple]" = OrderedDict()  # key -> (np_buf, dt)
         self._staging_bytes = 0
-        self._inflight: set = set()
+        self._inflight: dict = {}            # key -> Future (gather awaits these)
         self._lock = threading.Lock()        # guards _staging / _inflight / stats
         self._layer_keys: dict = {}          # layer_idx -> [(wkey, skey), ...]
         self._last_experts: dict = {}        # layer_idx -> experts (previous token)
@@ -124,12 +124,23 @@ class ExpertCache:
         the predictor can prefetch all of them for the next layer at once."""
         self._layer_keys[layer_idx] = list(proj_keys)
 
-    def on_layer_start(self, layer_idx: int, experts: list):
+    def on_layer_start(self, layer_idx: int, experts: list, trigger_wkey=None):
         """Called once per layer per token (from the trigger projection).
 
-        Prefetches the next layer(s)' predicted experts in the background, then
-        records this layer's selection for the *next* token to predict from.
+        First fans out THIS layer's known expert set across the read pool for
+        all of the layer's projections: gather awaits in-flight reads instead
+        of re-reading, so every miss in the layer is read in parallel by the
+        pool rather than serially at each projection's call site. Unlike the
+        speculative next-layer path this is not a prediction — the router has
+        already chosen these experts. (Skipped for prefill-sized selections,
+        which would overflow the staging area; prefill misses already coalesce
+        into large runs per projection.)
+
+        Then prefetches the next layer(s)' predicted experts in the background
+        and records this layer's selection for the *next* token to predict from.
         """
+        if self._pool is not None and len(experts) <= 64:
+            self._prefetch_layer(layer_idx, experts)
         # once enough has been prefetched, judge whether it's worth continuing
         if (self._prefetch_ahead and not self._throttle_decided
                 and self.prefetched >= self._throttle_warmup):
@@ -146,20 +157,23 @@ class ExpertCache:
                     self._prefetch_layer(nxt, pred)
         self._last_experts[layer_idx] = experts
 
-    def _prefetch_layer(self, layer_idx: int, predicted: list):
+    def _prefetch_layer(self, layer_idx: int, predicted: list, skip_wkey=None):
         keys = self._layer_keys.get(layer_idx)
         if not keys or self._pool is None:
             return
         with self._lock:
             for wkey, skey in keys:
+                if wkey == skip_wkey:
+                    continue
                 for e in predicted:
                     ck = (wkey, e)
                     # already resident (LRU or pinned), staged, or being read
                     if (ck in self._od or ck in self._pinned
                             or ck in self._staging or ck in self._inflight):
                         continue
-                    self._inflight.add(ck)
-                    self._pool.submit(self._prefetch_one, wkey, skey, e)
+                    self._inflight[ck] = self._pool.submit(
+                        self._prefetch_one, wkey, skey, e
+                    )
 
     def record_usage(self, layer_idx: int, routed) -> None:
         """One forward's flat routing array (repeats an expert once per token).
@@ -193,7 +207,7 @@ class ExpertCache:
             sbuf = self.reader.read_expert_np(skey, e)
             nb = wbuf[0].nbytes + sbuf[0].nbytes
             with self._lock:
-                self._inflight.discard((wkey, e))
+                self._inflight.pop((wkey, e), None)
                 # Store both projections under one key so eviction can never
                 # orphan half a pair (drop the weight but keep its scales).
                 self._staging[(wkey, e)] = (wbuf, sbuf)
@@ -207,7 +221,7 @@ class ExpertCache:
                     self.prefetch_dropped += 1
         except Exception:
             with self._lock:
-                self._inflight.discard((wkey, e))
+                self._inflight.pop((wkey, e), None)
 
     # -- loading -------------------------------------------------------
     def _load_coalesced(self, miss_pairs):
@@ -332,6 +346,7 @@ class ExpertCache:
         # resident set, and the prefetch staging area; load the rest in a batch.
         miss_pairs = []
         staged = []  # (expert, wbuf, sbuf) — read in background, build here
+        inflight = []  # (expert, future) — being read right now; await, don't re-read
         with self._lock:
             for e in experts:
                 ck = (wkey, e)
@@ -347,6 +362,8 @@ class ExpertCache:
                     self._staging_bytes -= (wbuf[0].nbytes + sbuf[0].nbytes)
                     staged.append((e, wbuf, sbuf))
                     self.prefetch_hits += 1
+                elif ck in self._inflight:
+                    inflight.append((e, self._inflight[ck]))
                 else:
                     self.misses += 1
                     miss_pairs.append((wkey, skey, e))
@@ -365,6 +382,40 @@ class ExpertCache:
             for ck, entry in loaded.items():
                 self._insert(ck, entry)
                 self.bytes_read += entry[2]
+
+        # Await reads that were already in flight (same-layer fan-out or
+        # speculative prefetch). The bytes arrive via the background pool; we
+        # only build the MLX arrays here. Falls back to a synchronous load if
+        # a completed entry was evicted from staging before we could claim it.
+        for e, fut in inflight:
+            ck = (wkey, e)
+            try:
+                fut.result()
+            except Exception:
+                pass
+            with self._lock:
+                buf = self._staging.pop(ck, None)
+                if buf is not None:
+                    self._staging_bytes -= (buf[0][0].nbytes + buf[1][0].nbytes)
+                    self.prefetch_hits += 1
+            if buf is not None:
+                wbuf, sbuf = buf
+                w = mx.array(wbuf[0], dtype=wbuf[1])
+                s = mx.array(sbuf[0], dtype=sbuf[1])
+                mx.eval(w, s)
+                self._insert(ck, (w, s, w.nbytes + s.nbytes))
+                continue
+            with self._lock:
+                already = ck in self._od or ck in self._pinned
+                if already:
+                    self.hits += 1
+                else:
+                    self.misses += 1
+            if not already:
+                loaded = self._load_coalesced([(wkey, skey, e)])
+                for lck, entry in loaded.items():
+                    self._insert(lck, entry)
+                    self.bytes_read += entry[2]
 
         # Build the stack *before* evicting so freshly loaded slices are still
         # present (and held by ``ws``/``ss``, so eviction can't free them out
@@ -513,7 +564,9 @@ class StreamingSwitchLinear(nn.Module):
         # expert set is known (only the trigger projection, once per token), and
         # record the selection for calibration on decode steps (1 token).
         if self._is_trigger:
-            self._cache.on_layer_start(self._layer_idx, sel)
+            self._cache.on_layer_start(
+                self._layer_idx, sel, trigger_wkey=self._weight_key
+            )
             self._cache.record_usage(self._layer_idx, idx_global)
             if n_tokens == 1:
                 self._cache.record_trace(self._layer_idx, sel)
