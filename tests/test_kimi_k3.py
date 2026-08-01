@@ -73,7 +73,7 @@ def make_model():
 def test_get_classes_resolves_kimi_k3():
     from mlx_lm.utils import _get_classes
 
-    compat._register_kimi_k3_model()  # idempotent; already ran at import
+    compat._register_local_model("kimi_k3")  # idempotent; already ran at import
     model_class, args_class = _get_classes(tiny_config())
     assert model_class is k3.Model
     assert args_class is k3.ModelArgs

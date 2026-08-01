@@ -83,54 +83,35 @@ def _patch_nemotron_h_pattern():
                 break
 
 
-def _register_laguna_model():
-    """Register the MLX Laguna model so mlx-lm's ``_get_classes`` can find it.
+def _register_local_model(model_type: str, module_name: str = None):
+    """Register one of our MLX ports so mlx-lm's ``_get_classes`` can find it.
 
     mlx-lm dispatches a checkpoint's ``model_type`` via
-    ``importlib.import_module(f"mlx_lm.models.{model_type}")``. Poolside's Laguna
-    architecture has no upstream mlx-lm module yet, so we alias our
-    implementation into ``sys.modules`` under that name — ``importlib`` consults
-    ``sys.modules`` first, so this makes ``load_turboquant`` (and plain mlx-lm)
-    resolve ``laguna`` to our ``Model`` / ``ModelArgs``. Idempotent, and
-    self-disables the moment mlx-lm ships native Laguna support.
+    ``importlib.import_module(f"mlx_lm.models.{model_type}")``. Architectures with
+    no upstream mlx-lm module (Poolside's Laguna, Moonshot's Kimi K3, Sarvam AI's
+    MoE) are aliased into ``sys.modules`` under that name — for K3 the alias is on
+    the *wrapper* type its config declares at top level, not the ``kimi_linear``
+    text tower inside ``text_config`` that mlx-lm already knows. ``importlib``
+    consults ``sys.modules`` first,
+    so this makes ``load_turboquant`` (and plain mlx-lm) resolve the type to our
+    ``Model`` / ``ModelArgs``. Idempotent, and self-disables per architecture the
+    moment mlx-lm ships native support for it.
     """
+    import importlib
     import sys
 
-    if "mlx_lm.models.laguna" in sys.modules:
+    target = f"mlx_lm.models.{model_type}"
+    if target in sys.modules:
         return
     try:
-        import mlx_lm.models.laguna  # noqa: F401 — native support exists; defer
+        importlib.import_module(target)  # native support exists; defer to it
         return
     except ImportError:
         pass
 
-    from turboquant_mlx.models import laguna as _laguna
-
-    sys.modules["mlx_lm.models.laguna"] = _laguna
-
-
-def _register_kimi_k3_model():
-    """Register the MLX Kimi K3 model so mlx-lm's ``_get_classes`` can find it.
-
-    Same mechanism as :func:`_register_laguna_model`: K3 checkpoints carry
-    ``model_type: "kimi_k3"`` at the top level (the text tower inside
-    ``text_config`` is ``kimi_linear``, which mlx-lm knows, but the wrapper is
-    what ``_get_classes`` dispatches on). Idempotent; self-disables the moment
-    mlx-lm ships native support.
-    """
-    import sys
-
-    if "mlx_lm.models.kimi_k3" in sys.modules:
-        return
-    try:
-        import mlx_lm.models.kimi_k3  # noqa: F401 — native support exists; defer
-        return
-    except ImportError:
-        pass
-
-    from turboquant_mlx.models import kimi_k3 as _kimi_k3
-
-    sys.modules["mlx_lm.models.kimi_k3"] = _kimi_k3
+    sys.modules[target] = importlib.import_module(
+        f"turboquant_mlx.models.{module_name or model_type}"
+    )
 
 
 def _patch_compressed_tensors_mxfp4():
@@ -284,8 +265,9 @@ def _patch_glm47_tool_name_strip():
 
 
 _patch_nemotron_h_pattern()
-_register_laguna_model()
-_register_kimi_k3_model()
+_register_local_model("laguna")
+_register_local_model("kimi_k3")
+_register_local_model("sarvam_moe")
 _patch_compressed_tensors_mxfp4()
 _patch_kimi_k3_tokenizer_trust()
 _patch_glm47_tool_name_strip()
