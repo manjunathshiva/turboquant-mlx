@@ -392,6 +392,8 @@ class ExpertCache:
             try:
                 fut.result()
             except Exception:
+                # A failed read leaves no staging entry; the miss path
+                # below reloads this expert synchronously.
                 pass
             with self._lock:
                 buf = self._staging.pop(ck, None)

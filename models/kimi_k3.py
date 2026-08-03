@@ -51,11 +51,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
+import mlx_lm.models.base as base
 from mlx_lm.models.base import (
     BaseModelArgs,
     create_attention_mask,
     create_ssm_mask,
-    scaled_dot_product_attention,
 )
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
@@ -541,7 +541,7 @@ class KimiMLAAttention(nn.Module):
             k = self.embed_q(kv_latent, transpose=False)
             v = self.unembed_out(kv_latent)
 
-        output = scaled_dot_product_attention(
+        output = base.scaled_dot_product_attention(
             q_nope, k, v, cache=cache, scale=self.scale, mask=pe_scores
         )
 
