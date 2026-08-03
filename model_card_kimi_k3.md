@@ -15,7 +15,7 @@ tags:
 
 **Ternary-expert** TurboQuant quantization of Moonshot AI's **Kimi K3** — a **2.8-trillion-parameter** Mixture-of-Experts model — produced with [TurboQuant-MLX](https://github.com/manjunathshiva/turboquant-mlx).
 
-This is the largest model TurboQuant-MLX has run to date. The BF16 checkpoint is ~5.6 TB; this build lands at **869 GB on disk** and generates coherent, high-quality text on a **single 512 GB Apple Silicon Mac Studio** by streaming MoE experts from disk — no cluster, no GPUs.
+This is the largest model TurboQuant-MLX has run to date. The BF16 checkpoint is ~5.6 TB; this build lands at **931 GB on disk** (867 GiB) and generates coherent, high-quality text on a **single 512 GB Apple Silicon Mac Studio** by streaming MoE experts from disk — no cluster, no GPUs.
 
 ## Model Details
 
@@ -29,7 +29,7 @@ This is the largest model TurboQuant-MLX has run to date. The BF16 checkpoint is
   - Routed experts `gate/up_proj` → **ternary** (trit-packed, ~1.58-bit)
   - Routed experts `down_proj` → **4-bit** (the recall-sensitive projection kept wider)
   - Routers (`mlp.gate`) → full precision (auto-skipped — never quantized)
-- **Size**: **869 GB** across **186** shards (vs ~5.6 TB BF16). Experts alone are ~903 GB uncompressed-equivalent; the always-resident (non-expert) working set is ~30 GB.
+- **Size**: **931 GB** (867 GiB) across **186** shards (vs ~5.6 TB BF16) — ~902 GB of quantized experts + ~30 GB always-resident (non-expert) working set.
 
 The recipe name decodes as **tq3a** (3-bit attention) / **tqTe** (ternary experts) / **down4** (4-bit expert down-projection) / **g64** (group size 64).
 
@@ -41,7 +41,7 @@ Even at ternary experts with a **2× K-cut** (top-16 → top-8 routing), real-us
 
 ## Running it (expert streaming)
 
-At 869 GB this model does not fit resident on any single Mac. It runs by **streaming MoE experts from disk** — each token pages in only its router-selected experts (pinned hot-list + LRU cache), so the big expert tensors are never all in memory at once. Non-expert weights (attention, routers, shared experts, embeddings) stay resident.
+At 931 GB this model does not fit resident on any single Mac. It runs by **streaming MoE experts from disk** — each token pages in only its router-selected experts (pinned hot-list + LRU cache), so the big expert tensors are never all in memory at once. Non-expert weights (attention, routers, shared experts, embeddings) stay resident.
 
 Measured on a **Mac Studio (M-series, 512 GB)** with `iogpu.wired_limit_mb=512000`, a 506 GB expert cache (`--cache-budget-gb auto`), the shipped hot-expert list, and `--no-chat-template` for controlled A/B (200-token generation):
 
