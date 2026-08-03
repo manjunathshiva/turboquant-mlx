@@ -51,12 +51,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
+# Module-qualified access (not by-value imports): this repo patches mlx-lm
+# internals at runtime as its core mechanism, and a by-value import could
+# never observe such a patch.
 import mlx_lm.models.base as base
-from mlx_lm.models.base import (
-    BaseModelArgs,
-    create_attention_mask,
-    create_ssm_mask,
-)
+from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.gated_delta import gated_delta_kernel, gated_delta_ops
 from mlx_lm.models.mla import MultiLinear
@@ -693,11 +692,12 @@ class KimiK3TextModel(nn.Module):
             cache = [None] * len(self.layers)
 
         ssm_mask = (
-            create_ssm_mask(h, cache[self.ssm_idx]) if self.ssm_idx is not None
+            base.create_ssm_mask(h, cache[self.ssm_idx])
+            if self.ssm_idx is not None
             else None
         )
         attn_mask = (
-            create_attention_mask(h, cache[self.attn_idx], return_array=True)
+            base.create_attention_mask(h, cache[self.attn_idx], return_array=True)
             if self.attn_idx is not None
             else None
         )

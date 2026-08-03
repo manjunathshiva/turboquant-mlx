@@ -106,6 +106,16 @@ class TurboQuantConfig:
         MLP / MoE expert linears use ``mlp_group_size`` when set so a sub-2-bit
         expert tier can carry a finer block scale than the attention tier;
         everything else uses ``group_size``.
+
+        Deliberately, the ``shared_experts`` / ``routed_expert_*`` exemption in
+        :meth:`bits_for_path` is NOT mirrored here: that exemption protects
+        always-on projections from a quality-losing sub-2-bit tier, whereas a
+        finer ``mlp_group_size`` on those same projections only adds scale
+        resolution at negligible size cost. Exempting them would hand them the
+        coarser attention-tier group size — strictly worse. (Bit-width is
+        recovered from the on-disk codebook at load; group size is re-derived
+        through this same rule from the saved config, so convert and load
+        agree by construction and existing checkpoints are unaffected.)
         """
         if self.mlp_group_size is not None:
             for p in path.split("."):
