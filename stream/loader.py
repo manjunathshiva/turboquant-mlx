@@ -269,6 +269,7 @@ def _pin_spec_to_layers(spec: dict) -> "tuple[dict, list]":
 
 def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                    prefetch_workers: int = 8, prefetch_ahead: int = 0,
+                   fanout: bool = True,
                    pin_file: str | None = None, max_active_experts: int = 4,
                    use_page_cache: bool | None = None, use_hotlist: bool = True,
                    preload_pins: bool = True, wire_memory: bool = False,
@@ -288,6 +289,10 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     prefetch_workers parallelizes per-layer expert reads (1 = serial baseline).
     prefetch_ahead speculatively prefetches this many upcoming layers' experts
     (predicted from the previous token's routing); 0 disables prefetch.
+    fanout submits each layer's known expert misses to the read pool as soon
+    as the router has chosen them, so the other projections' reads overlap
+    compute (--no-fanout for bandwidth-bound external storage, where the
+    coalesced serial path wins; the saturation throttle also disables it).
     pin_file is an optional JSON {"pin": [[layer, expert], ...]} of hot experts
     to keep permanently resident (never LRU-evicted) — see calibrate_experts.py.
     When it is None and the model directory ships a ``hot_experts.json`` (same
@@ -355,6 +360,7 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
         reader, int(cache_budget_gb * 1e9),
         prefetch_workers=prefetch_workers,
         prefetch_ahead=prefetch_ahead,
+        fanout=fanout,
         usage_profile=profile,
     )
     # Fold this run into the persisted history at exit. Registered rather than

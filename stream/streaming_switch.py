@@ -51,6 +51,15 @@ class ExpertCache:
     and ``eval`` stay on the calling thread, so the produced tensors are
     bit-identical to the serial path.
 
+    **Same-layer fan-out** (``fanout=True``, needs the pool): once a layer's
+    router has chosen its experts, the other projections' misses are submitted
+    to the pool immediately so their reads overlap the earlier projections'
+    compute. These are critical-path reads (counted in ``misses`` /
+    ``bytes_read`` and annotated by ``fanout_hits``), not speculation. Fan-out
+    trades the coalesced serial read path for parallelism — a win on internal
+    SSD, a likely loss on bandwidth-bound external storage, so it can be
+    disabled (``--no-fanout``) and the saturation throttle also turns it off.
+
     **Speculative prefetch** (``prefetch_ahead > 0``): when a layer starts we
     kick off *background* disk reads for the experts the previous token used at
     the next layer(s) — a near-free, high-accuracy predictor because MoE routing
@@ -63,7 +72,7 @@ class ExpertCache:
     """
 
     def __init__(self, reader, budget_bytes: int, *, prefetch_workers: int = 8,
-                 prefetch_ahead: int = 1,
+                 prefetch_ahead: int = 1, fanout: bool = True,
                  staging_budget_bytes: int = 1_500_000_000,
                  pin_keys=None, usage_profile=None):
         self.reader = reader
@@ -72,11 +81,13 @@ class ExpertCache:
         self._od: "OrderedDict[tuple, tuple]" = OrderedDict()
         # stats
         self.hits = 0             # served resident from _od
-        self.misses = 0           # critical-path disk reads
-        self.prefetch_hits = 0    # served from a completed background prefetch
-        self.bytes_read = 0           # critical-path bytes
-        self.bytes_prefetched = 0     # background prefetch bytes
-        self.prefetched = 0           # experts prefetched
+        self.misses = 0           # critical-path disk reads (incl. fan-out)
+        self.prefetch_hits = 0    # served from a completed SPECULATIVE prefetch
+        self.fanout_hits = 0      # misses whose read ran on the pool (subset of misses)
+        self.prefetch_errors = 0  # background reads that raised (fell back to sync)
+        self.bytes_read = 0           # critical-path bytes (incl. fan-out reads)
+        self.bytes_prefetched = 0     # speculative background bytes
+        self.prefetched = 0           # experts speculatively prefetched
         self.prefetch_dropped = 0     # prefetched then evicted from staging unused
         self.read_runs = 0            # coalesced range reads issued (critical path)
         self.expert_reads = 0         # experts loaded on the critical path
@@ -84,6 +95,13 @@ class ExpertCache:
         self._workers = max(1, int(prefetch_workers))
         self._pool = (ThreadPoolExecutor(max_workers=self._workers)
                       if self._workers > 1 else None)
+        # same-layer fan-out: submit a layer's known expert misses to the pool
+        # at layer start so each projection's gather awaits parallel reads
+        # instead of reading serially. Needs the pool; --no-fanout turns it off
+        # (bandwidth-bound storage prefers the coalesced serial path), and the
+        # saturation throttle below turns it off too.
+        self._fanout = bool(fanout) and self._pool is not None
+        self._fanout_keys: set = set()   # cks submitted by fan-out (not speculation)
         # speculative-prefetch state (needs the pool to run in background)
         self._prefetch_ahead = max(0, int(prefetch_ahead)) if self._pool else 0
         # saturation throttle: after warming up, if prefetch is rescuing too few
@@ -128,28 +146,37 @@ class ExpertCache:
         """Called once per layer per token (from the trigger projection).
 
         First fans out THIS layer's known expert set across the read pool for
-        all of the layer's projections: gather awaits in-flight reads instead
-        of re-reading, so every miss in the layer is read in parallel by the
-        pool rather than serially at each projection's call site. Unlike the
-        speculative next-layer path this is not a prediction — the router has
-        already chosen these experts. (Skipped for prefill-sized selections,
-        which would overflow the staging area; prefill misses already coalesce
-        into large runs per projection.)
+        the layer's *other* projections (``trigger_wkey`` — the projection this
+        call came from — is skipped: its gather runs next on the calling thread
+        and keeps the coalesced-run read path): gather awaits in-flight reads
+        instead of re-reading, so every miss in the layer is read in parallel
+        by the pool rather than serially at each projection's call site. Unlike
+        the speculative next-layer path this is not a prediction — the router
+        has already chosen these experts — so the reads are accounted as
+        critical-path (``misses``/``bytes_read``, annotated by ``fanout_hits``).
+        (Skipped for prefill-sized selections, which would overflow the staging
+        area; prefill misses already coalesce into large runs per projection.)
 
         Then prefetches the next layer(s)' predicted experts in the background
         and records this layer's selection for the *next* token to predict from.
         """
-        if self._pool is not None and len(experts) <= 64:
-            self._prefetch_layer(layer_idx, experts)
+        if self._fanout and len(experts) <= 64:
+            self._prefetch_layer(layer_idx, experts, skip_wkey=trigger_wkey,
+                                 speculative=False)
         # once enough has been prefetched, judge whether it's worth continuing
         if (self._prefetch_ahead and not self._throttle_decided
                 and self.prefetched >= self._throttle_warmup):
             self._throttle_decided = True
             rescue = self.prefetch_hits / max(1, self.prefetch_hits + self.misses)
             if rescue < self._throttle_min_rescue:
+                # Bandwidth-bound storage: speculation's reads arrive too late
+                # and fan-out's per-expert pool reads lose to the coalesced
+                # serial path — stop both from competing for the bus.
                 self._prefetch_ahead = 0
-                print(f"[stream] prefetch self-disabled: rescue rate {rescue:.0%} < "
-                      f"{self._throttle_min_rescue:.0%} (storage appears bandwidth-bound)")
+                self._fanout = False
+                print(f"[stream] prefetch + fan-out self-disabled: rescue rate "
+                      f"{rescue:.0%} < {self._throttle_min_rescue:.0%} "
+                      f"(storage appears bandwidth-bound)")
         if self._prefetch_ahead:
             for nxt in range(layer_idx + 1, layer_idx + 1 + self._prefetch_ahead):
                 pred = self._last_experts.get(nxt)
@@ -157,7 +184,8 @@ class ExpertCache:
                     self._prefetch_layer(nxt, pred)
         self._last_experts[layer_idx] = experts
 
-    def _prefetch_layer(self, layer_idx: int, predicted: list, skip_wkey=None):
+    def _prefetch_layer(self, layer_idx: int, predicted: list, skip_wkey=None,
+                        speculative: bool = True):
         keys = self._layer_keys.get(layer_idx)
         if not keys or self._pool is None:
             return
@@ -171,8 +199,12 @@ class ExpertCache:
                     if (ck in self._od or ck in self._pinned
                             or ck in self._staging or ck in self._inflight):
                         continue
+                    if not speculative:
+                        # same-layer fan-out: tag so gather accounts the claim
+                        # as a (parallelized) critical-path read, not a rescue
+                        self._fanout_keys.add(ck)
                     self._inflight[ck] = self._pool.submit(
-                        self._prefetch_one, wkey, skey, e
+                        self._prefetch_one, wkey, skey, e, speculative
                     )
 
     def record_usage(self, layer_idx: int, routed) -> None:
@@ -200,7 +232,8 @@ class ExpertCache:
             json.dump(self._trace, f)
         return len(self._trace)
 
-    def _prefetch_one(self, wkey: str, skey: str, e: int):
+    def _prefetch_one(self, wkey: str, skey: str, e: int,
+                      speculative: bool = True):
         # disk-only background work; never touches MLX (built later on main thread)
         try:
             wbuf = self.reader.read_expert_np(wkey, e)   # (np_array, mlx_dtype)
@@ -212,16 +245,26 @@ class ExpertCache:
                 # orphan half a pair (drop the weight but keep its scales).
                 self._staging[(wkey, e)] = (wbuf, sbuf)
                 self._staging_bytes += nb
-                self.bytes_prefetched += nb
-                self.prefetched += 1
+                if speculative:
+                    self.bytes_prefetched += nb
+                    self.prefetched += 1
+                else:
+                    # same-layer fan-out: this token needed these bytes no
+                    # matter what — account them as critical-path reads
+                    self.bytes_read += nb
                 # bound staging: drop oldest (mispredicted) entries FIFO
                 while self._staging_bytes > self._staging_cap and len(self._staging) > 1:
                     _, (wb, sb) = self._staging.popitem(last=False)
                     self._staging_bytes -= (wb[0].nbytes + sb[0].nbytes)
                     self.prefetch_dropped += 1
         except Exception:
+            # Read failed on the pool thread. Drop the in-flight marker so
+            # gather's fallback reloads the expert synchronously, and count
+            # it — a disk error must not present as unexplained slowness.
             with self._lock:
                 self._inflight.pop((wkey, e), None)
+                self._fanout_keys.discard((wkey, e))
+                self.prefetch_errors += 1
 
     # -- loading -------------------------------------------------------
     def _load_coalesced(self, miss_pairs):
@@ -361,10 +404,18 @@ class ExpertCache:
                     wbuf, sbuf = self._staging.pop(ck)
                     self._staging_bytes -= (wbuf[0].nbytes + sbuf[0].nbytes)
                     staged.append((e, wbuf, sbuf))
-                    self.prefetch_hits += 1
+                    if ck in self._fanout_keys:
+                        # same-layer fan-out read: critical-path, just done
+                        # by the pool while earlier projections computed
+                        self._fanout_keys.discard(ck)
+                        self.misses += 1
+                        self.fanout_hits += 1
+                    else:
+                        self.prefetch_hits += 1
                 elif ck in self._inflight:
                     inflight.append((e, self._inflight[ck]))
                 else:
+                    self._fanout_keys.discard(ck)  # evicted from staging unclaimed
                     self.misses += 1
                     miss_pairs.append((wkey, skey, e))
 
@@ -393,13 +444,21 @@ class ExpertCache:
                 fut.result()
             except Exception:
                 # A failed read leaves no staging entry; the miss path
-                # below reloads this expert synchronously.
+                # below reloads this expert synchronously. (_prefetch_one
+                # swallows and counts read errors itself, so this is
+                # defensive only.)
                 pass
             with self._lock:
                 buf = self._staging.pop(ck, None)
+                fan = ck in self._fanout_keys
+                self._fanout_keys.discard(ck)
                 if buf is not None:
                     self._staging_bytes -= (buf[0][0].nbytes + buf[1][0].nbytes)
-                    self.prefetch_hits += 1
+                    if fan:
+                        self.misses += 1
+                        self.fanout_hits += 1
+                    else:
+                        self.prefetch_hits += 1
             if buf is not None:
                 wbuf, sbuf = buf
                 w = mx.array(wbuf[0], dtype=wbuf[1])
@@ -445,19 +504,25 @@ class ExpertCache:
             self._inflight.clear()
 
     def stats(self):
+        # Same-layer fan-out reads count into misses/bytes_read (annotated by
+        # fanout_hits): they are this token's unavoidable disk reads, merely
+        # parallelized — so hit_rate keeps meaning "no same-token disk read"
+        # and stays comparable across models with and without fan-out.
         served = self.hits + self.prefetch_hits   # neither incurred critical-path disk
         tot = served + self.misses
         return {
-            # effective (latency) hit-rate: fraction served without a blocking read
+            # effective (latency) hit-rate: fraction served without a same-token read
             "hit_rate": (served / tot) if tot else 0.0,
             "cache_hit_rate": (self.hits / tot) if tot else 0.0,
             "prefetch_hit_rate": (self.prefetch_hits / tot) if tot else 0.0,
             "hits": self.hits,
             "prefetch_hits": self.prefetch_hits,
+            "fanout_hits": self.fanout_hits,
             "pin_hits": self._pin_hits,
             "misses": self.misses,
             "prefetched": self.prefetched,
             "prefetch_dropped": self.prefetch_dropped,
+            "prefetch_errors": self.prefetch_errors,
             "resident_experts": len(self._od) + len(self._pinned),
             "pinned_experts": len(self._pinned),
             "preload_experts": self.preload_experts,

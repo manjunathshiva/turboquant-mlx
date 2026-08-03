@@ -534,6 +534,8 @@ def _extract_stream_args(argv):
     parser.add_argument("--max-active-experts", type=int, default=4)
     parser.add_argument("--prefetch-workers", type=int, default=8)
     parser.add_argument("--prefetch-ahead", type=int, default=0)
+    parser.add_argument("--no-fanout", dest="fanout", action="store_false",
+                        default=True)
     parser.add_argument("--pin-file", default=None)
     parser.add_argument("--no-hotlist", dest="use_hotlist", action="store_false",
                         default=True)
@@ -564,6 +566,7 @@ def _extract_stream_args(argv):
         use_page_cache=ns.use_page_cache,
         prefetch_workers=ns.prefetch_workers,
         prefetch_ahead=ns.prefetch_ahead,
+        fanout=ns.fanout,
         pin_file=ns.pin_file,
         use_hotlist=ns.use_hotlist,
         wire_memory=ns.wire_memory,

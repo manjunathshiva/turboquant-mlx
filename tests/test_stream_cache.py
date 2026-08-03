@@ -81,6 +81,83 @@ def test_eviction_respects_budget():
     assert cache.cur <= 200 + 48
 
 
+class FailingReader(FakeReader):
+    """FakeReader that raises on selected (key, expert) reads."""
+
+    def __init__(self, fail_keys=(), **kw):
+        super().__init__(**kw)
+        self.fail = set(fail_keys)
+
+    def read_expert_np(self, key: str, expert: int):
+        if (key, expert) in self.fail:
+            raise OSError("injected disk error")
+        return super().read_expert_np(key, expert)
+
+
+def test_fanout_skips_trigger_and_counts_as_critical_path():
+    # Same-layer fan-out must (a) skip the trigger projection — its gather
+    # runs next on the calling thread and keeps the coalesced read path —
+    # and (b) account pool-read claims as misses + fanout_hits, never as
+    # prefetch_hits, so hit_rate keeps meaning "no same-token disk read".
+    cache = ExpertCache(FakeReader(), budget_bytes=10**9, prefetch_workers=4)
+    cache.register_layer(0, [("L0.up.weight", "L0.up.scales"),
+                             ("L0.gate.weight", "L0.gate.scales"),
+                             ("L0.down.weight", "L0.down.scales")])
+    cache.on_layer_start(0, [1, 2], trigger_wkey="L0.up.weight")
+    with cache._lock:
+        assert ("L0.up.weight", 1) not in cache._inflight
+        assert ("L0.up.weight", 1) not in cache._staging
+    cache.gather("L0.up.weight", "L0.up.scales", [1, 2])
+    assert cache.misses == 2 and cache.fanout_hits == 0
+    cache.gather("L0.gate.weight", "L0.gate.scales", [1, 2])
+    cache.gather("L0.down.weight", "L0.down.scales", [1, 2])
+    assert cache.misses == 6
+    assert cache.fanout_hits == 4
+    assert cache.prefetch_hits == 0
+    assert cache.bytes_prefetched == 0 and cache.bytes_read > 0
+    assert cache.stats()["hit_rate"] == 0.0
+
+
+def test_no_fanout_flag_disables_layer_fanout():
+    cache = ExpertCache(FakeReader(), budget_bytes=10**9,
+                        prefetch_workers=4, fanout=False)
+    cache.register_layer(0, [("a.weight", "a.scales"),
+                             ("b.weight", "b.scales")])
+    cache.on_layer_start(0, [0, 1], trigger_wkey="a.weight")
+    with cache._lock:
+        assert not cache._inflight and not cache._staging
+    cache.gather("b.weight", "b.scales", [0, 1])
+    assert cache.fanout_hits == 0 and cache.misses == 2
+
+
+def test_throttle_disables_fanout_too():
+    # When the saturation throttle judges storage bandwidth-bound it must
+    # stop BOTH speculation and the same-layer fan-out from competing for
+    # the bus (fan-out has no other kill switch besides --no-fanout).
+    cache = ExpertCache(FakeReader(), budget_bytes=10**9,
+                        prefetch_workers=2, prefetch_ahead=1)
+    cache.prefetched = cache._throttle_warmup
+    cache.misses = 1000  # rescue rate 0%
+    cache.on_layer_start(0, [], trigger_wkey=None)
+    assert cache._prefetch_ahead == 0
+    assert cache._fanout is False
+
+
+def test_background_read_error_counted_and_recovered():
+    # A failed background read must be visible (prefetch_errors) and must
+    # fall back to a synchronous load with correct content, not hang or lose
+    # the expert.
+    rd = FailingReader(fail_keys=[("b.weight", 2)])
+    cache = ExpertCache(rd, budget_bytes=10**9, prefetch_workers=1)
+    cache._prefetch_one("b.weight", "b.scales", 2)  # direct: deterministic
+    assert cache.prefetch_errors == 1
+    assert cache.stats()["prefetch_errors"] == 1
+    rd.fail.clear()
+    w, _ = cache.gather("b.weight", "b.scales", [2])
+    assert cache.misses == 1
+    assert int(np.array(w)[0][0]) == 20  # expert 2 -> 2*10 at column 0
+
+
 def test_prefetch_staging_hit():
     # A staged expert (weight+scales held under one key) is served from the
     # staging area without a critical-path miss, and its content matches a

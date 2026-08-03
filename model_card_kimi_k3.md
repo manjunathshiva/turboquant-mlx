@@ -54,6 +54,8 @@ Measured on a **Mac Studio (M-series, 512 GB)** with `iogpu.wired_limit_mb=51200
 
 The `--max-active-experts 8` lever (native top-16 → top-8) roughly halves per-token expert I/O for a ~2× decode speed-up at no observed quality cost. Prefetch parallelism matters: 16 workers is the knee — at 8 the reads serialize and lose ~30%, past 16 there's no further gain (decode is no longer disk-bandwidth-bound).
 
+> **Stats-accounting note:** the hit-rate and critical-read columns above were measured when same-layer fan-out reads (pool reads for experts the router has already chosen this token) were counted as prefetch hits. Current builds count those reads as critical-path (`misses`/`bytes_read`, annotated by `fanout_hits` in `stats()`), the same meaning hit-rate has for every other streaming model in this repo — so the same runs now report a lower hit-rate and non-zero critical GB. The tok/s numbers are unaffected; only the accounting changed. Fan-out itself is on by default and can be disabled with `--no-fanout` (recommended on bandwidth-bound external storage, where the coalesced serial read path wins).
+
 ### Recommended invocation
 
 ```bash
