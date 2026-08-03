@@ -31,6 +31,7 @@ from mlx_lm.utils import (
 )
 
 import turboquant_mlx.compat  # noqa: F401 — registers upstream patches on import
+from turboquant_mlx.compat import is_local_kimi_k3
 from turboquant_mlx.config import TurboQuantConfig
 from turboquant_mlx.quantize_model import turboquant_quantize
 
@@ -144,9 +145,11 @@ def convert_streaming(
     print(f"[INFO] Loading model from {hf_path} (lazy)")
     model, tokenizer, config = load(
         hf_path,
-        # Custom tokenizer classes (e.g. Kimi K3's tokenization_kimi.py) need
-        # the local code opt-in; local files were already inspected by the user.
-        tokenizer_config={"trust_remote_code": True},
+        # K3's custom tokenizer class (tokenization_kimi.py) needs the code
+        # opt-in; gated on a local kimi_k3 config so no other model gets it.
+        tokenizer_config=(
+            {"trust_remote_code": True} if is_local_kimi_k3(hf_path) else {}
+        ),
         return_config=True,
         lazy=True,
     )

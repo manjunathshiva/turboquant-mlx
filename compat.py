@@ -183,20 +183,40 @@ def _patch_compressed_tensors_mxfp4():
     _utils._tq_mxfp4_patched = True
 
 
-def _patch_local_tokenizer_trust():
-    """Opt local-directory models into their own tokenizer code.
-
-    Kimi K3 (and other repos with a custom tokenizer class, e.g.
-    ``tokenization_kimi.py``) requires ``trust_remote_code=True`` to load —
-    without it transformers either raises or blocks on an interactive prompt,
-    which kills ``turboquant-generate``/``turboquant-serve`` on any converted
-    K3 model. For a *local directory* the "remote" code is already sitting on
-    the user's disk next to the weights they chose to run, so defaulting the
-    flag on is the same trust decision they already made. Hub repo ids are
-    left untouched.
-    """
+def is_local_kimi_k3(model_path) -> bool:
+    """True iff ``model_path`` is a local directory whose ``config.json``
+    declares ``model_type: "kimi_k3"`` — the gate for auto-trusting the K3
+    tokenizer code that ships inside the checkpoint directory."""
+    import json
     from pathlib import Path
 
+    p = Path(model_path)
+    if not p.is_dir():
+        return False
+    try:
+        with open(p / "config.json") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return cfg.get("model_type") == "kimi_k3"
+
+
+def _patch_kimi_k3_tokenizer_trust():
+    """Opt local Kimi K3 directories into their own tokenizer code.
+
+    K3 repos ship a custom tokenizer class (``tokenization_kimi.py``) that
+    requires ``trust_remote_code=True`` to load — without it transformers
+    either raises or blocks on an interactive prompt, which kills
+    ``turboquant-generate``/``turboquant-serve`` on any converted K3 model.
+
+    The flag is injected only when the model path is a *local directory*
+    whose ``config.json`` says ``model_type: "kimi_k3"`` — never as a
+    blanket local-directory default. Downloading tokenizer code and
+    executing it are separate trust decisions (``hf download`` writes
+    ``tokenization_*.py`` without running it), so every other model keeps
+    transformers' explicit opt-in behavior, and an explicit
+    ``trust_remote_code`` from the caller always wins.
+    """
     import mlx_lm.tokenizer_utils as _tok
 
     if getattr(_tok, "_tq_local_trust_patched", False):
@@ -206,7 +226,7 @@ def _patch_local_tokenizer_trust():
 
     def load(model_path, tokenizer_config_extra=None, eos_token_ids=None):
         extra = dict(tokenizer_config_extra or {})
-        if "trust_remote_code" not in extra and Path(model_path).is_dir():
+        if "trust_remote_code" not in extra and is_local_kimi_k3(model_path):
             extra["trust_remote_code"] = True
         return orig(model_path, extra, eos_token_ids=eos_token_ids)
 
@@ -267,5 +287,5 @@ _patch_nemotron_h_pattern()
 _register_laguna_model()
 _register_kimi_k3_model()
 _patch_compressed_tensors_mxfp4()
-_patch_local_tokenizer_trust()
+_patch_kimi_k3_tokenizer_trust()
 _patch_glm47_tool_name_strip()
