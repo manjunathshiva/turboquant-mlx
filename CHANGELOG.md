@@ -6,6 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-04
+
+Two new architectures, both of which mlx-lm has no module for. **Kimi K3**
+(2.8T MoE) is the largest model TurboQuant-MLX has run — an external
+contribution from [@anders94](https://github.com/anders94), streaming 931 GB of
+experts from disk on a single 512 GB Mac Studio. **Sarvam MoE** converts and
+runs, but ships with a documented negative result rather than a published
+build. Same-layer read fan-out arrives as an opt-in `--fanout`.
+
 ### Added
 
 - **Kimi K3 (2.8T MoE) support**, contributed by
@@ -51,13 +60,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rescue rate, and fan-out has none to judge (its claims are accounted as
   misses by design). Measure it on your own storage.
 
-### Fixed
-
-- **The streaming layer trigger fired on the wrong projection.** It fired on
-  `_PROJS[0]` (`gate_proj`), but `SwitchGLU.__call__` executes `up_proj` first,
-  so every layer's prefetch was kicked off one projection late. Applies to
-  every streaming model, not just K3. Caught by @anders94.
-
 ### Changed
 
 - **Always-on MoE plumbing is now exempt from the `--mlp-bits` tier.**
@@ -98,6 +100,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The streaming layer trigger fired on the wrong projection.** It fired on
+  `_PROJS[0]` (`gate_proj`), but `SwitchGLU.__call__` executes `up_proj` first,
+  so every layer's prefetch was kicked off one projection late. Applies to
+  every streaming model, not just K3. Caught by @anders94.
 - **`turboquant-plan --model ~/typo` says the directory is missing.** Anything
   that was not a directory was handed to the Hub, so a mistyped path came back
   as "Repo id must be in the form 'repo_name' or 'namespace/repo_name'" — which

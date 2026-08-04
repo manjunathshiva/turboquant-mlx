@@ -133,11 +133,12 @@ cd turboquant-mlx
 pip install -e .
 ```
 
-For evaluation utilities (perplexity benchmarking), also install the optional
-dependencies:
+Optional extras:
 
 ```bash
-pip install "turboquant-mlx-full[eval]"
+pip install "turboquant-mlx-full[eval]"   # perplexity benchmarking (datasets, transformers)
+pip install "turboquant-mlx-full[vlm]"    # multimodal / diffusion models via mlx-vlm
+pip install "turboquant-mlx-full[kimi]"   # Kimi K3's tiktoken-based tokenizer
 ```
 
 ## Quick Start
@@ -1281,6 +1282,77 @@ run, and breaks agentic tool-calling).
 
 ---
 
+### Kimi K3 (2.8T MoE) — the largest model TurboQuant-MLX has run
+
+[Kimi K3](https://huggingface.co/moonshotai/Kimi-K3) is Moonshot's 2.8-trillion-
+parameter MoE: 93 layers (69 KDA linear-attention + 24 gated-NoPE MLA with
+q-LoRA), 896 routed experts at top-16 plus 2 shared, and a **Stable LatentMoE**
+where experts run in a 3584-d latent behind shared per-layer down/up projections
+while the router reads the full 7168-d stream. `mlx-lm` has no native `kimi_k3`,
+so the MLX port ships here — contributed by
+[@anders94](https://github.com/anders94) in
+[#71](https://github.com/manjunathshiva/turboquant-mlx/pull/71), verified at
+≤ 2.7e-6 fp32 forward parity against `transformers`.
+
+The published source is 1.56 TB of mxfp4 compressed-tensors, which TurboQuant
+reads directly (bit-exact unpack, no fp16 round-trip):
+
+```bash
+pip install "turboquant-mlx-full[kimi]"   # tiktoken + blobfile for K3's tokenizer
+
+python -m turboquant_mlx.convert --hf-path ./Kimi-K3 \
+    --mlx-path ./Kimi-K3-tq3a-tqTe-down4-g64 \
+    --bits 3 -g 64 --ternary-experts --expert-down-bits 4 --streaming
+```
+
+**This model does not fit resident on any Mac you can buy, at any bit width.**
+2.8T parameters want roughly a 768 GB machine; the cheapest recipe here is
+617 GB and 512 GB is the current ceiling. It runs by **streaming experts from
+disk** — each token pages in only its router-selected experts:
+
+```bash
+sudo sysctl iogpu.wired_limit_mb=512000      # 512 GB box; resets on reboot
+
+python -m turboquant_mlx.stream.stream_generate \
+    --model ./Kimi-K3-tq3a-tqTe-down4-g64 \
+    --prompt "Explain how Rayleigh scattering works." \
+    --max-tokens 500 --cache-budget-gb auto \
+    --max-active-experts 8 --prefetch-workers 16 --fanout
+```
+
+Measured on a **Mac Studio (512 GB)** with a 506 GB expert cache and the shipped
+hot-expert list: **2.3 tok/s** at `--max-active-experts 8`, **1.2 tok/s** at
+native top-16. Full numbers and the recipe breakdown are in
+[`model_card_kimi_k3.md`](model_card_kimi_k3.md).
+
+> `--fanout` matches how those numbers were measured — it parallelizes each
+> layer's expert reads across the pool instead of reading them serially. It is
+> off by default because it trades away the coalesced serial read path, which
+> wins on bandwidth-bound external storage. It does not self-disable, so measure
+> it on your own disk.
+>
+> `--max-active-experts 8` halves K3's native top-16. That is a 2× cut, the ratio
+> validated elsewhere in this repo — but K-reduction changes which experts run
+> and has broken agentic tool-calling on other models. Use
+> `--max-active-experts 0` for native routing whenever quality matters.
+
+### Sarvam MoE
+
+[sarvam-30b](https://huggingface.co/sarvamai/sarvam-30b) and later models of that
+type convert and run through the `sarvam_moe` port shipped here (mlx-lm has no
+native module). The port is verified against the fp32 reference three ways: full
+key/shape coverage of all 7122 source tensors, layer-1 parity at 5.4e-7, and
+whole-model logit agreement.
+
+> **No quantized sarvam build is published, deliberately.** At 4-bit this model
+> degenerates on long generations — measured as a rate over repeated trials at
+> temp 0.7 / top_p 0.9, **TurboQuant 4-bit degenerated 8/15 (53%) and mlx-lm
+> affine 4-bit 15/15 (100%)**. TurboQuant is clearly the better of the two and
+> neither is good enough to ship. Use a higher bit width and validate long-form
+> output on your own prompts before relying on it.
+
+---
+
 ## How It Works
 
 TurboQuant is a two-stage, **calibration-free** quantization pipeline:
@@ -1323,6 +1395,8 @@ Options:
 | Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
 | Poolside Laguna (SWA + global attn, per-head gating) | `laguna` | Yes (256 experts, top-8/top-10) | Tested (XS.2 33B at 3-bit; S-2.1 118B at ternary 1.58-bit — both convert + generate + Opencode agentic pass; expert streaming wired for both). Custom arch — MLX port + loader shipped here (mlx-lm has no native `laguna`); logit-parity 2e-7 vs transformers |
 | DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
+| Kimi K3 (KDA linear-attn + gated-NoPE MLA, Stable LatentMoE) | `kimi_k3` | Yes (896 experts, top-16 + 2 shared) | Tested (2.8T: mxfp4 source → 931 GB `tq3a-tqTe-down4-g64`, streams from disk on a 512 GB Mac Studio; does **not** fit resident on any Mac). Custom arch — MLX port shipped here (mlx-lm has no native `kimi_k3`); fp32 forward parity ≤ 2.7e-6 vs transformers. Needs `[kimi]` extra |
+| Sarvam MoE (Megatron-style fused QKV, DeepSeek-V3 routing) | `sarvam_moe` | Yes | Port tested against fp32 (7122/7122 tensors, layer-1 parity 5.4e-7). Custom arch — MLX port shipped here. **No quantized build published**: 4-bit degenerates on long generations (53% of trials; mlx-lm affine 4-bit 100%) |
 | DiffusionGemma (block-diffusion MoE, via **mlx-vlm**) | `diffusion_gemma` | Yes (128 experts, top-8) | Tested (26B-A4B: convert + block-diffusion sampler, coherent at 3-bit — [HF](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)). **Experimental**: decode is much slower than native 4-bit until a batched codebook gather-GEMM kernel lands |
 
 ### mlx-vlm architectures (multimodal / diffusion)
