@@ -6,7 +6,52 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Kimi K3 (2.8T MoE) support**, contributed by
+  [@anders94](https://github.com/anders94) in
+  [#71](https://github.com/manjunathshiva/turboquant-mlx/pull/71). MLX model
+  port (69 KDA linear-attention + 24 gated-NoPE MLA layers, LatentMoE experts
+  behind shared down/up projections), an mxfp4 compressed-tensors conversion
+  path, planner and expert-streaming coverage, and a model card for a 931 GB
+  `tq3a-tqTe-down4-g64` build that streams from disk on a 512 GB Mac Studio.
+  Verified against the HF reference at ≤ 2.7e-6 fp32 forward parity, with a
+  bit-exact mxfp4 unpack check.
+
+- **`--fanout` on `stream_generate` and `serve`** — same-layer read fan-out:
+  once a layer's router has chosen its experts, the other projections' misses
+  are submitted to the read pool at layer start so their reads overlap the
+  earlier projections' compute. Off by default. It trades away the coalesced
+  serial read path, which is a measured win on a fast internal SSD with spare
+  bandwidth and a loss on bandwidth-bound external storage, and unlike
+  `--prefetch-ahead` it has no self-disable: the saturation throttle judges by
+  rescue rate, and fan-out has none to judge (its claims are accounted as
+  misses by design). Measure it on your own storage.
+
+### Fixed
+
+- **The streaming layer trigger fired on the wrong projection.** It fired on
+  `_PROJS[0]` (`gate_proj`), but `SwitchGLU.__call__` executes `up_proj` first,
+  so every layer's prefetch was kicked off one projection late. Applies to
+  every streaming model, not just K3. Caught by @anders94.
+
 ### Changed
+
+- **Always-on MoE plumbing is now exempt from the `--mlp-bits` tier.**
+  `bits_for_path` returns the base `--bits` for `shared_experts` and
+  latent-MoE `routed_expert_*` projections: unlike a routed expert (1 of many,
+  chosen top-k), these run on every token, so dropping them into a sub-2-bit
+  expert tier costs quality across the whole stream for a rounding-error size
+  saving. Affects new hybrid conversions of models with shared experts
+  (DeepSeek family); existing checkpoints are unaffected, since bit width is
+  recovered from the on-disk codebook rather than re-derived.
+
+- **`trust_remote_code` is auto-injected only for local Kimi K3 checkpoints.**
+  The new `compat.is_local_kimi_k3()` gate requires a local *directory* whose
+  `config.json` declares `model_type: "kimi_k3"`; hub repo ids, other local
+  models, and missing or corrupt configs are left to transformers' explicit
+  opt-in, and a `trust_remote_code` passed by the caller always wins.
+  Downloading tokenizer code and executing it are separate trust decisions.
 
 - **`--cache-budget-gb auto` is no longer double-conservative, and `plan` now
   predicts what the loader actually does.** The two computed the budget
