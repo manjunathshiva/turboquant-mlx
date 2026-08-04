@@ -133,11 +133,12 @@ cd turboquant-mlx
 pip install -e .
 ```
 
-For evaluation utilities (perplexity benchmarking), also install the optional
-dependencies:
+Optional extras:
 
 ```bash
-pip install "turboquant-mlx-full[eval]"
+pip install "turboquant-mlx-full[eval]"   # perplexity benchmarking (datasets, transformers)
+pip install "turboquant-mlx-full[vlm]"    # multimodal / diffusion models via mlx-vlm
+pip install "turboquant-mlx-full[kimi]"   # Kimi K3's tiktoken-based tokenizer
 ```
 
 ## Quick Start
