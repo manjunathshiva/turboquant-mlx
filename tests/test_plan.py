@@ -494,3 +494,55 @@ class TestPartialCache:
         pl = build_plan(p, wired_gb=10.5, ram_gb=16)
         assert any("UNDER-counted" in w for w in pl["warnings"])
         assert "UNDER-counted" in render(pl)
+
+
+K3_TEXT = {
+    # Kimi K3 geometry (moonshotai/Kimi-K3 text_config), the KDA/MLA dialect:
+    # layer lists are 1-based; only the 24 MLA layers hold growing KV, and MLA
+    # caches the shared latent + rope key once per layer, not per head.
+    "num_hidden_layers": 93,
+    "num_attention_heads": 96,
+    "num_key_value_heads": 96,
+    "kv_lora_rank": 512,
+    "qk_rope_head_dim": 64,
+    "head_dim": None,
+    "hidden_size": 7168,
+    "linear_attn_config": {
+        "num_heads": 96,
+        "head_dim": 128,
+        "short_conv_kernel_size": 4,
+        "kda_layers": [i for i in range(1, 94) if i % 4 != 0 and i != 93],
+        "full_attn_layers": [i for i in range(4, 93, 4)] + [93],
+    },
+}
+
+
+class TestKDAHybrid:
+    def test_kda_hybrid_reads_full_attn_layers(self):
+        cfg = {"text_config": K3_TEXT}
+        n_full, n_slide, n_layers, note = _attention_layers(cfg)
+        assert (n_full, n_slide, n_layers) == (24, 0, 93)
+        assert "KDA" in note
+
+    def test_mla_latent_kv_geometry(self):
+        """The dense formula (2*96 heads*128 dim) over-predicts K3's KV ~160x:
+        MLA caches (kv_lora_rank + qk_rope_head_dim) once per layer."""
+        cfg = {"text_config": K3_TEXT}
+        context = 65536
+        total, per_tok, note = kv_bytes(cfg, context)
+        lac = K3_TEXT["linear_attn_config"]
+        fixed_kda = len(lac["kda_layers"]) * (
+            96 * 128 * 128 * 4.0 + 3 * 3 * 96 * 128 * 2.0
+        )
+        grow = 24 * context * (512 + 64) * 2.0
+        assert total == pytest.approx(grow + fixed_kda)
+        assert "MLA latent" in note and "KDA state" in note
+        # sanity: a 1M-token context stays under 30 GB of KV
+        total_1m, *_ = kv_bytes(cfg, 1_048_576)
+        assert total_1m < 30 * GB
+
+    def test_kda_fixed_state_is_charged_at_zero_context(self):
+        """The recurrent state exists before the first token; never report 0."""
+        cfg = {"text_config": K3_TEXT}
+        total, *_ = kv_bytes(cfg, 1)
+        assert total > 0.4 * GB

@@ -9,6 +9,7 @@ Handles the full pipeline:
 
 import gc
 import math
+from functools import partial
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -55,8 +56,13 @@ def _should_quantize(path: str, module: nn.Module) -> bool:
         return False
     if not isinstance(module, nn.Linear):
         return False
-    _, input_dims = module.weight.shape
+    output_dims, input_dims = module.weight.shape
     if input_dims < 32:
+        return False
+    if output_dims < 32:
+        # Scalar/score projections (e.g. Kimi K3's AttnRes *_res_proj rows,
+        # shape (1, hidden)) — quantization noise on a softmax score vector
+        # is all pain for ~0 bytes saved.
         return False
     return True
 
@@ -68,23 +74,29 @@ def _is_switch_linear(module: nn.Module) -> bool:
     return isinstance(module, (SwitchLinear, QuantizedSwitchLinear))
 
 
+def _dequantize_switch_expert(module, e: int) -> mx.array:
+    """Dequantize a single expert of a QuantizedSwitchLinear to float."""
+    return mx.dequantize(
+        module.weight[e],
+        module.scales[e],
+        module.biases[e] if module.biases is not None else None,
+        module.group_size,
+        module.bits,
+        mode=module.mode,
+    )
+
+
 def _dequantize_switch_linear(module) -> mx.array:
     """Dequantize a QuantizedSwitchLinear back to float weights.
 
     Returns (num_experts, output_dims, input_dims) float16 tensor.
+    NOTE: materializes ALL experts — prefer the per-expert path
+    (``partial(_dequantize_switch_expert, module)``) for large MoEs.
     """
-    experts = []
-    for e in range(module.num_experts):
-        w_deq = mx.dequantize(
-            module.weight[e],
-            module.scales[e],
-            module.biases[e] if module.biases is not None else None,
-            module.group_size,
-            module.bits,
-            mode=module.mode,
-        )
-        experts.append(w_deq)
-    return mx.stack(experts, axis=0)
+    return mx.stack(
+        [_dequantize_switch_expert(module, e) for e in range(module.num_experts)],
+        axis=0,
+    )
 
 
 def _is_router(path: str) -> bool:
@@ -181,9 +193,11 @@ def turboquant_quantize(
                 num_experts = module.num_experts
                 output_dims = module.output_dims
                 has_bias = "bias" in module
-                print(f"[INFO] Dequantizing QuantizedSwitchLinear {path} ({num_experts} experts, {module.mode} {module.bits}b -> float)")
-                float_weight = _dequantize_switch_linear(module)
-                mx.eval(float_weight)
+                print(f"[INFO] Dequantizing QuantizedSwitchLinear {path} ({num_experts} experts, {module.mode} {module.bits}b -> float, per-expert)")
+                # Lazy per-expert dequant: materializing the whole stacked
+                # float tensor costs ~30 GB on an 896-expert layer; one
+                # expert at a time stays flat (~0.4 GB).
+                float_weight = partial(_dequantize_switch_expert, module)
             else:
                 float_weight = module.weight
                 input_dims = module.weight.shape[-1]
@@ -231,6 +245,7 @@ def turboquant_quantize(
                 float_weight=float_weight,
                 bias=bias_tensor,
                 ternary=use_ternary,
+                weight_shape=(num_experts, output_dims, input_dims),
             )
             # Replace immediately and release all references
             mx.eval(pq_switch.parameters())

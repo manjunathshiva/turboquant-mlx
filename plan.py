@@ -162,11 +162,24 @@ def _attention_layers(cfg: dict) -> tuple:
       attention layer and `M`/`E` are Mamba/MLP. Only 8 of its 88 layers are
       attention; reading `num_hidden_layers` instead over-predicts KV by 11x.
     * `full_attention_interval` — older hybrids.
+    * `linear_attn_config.full_attn_layers` — Kimi Linear / Kimi K3 KDA
+      hybrids: an explicit (1-based) list of the full-attention (MLA) layers;
+      everything else is KDA linear attention with a fixed-size recurrent
+      state. K3: 24 of 93 layers — assuming dense over-predicts KV ~4x even
+      before MLA's latent geometry (see kv_bytes) is accounted for.
 
     Everything else is assumed dense full-attention.
     """
     c = _text_config(cfg)
     n_layers = c.get("num_hidden_layers")
+
+    lac = c.get("linear_attn_config")
+    if isinstance(lac, dict) and isinstance(lac.get("full_attn_layers"), list):
+        n_full = len(lac["full_attn_layers"])
+        n_kda = len(lac.get("kda_layers") or [])
+        n_total = n_layers or (n_full + n_kda)
+        return n_full, 0, n_total, \
+            f"KDA hybrid: {n_full}/{n_total} full-attention (MLA)"
 
     types = c.get("layer_types")
     if isinstance(types, list) and types:
@@ -214,9 +227,32 @@ def kv_bytes(cfg: dict, context: int, kv_bits: int | None = None) -> tuple:
         # TurboQuant KV-quant stores kv_bits/16 of the fp16 payload (+ scales,
         # which are small); --kv-bits 8 halving KV matches the measured 35B.
         itemsize = 2.0 * (kv_bits / 16.0)
-    per_layer_token = 2 * n_kv * head_dim * itemsize
+
+    kv_rank = _pos_int(c.get("kv_lora_rank"), 0)
+    if kv_rank:
+        # MLA caches the shared latent (kv_lora_rank) + the MQA rope key —
+        # once per layer, NOT per head, and K/V share it. Kimi K3: 576 dims
+        # ≈ 1.2 KB/token/layer vs the 48 KB the dense formula would charge.
+        rope_dim = _pos_int(c.get("qk_rope_head_dim"), 0)
+        per_layer_token = (kv_rank + rope_dim) * itemsize
+        note += ", MLA latent KV"
+    else:
+        per_layer_token = 2 * n_kv * head_dim * itemsize
 
     total = n_full * context * per_layer_token
+
+    lac = c.get("linear_attn_config")
+    if isinstance(lac, dict) and isinstance(lac.get("kda_layers"), list):
+        # KDA layers hold a fixed-size recurrent state (heads × head_dim² fp32
+        # + short-conv tails) that doesn't grow with context but isn't free:
+        # ~450 MB on K3. Charge it as a constant.
+        kh = _pos_int(lac.get("num_heads"), n_kv or 0)
+        kd = _pos_int(lac.get("head_dim"), head_dim or 0)
+        ck = _pos_int(lac.get("short_conv_kernel_size"), 4)
+        total += len(lac["kda_layers"]) * (
+            kh * kd * kd * 4.0 + 3 * (ck - 1) * kh * kd * 2.0
+        )
+        note += f" + fixed KDA state ({len(lac['kda_layers'])} layers)"
     if n_slide:
         # an absent/zero/negative/garbage window means "not windowed" -> full
         # context. Never let it shrink the total: that under-predicts, and
@@ -437,7 +473,8 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
                 "expert_down_bits"),
             "n_layers": n_layers,
             "n_experts": c.get("num_experts"),
-            "experts_per_tok": c.get("num_experts_per_tok"),
+            "experts_per_tok": c.get("num_experts_per_tok")
+            or c.get("num_experts_per_token"),  # Kimi K3 spelling
             "is_moe": is_moe,
             **fp,
         },
