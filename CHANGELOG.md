@@ -18,6 +18,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Verified against the HF reference at ≤ 2.7e-6 fp32 forward parity, with a
   bit-exact mxfp4 unpack check.
 
+- **`sarvam_moe` architecture support** (Sarvam AI's sarvam-30b and any later
+  model of that type). mlx-lm has no module for it, so `compat.py` aliases our
+  port in the same way it already does for Laguna. The port is verified three
+  ways against the fp32 reference: full key/shape coverage of all 7122 source
+  tensors, layer-1 output parity at 5.4e-7, and whole-model logit agreement.
+
+  Two details of this architecture are easy to get wrong and are pinned by
+  tests. The checkpoint is Megatron-style, so attention arrives as a single
+  fused `attention.query_key_value` matrix — the reference views it as
+  `(heads + 2*kv_heads, head_dim)` and splits on the head axis, which makes a
+  plain row split exact, but a Q/K/V mis-slice still produces a model that
+  loads and generates plausible-looking text. Routing is DeepSeek-V3-style:
+  sigmoid scores with `expert_bias` added **for selection only**, so the bias
+  must not leak into the combine weights. The router is deliberately not an
+  `nn.Linear`, which keeps the quantizer's module walk from quantizing it.
+
+  Note on quantization: at 4-bit this model degenerates on long generations,
+  measured as a rate over repeated trials at temp 0.7 / top_p 0.9 —
+  **TurboQuant 4-bit degenerated 8/15 (53%), mlx-lm affine 4-bit 15/15
+  (100%)**. TurboQuant is clearly the better of the two, and neither is good
+  enough to ship, so no quantized sarvam build is published. Use a higher bit
+  width and validate long-form output on your own prompts.
+
 - **`--fanout` on `stream_generate` and `serve`** — same-layer read fan-out:
   once a layer's router has chosen its experts, the other projections' misses
   are submitted to the read pool at layer start so their reads overlap the
