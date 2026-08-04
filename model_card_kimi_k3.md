@@ -54,7 +54,7 @@ Measured on a **Mac Studio (M-series, 512 GB)** with `iogpu.wired_limit_mb=51200
 
 The `--max-active-experts 8` lever (native top-16 → top-8) roughly halves per-token expert I/O for a ~2× decode speed-up at no observed quality cost. Prefetch parallelism matters: 16 workers is the knee — at 8 the reads serialize and lose ~30%, past 16 there's no further gain (decode is no longer disk-bandwidth-bound).
 
-> **Stats-accounting note:** the hit-rate and critical-read columns above were measured when same-layer fan-out reads (pool reads for experts the router has already chosen this token) were counted as prefetch hits. Current builds count those reads as critical-path (`misses`/`bytes_read`, annotated by `fanout_hits` in `stats()`), the same meaning hit-rate has for every other streaming model in this repo — so the same runs now report a lower hit-rate and non-zero critical GB. The tok/s numbers are unaffected; only the accounting changed. Fan-out itself is on by default and can be disabled with `--no-fanout` (recommended on bandwidth-bound external storage, where the coalesced serial read path wins).
+> **Stats-accounting note:** the hit-rate and critical-read columns above were measured when same-layer fan-out reads (pool reads for experts the router has already chosen this token) were counted as prefetch hits. Current builds count those reads as critical-path (`misses`/`bytes_read`, annotated by `fanout_hits` in `stats()`), the same meaning hit-rate has for every other streaming model in this repo — so the same runs now report a lower hit-rate and non-zero critical GB. The tok/s numbers are unaffected; only the accounting changed. Fan-out itself is **opt-in (`--fanout`)**: it was measured on this machine's internal SSD, where there is spare bandwidth to parallelize into, and it trades away the coalesced serial read path that wins on bandwidth-bound external storage. The numbers above were measured with fan-out on.
 
 ### Recommended invocation
 
@@ -66,8 +66,10 @@ python3 -m turboquant_mlx.stream.stream_generate \
     --model ./Kimi-K3-tq3a-tqTe-down4-g64 \
     --prompt "Explain how Rayleigh scattering works." \
     --max-tokens 500 --cache-budget-gb auto \
-    --max-active-experts 8 --prefetch-workers 16
+    --max-active-experts 8 --prefetch-workers 16 --fanout
 ```
+
+`--fanout` matches how the numbers above were measured. Drop it if the model lives on external storage — there the coalesced serial read path wins, and fan-out does not self-disable.
 
 Kimi K3 uses a tiktoken-based tokenizer — install `tiktoken` and `blobfile` alongside TurboQuant-MLX.
 

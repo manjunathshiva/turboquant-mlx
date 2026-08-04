@@ -51,14 +51,22 @@ class ExpertCache:
     and ``eval`` stay on the calling thread, so the produced tensors are
     bit-identical to the serial path.
 
-    **Same-layer fan-out** (``fanout=True``, needs the pool): once a layer's
-    router has chosen its experts, the other projections' misses are submitted
-    to the pool immediately so their reads overlap the earlier projections'
-    compute. These are critical-path reads (counted in ``misses`` /
-    ``bytes_read`` and annotated by ``fanout_hits``), not speculation. Fan-out
-    trades the coalesced serial read path for parallelism — a win on internal
-    SSD, a likely loss on bandwidth-bound external storage, so it can be
-    disabled (``--no-fanout``) and the saturation throttle also turns it off.
+    **Same-layer fan-out** (``fanout=True``, needs the pool, **off by
+    default**): once a layer's router has chosen its experts, the other
+    projections' misses are submitted to the pool immediately so their reads
+    overlap the earlier projections' compute. These are critical-path reads
+    (counted in ``misses`` / ``bytes_read`` and annotated by ``fanout_hits``),
+    not speculation.
+
+    Fan-out trades the coalesced serial read path for parallelism — measured a
+    win on a 512 GB Mac Studio's internal SSD, expected a loss on
+    bandwidth-bound external storage, where the bus is already the wall. It is
+    opt-in (``--fanout``) for the same reason ``--prefetch-ahead`` is: there is
+    no in-process signal that can tell the two regimes apart. The saturation
+    throttle below *can* clear it, but only once speculation is also running —
+    the throttle judges by rescue rate, and fan-out has no rescue rate to
+    judge (its claims are accounted as misses by design). Do not rely on the
+    throttle as fan-out's kill switch; ``--fanout`` is a per-machine choice.
 
     **Speculative prefetch** (``prefetch_ahead > 0``): when a layer starts we
     kick off *background* disk reads for the experts the previous token used at
@@ -72,7 +80,7 @@ class ExpertCache:
     """
 
     def __init__(self, reader, budget_bytes: int, *, prefetch_workers: int = 8,
-                 prefetch_ahead: int = 1, fanout: bool = True,
+                 prefetch_ahead: int = 1, fanout: bool = False,
                  staging_budget_bytes: int = 1_500_000_000,
                  pin_keys=None, usage_profile=None):
         self.reader = reader
@@ -97,9 +105,9 @@ class ExpertCache:
                       if self._workers > 1 else None)
         # same-layer fan-out: submit a layer's known expert misses to the pool
         # at layer start so each projection's gather awaits parallel reads
-        # instead of reading serially. Needs the pool; --no-fanout turns it off
-        # (bandwidth-bound storage prefers the coalesced serial path), and the
-        # saturation throttle below turns it off too.
+        # instead of reading serially. Needs the pool, and is opt-in (--fanout):
+        # bandwidth-bound storage prefers the coalesced serial path, and nothing
+        # in-process can tell the two regimes apart (see the class docstring).
         self._fanout = bool(fanout) and self._pool is not None
         self._fanout_keys: set = set()   # cks submitted by fan-out (not speculation)
         # speculative-prefetch state (needs the pool to run in background)
@@ -145,7 +153,8 @@ class ExpertCache:
     def on_layer_start(self, layer_idx: int, experts: list, trigger_wkey=None):
         """Called once per layer per token (from the trigger projection).
 
-        First fans out THIS layer's known expert set across the read pool for
+        First, when fan-out is enabled (``--fanout``, off by default), fans out
+        THIS layer's known expert set across the read pool for
         the layer's *other* projections (``trigger_wkey`` — the projection this
         call came from — is skipped: its gather runs next on the calling thread
         and keeps the coalesced-run read path): gather awaits in-flight reads
@@ -171,11 +180,15 @@ class ExpertCache:
             if rescue < self._throttle_min_rescue:
                 # Bandwidth-bound storage: speculation's reads arrive too late
                 # and fan-out's per-expert pool reads lose to the coalesced
-                # serial path — stop both from competing for the bus.
+                # serial path — stop both from competing for the bus. Note this
+                # branch only runs while speculation is on: with --fanout alone
+                # there is no rescue rate to judge, which is why fan-out is
+                # opt-in rather than on-with-a-safety-net.
                 self._prefetch_ahead = 0
-                self._fanout = False
-                print(f"[stream] prefetch + fan-out self-disabled: rescue rate "
-                      f"{rescue:.0%} < {self._throttle_min_rescue:.0%} "
+                was_fanout, self._fanout = self._fanout, False
+                print(f"[stream] prefetch{' + fan-out' if was_fanout else ''} "
+                      f"self-disabled: rescue rate {rescue:.0%} < "
+                      f"{self._throttle_min_rescue:.0%} "
                       f"(storage appears bandwidth-bound)")
         if self._prefetch_ahead:
             for nxt in range(layer_idx + 1, layer_idx + 1 + self._prefetch_ahead):

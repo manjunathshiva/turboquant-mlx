@@ -534,8 +534,7 @@ def _extract_stream_args(argv):
     parser.add_argument("--max-active-experts", type=int, default=4)
     parser.add_argument("--prefetch-workers", type=int, default=8)
     parser.add_argument("--prefetch-ahead", type=int, default=0)
-    parser.add_argument("--no-fanout", dest="fanout", action="store_false",
-                        default=True)
+    parser.add_argument("--fanout", action="store_true", default=False)
     parser.add_argument("--pin-file", default=None)
     parser.add_argument("--no-hotlist", dest="use_hotlist", action="store_false",
                         default=True)

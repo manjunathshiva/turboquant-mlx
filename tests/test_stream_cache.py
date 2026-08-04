@@ -99,7 +99,8 @@ def test_fanout_skips_trigger_and_counts_as_critical_path():
     # runs next on the calling thread and keeps the coalesced read path —
     # and (b) account pool-read claims as misses + fanout_hits, never as
     # prefetch_hits, so hit_rate keeps meaning "no same-token disk read".
-    cache = ExpertCache(FakeReader(), budget_bytes=10**9, prefetch_workers=4)
+    cache = ExpertCache(FakeReader(), budget_bytes=10**9, prefetch_workers=4,
+                        fanout=True)
     cache.register_layer(0, [("L0.up.weight", "L0.up.scales"),
                              ("L0.gate.weight", "L0.gate.scales"),
                              ("L0.down.weight", "L0.down.scales")])
@@ -118,29 +119,49 @@ def test_fanout_skips_trigger_and_counts_as_critical_path():
     assert cache.stats()["hit_rate"] == 0.0
 
 
-def test_no_fanout_flag_disables_layer_fanout():
-    cache = ExpertCache(FakeReader(), budget_bytes=10**9,
-                        prefetch_workers=4, fanout=False)
-    cache.register_layer(0, [("a.weight", "a.scales"),
-                             ("b.weight", "b.scales")])
-    cache.on_layer_start(0, [0, 1], trigger_wkey="a.weight")
-    with cache._lock:
-        assert not cache._inflight and not cache._staging
-    cache.gather("b.weight", "b.scales", [0, 1])
-    assert cache.fanout_hits == 0 and cache.misses == 2
+def test_fanout_is_off_unless_asked_for():
+    # Fan-out is opt-in (--fanout): it trades the coalesced serial read path
+    # for parallelism, and nothing in-process can tell a fast internal SSD
+    # from a saturated external bus. Default must be the pre-fan-out path.
+    for kwargs in ({}, {"fanout": False}):
+        cache = ExpertCache(FakeReader(), budget_bytes=10**9,
+                            prefetch_workers=4, **kwargs)
+        assert cache._fanout is False
+        cache.register_layer(0, [("a.weight", "a.scales"),
+                                 ("b.weight", "b.scales")])
+        cache.on_layer_start(0, [0, 1], trigger_wkey="a.weight")
+        with cache._lock:
+            assert not cache._inflight and not cache._staging
+        cache.gather("b.weight", "b.scales", [0, 1])
+        assert cache.fanout_hits == 0 and cache.misses == 2
 
 
 def test_throttle_disables_fanout_too():
     # When the saturation throttle judges storage bandwidth-bound it must
-    # stop BOTH speculation and the same-layer fan-out from competing for
-    # the bus (fan-out has no other kill switch besides --no-fanout).
+    # stop BOTH speculation and the same-layer fan-out from competing for the
+    # bus. This only reaches fan-out while speculation is also running: the
+    # throttle judges by rescue rate and fan-out has none, which is exactly
+    # why fan-out is opt-in rather than on-with-a-safety-net.
     cache = ExpertCache(FakeReader(), budget_bytes=10**9,
-                        prefetch_workers=2, prefetch_ahead=1)
+                        prefetch_workers=2, prefetch_ahead=1, fanout=True)
     cache.prefetched = cache._throttle_warmup
     cache.misses = 1000  # rescue rate 0%
     cache.on_layer_start(0, [], trigger_wkey=None)
     assert cache._prefetch_ahead == 0
     assert cache._fanout is False
+
+
+def test_throttle_cannot_reach_fanout_without_speculation():
+    # Documents the gap the opt-in default exists for: with --prefetch-ahead 0
+    # (the default) the throttle block never evaluates, so an enabled fan-out
+    # runs for the whole session no matter how bandwidth-bound the storage is.
+    cache = ExpertCache(FakeReader(), budget_bytes=10**9,
+                        prefetch_workers=2, prefetch_ahead=0, fanout=True)
+    cache.misses = 10**6  # as bandwidth-bound as it gets
+    cache.register_layer(0, [("a.weight", "a.scales")])
+    cache.on_layer_start(0, [0], trigger_wkey=None)
+    assert cache._fanout is True
+    assert cache._throttle_decided is False
 
 
 def test_background_read_error_counted_and_recovered():
