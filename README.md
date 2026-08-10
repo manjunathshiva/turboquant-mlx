@@ -41,6 +41,9 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | Laguna-S-2.1 (118B) | [Affine 4-bit](https://huggingface.co/mlx-community/Laguna-S-2.1-4bit) | 4 | — | ~64 GB | *Exceeds Metal's ~56 GB working set — won't load* |
 | **[Laguna-S-2.1 (118B, ternary experts)](https://huggingface.co/manjunathshiva/Laguna-S-2.1-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **~27 GB** | **~12.5 tok/s · fully resident on 64 GB with ~25 GB spare · Opencode pass** |
 | **Kimi K3 (2.8T MoE)** | **TQ 3-attn / ternary experts / 4-bit expert-down, gs=64** | **1.6/3/4 mix** | **—** | **931 GB** | **2.3 tok/s (Mac Studio 512 GB, top-8) · 1.2 tok/s at native top-16 · streams experts from disk** |
+| Muse Glimmer (30B dense VLM) | [Affine 4-bit](https://huggingface.co/mlx-community/Muse-Glimmer-30B-4bit) | 4 | 4.3798 | 19.88 GiB | 26.1 tok/s · leaves embedding + vision tower at bf16 |
+| **Muse Glimmer (30B dense VLM)** | **TurboQuant, gs=64** | **4** | **4.3315** | **14.88 GiB** | **9.4 tok/s · better PPL than affine 4-bit in 25% less space** |
+| **Muse Glimmer (30B dense VLM)** | **TurboQuant, gs=64** | **3** | **5.0454** | **12.53 GiB** | **10.9 tok/s · smallest coherent build** |
 
 ## Key Results — KV Cache Compression
 
@@ -140,6 +143,11 @@ pip install "turboquant-mlx-full[eval]"   # perplexity benchmarking (datasets, t
 pip install "turboquant-mlx-full[vlm]"    # multimodal / diffusion models via mlx-vlm
 pip install "turboquant-mlx-full[kimi]"   # Kimi K3's tiktoken-based tokenizer
 ```
+
+> **Muse Glimmer needs an unreleased mlx-vlm.** Its MLX model classes live in
+> [Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838), which is
+> not merged and not on PyPI, so `[vlm]` alone will not load it. See
+> [Muse Glimmer](#muse-glimmer-30b-dense-vlm) for the pinned install.
 
 ## Quick Start
 
@@ -1351,6 +1359,71 @@ whole-model logit agreement.
 > neither is good enough to ship. Use a higher bit width and validate long-form
 > output on your own prompts before relying on it.
 
+### Muse Glimmer (30B dense VLM)
+
+[Muse Glimmer](https://huggingface.co/meta-models/Muse-Glimmer-30B) is Meta
+Superintelligence Lab's 29.8B-parameter dense multimodal model, built for
+agentic work on consumer hardware. Architecturally it is Gemma2-style sandwich
+norms plus **gated attention** (a sigmoid output gate alongside Q/K/V), a 3:1
+sliding(2048)/full attention pattern with **NoPE on the full-attention layers**,
+final logit softcapping, and a 1.9B ViT-G/14 perception encoder.
+
+**This is the one case where TurboQuant beats MLX's affine quantizer outright
+on quality**, at matched bit width — and does it while quantizing more of the
+model:
+
+| build | size | PPL ↓ | decode | notes |
+|---|---|---|---|---|
+| `mlx-community/Muse-Glimmer-30B-4bit` | 19.88 GiB | 4.3798 | 26.1 tok/s | embedding + vision tower stay bf16 |
+| **TurboQuant `tq4-g64`** | **14.88 GiB** | **4.3315** | 9.4 tok/s | everything quantized |
+| TurboQuant `tq3-g64` | 12.53 GiB | 5.0454 | 10.9 tok/s | smallest coherent build |
+
+800-token fixed-passage perplexity, greedy, M4 Max. The affine build is 2.4–2.8×
+faster to decode — the usual codebook-vs-affine trade. **Do not read the tq3 row
+as a TurboQuant deficiency**: the gap there is the 3-bit step, which is exactly
+what the matched-4-bit control isolates.
+
+Most of the affine build's extra 5 GB is the embedding and the vision tower,
+which mlx-vlm declines to quantize. `embed_tokens` is a `NormedEmbedding` whose
+inherited `to_quantized` would silently drop its RMS normalization; TurboQuant
+quantizes it through a norm-preserving subclass instead.
+
+```bash
+# The MLX model classes are not released yet — pin the PR.
+uv venv --python 3.12 .venv-mg
+VIRTUAL_ENV=$PWD/.venv-mg uv pip install \
+    "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@c7416a4bcb"
+VIRTUAL_ENV=$PWD/.venv-mg uv pip install "turboquant-mlx-full[vlm]"
+# mlx-vlm's Muse Glimmer needs transformers 5.15, above our mlx-lm pin:
+VIRTUAL_ENV=$PWD/.venv-mg uv pip install --no-deps "transformers==5.15.0"
+
+python -m turboquant_mlx.convert_vlm \
+  --hf-path meta-models/Muse-Glimmer-30B \
+  --mlx-path ./Muse-Glimmer-30B-tq4-g64 \
+  --bits 4 --group-size 64 --quantize-extras --extras-bits 4
+
+python -m turboquant_mlx.generate_vlm \
+  --model ./Muse-Glimmer-30B-tq4-g64 --prompt "..." --max-tokens 256
+```
+
+`--extras-bits 4` matters here: the embedding and vision tower are 3.3B
+parameters between them, ~3.9 GB at the 8-bit default versus ~1.8 GB at 4-bit.
+
+> **16 GB Macs: not yet.** `tq3` needs ~14.8 GB peak against a ~14.4 GB
+> raisable ceiling — close, but over. The obvious next step down does **not**
+> work: a `tq3a-tq2e-g64` hybrid fits at 9.63 GiB but measures **PPL 7.5547**
+> (vs 5.0454) and visibly corrupts text, the same way 2-bit experts failed on
+> 32-expert GPT-OSS-20B. 2-bit on a *dense* MLP is not a usable tier. Note that
+> Meta's own smallest Apple Silicon artifact is 17.95 GB, text-only and without
+> the drafter, so nothing official fits a 16 GB machine either.
+
+Muse Glimmer also ships a [DFlash block-diffusion
+drafter](https://huggingface.co/meta-models/Muse-Glimmer-30B-assistant) (5.11 GB,
+5 layers, block 16, tapping target layers {1,13,25,37,49}). It is not wired up
+here. Worth noting it is a *dense* target, which is the regime where DFlash
+speculation paid off in earlier testing rather than the MoE regime where it
+did not.
+
 ---
 
 ## How It Works
@@ -1397,6 +1470,7 @@ Options:
 | DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
 | Kimi K3 (KDA linear-attn + gated-NoPE MLA, Stable LatentMoE) | `kimi_k3` | Yes (896 experts, top-16 + 2 shared) | Tested (2.8T: mxfp4 source → 931 GB `tq3a-tqTe-down4-g64`, streams from disk on a 512 GB Mac Studio; does **not** fit resident on any Mac). Custom arch — MLX port shipped here (mlx-lm has no native `kimi_k3`); fp32 forward parity ≤ 2.7e-6 vs transformers. Needs `[kimi]` extra |
 | Sarvam MoE (Megatron-style fused QKV, DeepSeek-V3 routing) | `sarvam_moe` | Yes | Port tested against fp32 (7122/7122 tensors, layer-1 parity 5.4e-7). Custom arch — MLX port shipped here. **No quantized build published**: 4-bit degenerates on long generations (53% of trials; mlx-lm affine 4-bit 100%) |
+| Muse Glimmer (dense VLM: gated attention, sandwich norms, sliding/NoPE mix, ViT-G/14) | `muse_glimmer` | No | Tested (29.8B: `tq4-g64` beats affine 4-bit on PPL — 4.3315 vs 4.3798 — in 25% less space; `tq3-g64` = 12.53 GiB). Structural match verified against the checkpoint, 1436/1436 tensors. Model classes come from the **unmerged** [mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838) — see [Muse Glimmer](#muse-glimmer-30b-dense-vlm) for the pinned install |
 | DiffusionGemma (block-diffusion MoE, via **mlx-vlm**) | `diffusion_gemma` | Yes (128 experts, top-8) | Tested (26B-A4B: convert + block-diffusion sampler, coherent at 3-bit — [HF](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)). **Experimental**: decode is much slower than native 4-bit until a batched codebook gather-GEMM kernel lands |
 
 ### mlx-vlm architectures (multimodal / diffusion)

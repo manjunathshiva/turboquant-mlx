@@ -38,9 +38,85 @@ def _require_mlx_vlm():
 # and the dense per-layer MLP at >= 8-bit (quant-sensitive); the
 # self-conditioning MLP feeds every denoise step and is tiny. ".mlp." matches
 # only the dense MLP — experts live under ".experts." as SwitchLinear.
+# muse_glimmer: `lm_head` is deliberately left to the affine-extras path rather
+# than polar-quantized. PolarQuantizedLinear has a fused Metal kernel only for
+# the single-vector decode path; ANY batch > 1 (i.e. all of prefill) falls back
+# to polar_dequantize_weight + GEMM, which materializes the weight through
+# several full-size intermediates — measured at ~14 bytes per parameter.
+# lm_head is 202048x6656 = 1.345B params, by far the largest matrix in the
+# model, so that fallback costs **~19 GB of transient peak** during any prefill,
+# versus ~1.9 GB for the largest MLP projection. Polar only buys 0.21 GB of
+# steady-state size over 4-bit affine here. MLX's affine path has a fused
+# quantized matmul for batched input and materializes nothing.
+# Net: -19 GB prefill peak for +0.21 GB on disk.
 VLM_SKIP_PATTERNS: dict[str, tuple[str, ...]] = {
     "diffusion_gemma": ("router", "self_conditioning", "embed_vision", ".mlp."),
+    "muse_glimmer": ("lm_head",),
 }
+
+
+def _patch_muse_glimmer_normed_embedding() -> None:
+    """Teach Muse Glimmer's ``NormedEmbedding`` how to quantize itself.
+
+    Muse Glimmer's ``embed_tokens`` is an ``nn.Embedding`` subclass that
+    RMS-normalizes the row it looks up. It inherits ``nn.Embedding.to_quantized``,
+    which returns a *plain* ``QuantizedEmbedding`` — silently dropping the
+    normalization and corrupting every activation downstream. mlx-vlm's own
+    ``quant_predicate`` avoids that by refusing to quantize the module at all,
+    which leaves 1.35B params (2.7 GB at bf16) uncompressed and is most of the
+    reason a "4-bit" Muse Glimmer weighs 21.4 GB.
+
+    Returning a norm-preserving subclass instead keeps the maths bit-for-bit
+    identical and makes the module compressible. Both ``convert_vlm`` and
+    ``load_turboquant_vlm`` reach the embedding through ``nn.quantize``, so
+    patching ``to_quantized`` fixes the write and read sides at once.
+
+    Idempotent, and a no-op if mlx-vlm has no muse_glimmer module.
+    """
+    try:
+        from mlx_vlm.models.muse_glimmer import language as _mg
+    except ImportError:
+        return
+    if getattr(_mg.NormedEmbedding, "_tq_patched", False):
+        return
+
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    class QuantizedNormedEmbedding(nn.QuantizedEmbedding):
+        """QuantizedEmbedding that keeps NormedEmbedding's RMS normalization."""
+
+        def __call__(self, x):
+            return self.embed_norm(super().__call__(x))
+
+    def to_quantized(self, group_size=None, bits=None, mode="affine",
+                     quantize_input=False):
+        if quantize_input:
+            raise ValueError("Quantized input is not supported.")
+        num_embeddings, dims = self.weight.shape
+        ql = QuantizedNormedEmbedding(num_embeddings, dims, group_size, bits,
+                                      mode=mode)
+        ql.weight, ql.scales, *biases = mx.quantize(
+            self.weight, group_size, bits, mode=mode
+        )
+        ql.biases = biases[0] if biases else None
+        # Paramless RMSNormNoScale — carries only `eps`, so sharing is safe.
+        ql.embed_norm = self.embed_norm
+        return ql
+
+    _mg.NormedEmbedding.to_quantized = to_quantized
+    _mg.QuantizedNormedEmbedding = QuantizedNormedEmbedding
+    _mg.NormedEmbedding._tq_patched = True
+
+
+def patch_vlm_arch(arch: str) -> None:
+    """Apply per-architecture fixes needed before quantizing OR loading.
+
+    Must run on both sides: the converter decides what ``nn.quantize`` produces,
+    and the loader has to rebuild the very same classes.
+    """
+    if arch in ("muse_glimmer", "muse_glimmer_text"):
+        _patch_muse_glimmer_normed_embedding()
 
 
 def vlm_should_quantize(arch: str, base_predicate):
@@ -88,6 +164,8 @@ def load_turboquant_vlm(model_path, lazy=False):
         raise ValueError(f"{model_path} is not a TurboQuant checkpoint")
     tq_config = TurboQuantConfig.from_dict(tq_dict)
     config.pop("quantization_config", None)
+
+    patch_vlm_arch(config.get("model_type", "").lower())
 
     model_class, _ = get_model_and_args(config=config)
     config.setdefault("text_config", config.pop("llm_config", {}))

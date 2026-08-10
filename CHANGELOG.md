@@ -6,6 +6,79 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Muse Glimmer (Meta, dense 30B VLM) support** — `muse_glimmer`, a
+  29.8B-parameter dense multimodal model with Gemma2-style sandwich norms,
+  gated attention, a 3:1 sliding(2048)/full attention pattern with NoPE on the
+  full-attention layers, and a 1.9B ViT-G/14 perception encoder. Converts
+  through `convert_vlm`.
+
+  At **matched 4-bit**, `tq4-g64` measures **PPL 4.3315 in 14.88 GiB** against
+  `mlx-community/Muse-Glimmer-30B-4bit`'s **4.3798 in 19.88 GiB** — better
+  quality in 25% less space, while quantizing the embedding and vision tower
+  that the affine build leaves at bf16. Decode is 2.4–2.8× slower, the usual
+  codebook-vs-affine trade.
+
+  The MLX model classes come from
+  [Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838), which is
+  **not merged and not on PyPI** — see the README for the pinned install.
+
+- **`polar_qmm`: fused dense batched GEMM on packed weights.**
+  `PolarQuantizedLinear` previously had a fused kernel only for single-vector
+  decode; every batch > 1, meaning all of prefill, fell back to
+  `polar_dequantize_weight` + GEMM and materialized the weight at ~14 bytes per
+  parameter. The new kernel decodes in registers and writes nothing, and is
+  dispatched for `2 <= n_tokens <= 256` with `output_dims >= 512` — bounds set
+  by measurement (9.3× faster than dequant+GEMM at N=2–8 on wide MLP
+  projections, 0.41× at N=2048 where MLX's tuned GEMM wins, 0.5–0.8× when the
+  output is too narrow to fill the GPU). `TURBOQUANT_QMM_MAX_TOKENS` overrides
+  the token bound for memory-constrained machines.
+
+  On Muse-Glimmer-30B tq3, prefill peak over resident weights at 64 tokens
+  drops **3.86 GB → 0.62 GB** and prefill runs **23.1 → 73.9 tok/s**. Benefits
+  every dense TurboQuant model, not just this one. Perplexity is unchanged
+  (5.0454 dequant vs 5.0452 fused — fp32 accumulate vs fp16 GEMM).
+
+- Rotation-fusion config entries may be **parent-qualified**
+  (`"self_attn.gate_proj"`), and qualified entries are matched before bare leaf
+  names. Muse Glimmer is the first architecture with the same leaf name under
+  two parents in one block — a sigmoid attention output gate and a SwiGLU gate,
+  reading different norms — which the old leaf-only match would have fused into
+  the wrong norm.
+
+- `convert_vlm` gained `--extras-bits` / `--extras-group-size`.
+  `--quantize-extras` was hard-wired to 8-bit; on models where the extras are a
+  large share (Muse Glimmer's embedding + vision tower are 3.3B params) that is
+  the difference between ~3.9 GB and ~1.8 GB.
+
+### Fixed
+
+- **`turboquant-plan` under-estimated prefill workspace**, which on small
+  machines turned a will-not-run into a false `RESIDENT` verdict. It modelled
+  attention scratch only, missing (1) the `lm_head` output for the chunk —
+  often the largest term on a big-vocab model, 0.77 GB at 202048 vocab × 2048
+  tokens — and (2) polar weight dequantization for dense TurboQuant layers
+  above the fused kernel's token bound. On Muse-Glimmer-30B at 16K context the
+  estimate goes 2.15 GB → 6.70 GB, against a measured 6.39 GB. **Existing
+  plan output for other models will change**: every model gains the logits
+  term, and dense TurboQuant models gain the dequantization term. MoE expert
+  dequantization is still not modelled.
+
+- `muse_glimmer`'s `lm_head` is kept out of the polar path. At
+  202048 × 6656 = 1.345B parameters it is 10× the largest MLP matrix, so the
+  dequantize-on-prefill fallback cost **18.84 GB of transient peak alone** to
+  save 0.21 GB on disk. Routing it to affine cut prefill peak over weights
+  from 20.06 GB to 3.86 GB for +0.16 GiB, with prefill slightly faster.
+
+- Muse Glimmer's `embed_tokens` is a `NormedEmbedding` — an `nn.Embedding`
+  subclass that RMS-normalizes the row it looks up. It inherits
+  `to_quantized`, which returns a plain `QuantizedEmbedding` and **silently
+  drops the normalization**. It now quantizes through a norm-preserving
+  subclass on both the convert and load sides. (mlx-vlm sidesteps this by
+  refusing to quantize the module at all, which is most of why a "4-bit" Muse
+  Glimmer weighs 19.88 GiB.)
+
 ## [0.19.0] - 2026-08-04
 
 Two new architectures, both of which mlx-lm has no module for. **Kimi K3**
