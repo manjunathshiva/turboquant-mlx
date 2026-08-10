@@ -55,6 +55,9 @@ _ITEMSIZE = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
              "F8_E5M2": 1, "I8": 1, "U8": 1, "BOOL": 1}
 
 _GB = 1e9
+# Machines are advertised in GiB ("16 GB Mac" -> hw.memsize 17.18e9), so user
+# input describing a machine is scaled by this, not by _GB.
+_GIB = float(1 << 30)
 
 # What we do NOT model line-by-line: the (capped) MLX buffer-reuse cache,
 # per-layer activations, and allocator fragmentation. Calibrated, not guessed:
@@ -353,10 +356,17 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
     working set while the caller has assumed someone else's RAM is how you tell
     a 16 GB mini that a 30 GB model fits — so an assumed --ram-gb estimates the
     cap from that RAM instead of querying Metal here.
+
+    `--ram-gb` is interpreted as the size the machine is SOLD as, i.e. GiB:
+    `--ram-gb 16` means a 16 GB Mac, whose `hw.memsize` is 17.18e9 bytes, not
+    16e9. Treating it as decimal understated a real 16 GB mini's ceiling by
+    7.4% (14.40 vs 15.46 GB usable) and produced a false WILL-NOT-RUN for a
+    model that then ran on that exact machine. Nobody types their RAM in
+    decimal gigabytes.
     """
     out = {"assumed": bool(wired_gb or ram_gb), "wss_estimated": False}
     if ram_gb:
-        out["ram_bytes"] = ram_gb * _GB
+        out["ram_bytes"] = ram_gb * _GIB
     else:
         try:
             out["ram_bytes"] = float(subprocess.check_output(
@@ -771,7 +781,8 @@ def _common_args(ap):
     ap.add_argument("--wired-gb", type=float, default=None,
                     help="assume this Metal working set (plan for another Mac)")
     ap.add_argument("--ram-gb", type=float, default=None,
-                    help="assume this much system RAM")
+                    help="assume this much system RAM, as the machine is sold "
+                         "(--ram-gb 16 = a 16 GB Mac = 17.18e9 bytes)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
 
 
