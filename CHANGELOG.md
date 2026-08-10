@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`turboquant-plan --ram-gb` read its argument as decimal GB**, but a machine
+  sold as "16 GB" reports `hw.memsize` = 17.18e9 bytes. Planning for a 16 GB
+  Mac therefore understated its ceiling by 7.4% (14.40 vs 15.46 GB usable) and
+  returned `WILL NOT RUN` for Muse-Glimmer-30B `tq3-g64` — a model that then
+  ran **resident** on exactly that machine (Mac16,10, macOS 26.5.2,
+  `iogpu.wired_limit_mb=14336`), peaking at 14.21 GiB at 5068 tokens of prompt.
+  `--ram-gb` is now interpreted as the size the machine is sold as, which is
+  what anyone typing it means, and `--ram-gb 16` reproduces the real mini's
+  numbers exactly. Verdicts for machines planned this way become slightly more
+  optimistic; verdicts read from the local device are unchanged.
+
+  Fixing this exposed a second, opposite error the first was masking: with the
+  corrected ceiling, the chooser now picks `--prefill-step-size 512` for a MoE
+  at 21K context where the field measured 128 as necessary. The likely cause is
+  that MoE expert dequantization is still not modelled, so the undersized-RAM
+  bug had been compensating for it. The field test has been narrowed to the
+  part that was actually measured (2048 OOMs) with the open question recorded
+  in place; **re-measuring the real step ceiling for a MoE at 21K is
+  outstanding.**
+
 ## [0.20.0] - 2026-08-10
 
 Meta's **Muse Glimmer** (dense 30B VLM) lands, and with it the first case where

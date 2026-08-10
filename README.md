@@ -1409,13 +1409,25 @@ python -m turboquant_mlx.generate_vlm \
 `--extras-bits 4` matters here: the embedding and vision tower are 3.3B
 parameters between them, ~3.9 GB at the 8-bit default versus ~1.8 GB at 4-bit.
 
-> **16 GB Macs: not yet.** `tq3` needs ~14.8 GB peak against a ~14.4 GB
-> raisable ceiling — close, but over. The obvious next step down does **not**
-> work: a `tq3a-tq2e-g64` hybrid fits at 9.63 GiB but measures **PPL 7.5547**
-> (vs 5.0454) and visibly corrupts text, the same way 2-bit experts failed on
-> 32-expert GPT-OSS-20B. 2-bit on a *dense* MLP is not a usable tier. Note that
+> **16 GB Mac mini: yes — measured.** `tq3-g64` runs **resident** on a
+> Mac16,10 (macOS 26.5.2) with `iogpu.wired_limit_mb=14336`, at every prompt
+> length tried up to 5068 tokens:
+>
+> | prompt | peak | prefill | decode |
+> |---|---|---|---|
+> | 268 tok | 13.44 GiB | 19.9 tok/s | 3.70 tok/s |
+> | 868 tok | 14.13 GiB | 20.2 tok/s | 3.44 tok/s |
+> | 2068 tok | 13.91 GiB | 17.0 tok/s | 3.38 tok/s |
+> | 5068 tok | 14.21 GiB | 6.0 tok/s | 3.56 tok/s |
+>
 > Meta's own smallest Apple Silicon artifact is 17.95 GB, text-only and without
-> the drafter, so nothing official fits a 16 GB machine either.
+> the drafter — larger than the machine's whole RAM. Two caveats: headroom at
+> 5068 tokens is **0.20 GB**, and prefill collapses past ~2000 tokens (20 → 6
+> tok/s) while decode stays flat, so long prompts are batch work. The smaller
+> alternative does **not** work — a `tq3a-tq2e-g64` hybrid fits at 9.63 GiB but
+> measures **PPL 7.5547** (vs 5.0454) and visibly corrupts text, the same way
+> 2-bit experts failed on 32-expert GPT-OSS-20B. 2-bit on a *dense* MLP is not
+> a usable tier.
 
 Muse Glimmer also ships a [DFlash block-diffusion
 drafter](https://huggingface.co/meta-models/Muse-Glimmer-30B-assistant) (5.11 GB,
