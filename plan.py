@@ -263,15 +263,66 @@ def kv_bytes(cfg: dict, context: int, kv_bits: int | None = None) -> tuple:
     return total, (total / context if context else 0.0), note
 
 
-def prefill_workspace_bytes(cfg: dict, context: int, step: int) -> float:
-    """Transient attention scratch for one prefill chunk (ESTIMATE).
+# Dequantizing a packed polar weight for the batched path costs ~14 bytes per
+# parameter transiently — unpack_indices -> dequantize_scalar -> scale multiply,
+# each a full-size intermediate. Measured on an M4 Max, and consistent across
+# matrices two orders of magnitude apart in size (a 132.9M-param MLP projection
+# cost 1.87 GB; a 1.345B-param lm_head cost 18.84 GB). Roughly two projections
+# are live at once as MLX walks a layer: one full decoder layer measured 3.85 GB
+# against a largest-projection cost of 1.87 GB.
+_POLAR_DEQUANT_BYTES_PER_PARAM = 14.0
+_POLAR_LIVE_PROJECTIONS = 2.0
 
-    Scales with chunk size AND context — which is why a long agent turn can OOM
-    at a chunk size that was fine when the conversation was short.
+# PolarQuantizedLinear routes batches this size or smaller to the fused
+# polar_qmm kernel, which materializes nothing. Keep in sync with
+# layers/polar_linear.py:_QMM_MAX_TOKENS.
+_QMM_MAX_TOKENS = 256
+
+
+def _largest_projection_params(cfg: dict) -> float:
+    """Parameter count of the widest dense projection in one decoder layer."""
+    c = _text_config(cfg)
+    hidden = _pos_int(c.get("hidden_size"), 0)
+    inter = _pos_int(c.get("intermediate_size"), 0)
+    heads = _pos_int(c.get("num_attention_heads"), 0)
+    head_dim = _pos_int(c.get("head_dim"), hidden // heads if heads else 0)
+    return float(max(hidden * inter, hidden * heads * head_dim, 0))
+
+
+def prefill_workspace_bytes(cfg: dict, context: int, step: int,
+                            quant: dict | None = None,
+                            is_moe: bool = False) -> float:
+    """Transient memory for one prefill chunk (ESTIMATE). Three terms:
+
+    1. Attention scratch — scales with chunk size AND context, which is why a
+       long agent turn can OOM at a chunk size that was fine when the
+       conversation was short.
+    2. The lm_head output for the whole chunk. Easy to forget and often the
+       largest term on a big-vocab model: 202048 vocab x 2048 tokens = 0.77 GB.
+    3. Weight dequantization, for TurboQuant DENSE layers only, and only above
+       the fused kernel's token bound. This one is a step function, not a
+       gradient: it appears in full the moment the chunk exceeds
+       _QMM_MAX_TOKENS.
+
+    MoE expert dequantization is NOT modelled — SwitchLinear has its own
+    dequant-all fallback with different residency, so MoE estimates here remain
+    attention + logits only.
     """
     c = _text_config(cfg)
-    heads = c.get("num_attention_heads") or 16
-    return float(step) * float(context) * float(heads) * 2.0
+    heads = _pos_int(c.get("num_attention_heads"), 16)
+    attn = float(step) * float(context) * float(heads) * 2.0
+
+    vocab = _pos_int(c.get("vocab_size"), _pos_int(cfg.get("vocab_size"), 0))
+    logits = float(step) * float(vocab) * 2.0
+
+    dequant = 0.0
+    if (quant and quant.get("mode") == "turboquant" and not is_moe
+            and step > _QMM_MAX_TOKENS):
+        dequant = (_largest_projection_params(cfg)
+                   * _POLAR_DEQUANT_BYTES_PER_PARAM
+                   * _POLAR_LIVE_PROJECTIONS)
+
+    return attn + logits + dequant
 
 
 # --------------------------------------------------------------------------
@@ -386,7 +437,9 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         # capped it, and activations/fragmentation live here too. Same 2 GB the
         # auto-guards reserve.
         return (fp["total_bytes"] + kv_total
-                + prefill_workspace_bytes(cfg, context, s) + _RESERVE_BYTES)
+                + prefill_workspace_bytes(cfg, context, s,
+                                          cfg.get("quantization"), is_moe)
+                + _RESERVE_BYTES)
 
     # Largest chunk whose projection keeps real headroom under the (possibly
     # raised) ceiling. The 0.95 is deliberate: a chunk size chosen to *just* fit
@@ -402,7 +455,8 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     if chosen is None:
         chosen = steps[-1]
     peak = peak_at(chosen)
-    workspace = prefill_workspace_bytes(cfg, context, chosen)
+    workspace = prefill_workspace_bytes(cfg, context, chosen,
+                                        cfg.get("quantization"), is_moe)
 
     # ---- verdict -------------------------------------------------------
     needs_bump = False
@@ -443,7 +497,7 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
                      f"here, peaking near {peak_bytes / _GB:.1f} GB)")
     if chosen != 2048:
         flags.append(f"--prefill-step-size {chosen}   (the default 2048 needs "
-                     f"{_gb(prefill_workspace_bytes(cfg, context, 2048))} of "
+                     f"{_gb(prefill_workspace_bytes(cfg, context, 2048, cfg.get('quantization'), is_moe))} of "
                      f"transient workspace at this context)")
     if kv_bits:
         flags.append(f"--kv-bits {kv_bits}")
