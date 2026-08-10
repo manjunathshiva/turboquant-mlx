@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-08-10
+
+A planner correctness fix and the field data behind it. `turboquant-plan`
+told a 16 GB Mac it could not run a model that then ran **resident** on that
+exact machine — a units bug in `--ram-gb`. Also corrects the documented
+Muse Glimmer install order, which silently produced a broken environment.
+
 ### Fixed
 
 - **`turboquant-plan --ram-gb` read its argument as decimal GB**, but a machine
@@ -27,6 +34,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   part that was actually measured (2048 OOMs) with the open question recorded
   in place; **re-measuring the real step ceiling for a MoE at 21K is
   outstanding.**
+
+- **The documented Muse Glimmer install order was broken.** It installed the
+  pinned `mlx-vlm` from git *first* and `turboquant-mlx-full[vlm]` second — but
+  `[vlm]` depends on `mlx-vlm>=0.6.3`, so the resolver replaced the git build
+  with a PyPI one. Measured in clean venvs: the documented order yields
+  mlx-vlm **0.6.4** and `ImportError: cannot import name 'muse_glimmer'`; the
+  corrected order yields 0.6.11 and imports fine. Now documented as PyPI first,
+  pinned overrides last, with `--force-reinstall` (the PyPI build already
+  satisfies the constraint, so uv would skip the git one) and `--no-deps` (stops
+  it re-resolving transformers back below 5.15). README and both model cards
+  updated.
+
+### Added
+
+- Field validation for **Muse-Glimmer-30B `tq3-g64` on a 16 GB Mac mini**
+  (Mac16,10, macOS 26.5.2, `iogpu.wired_limit_mb=14336`): runs resident at
+  every prompt length tried up to 5068 tokens, peaking at 14.21 GiB with
+  0.20 GB of headroom, decode flat at ~3.5 tok/s. Prefill degrades from
+  20 tok/s at 868 tokens to 6.0 at 5068 — memory pressure during prefill, not
+  the kernel — so ~2000 tokens is the practical interactive limit. Meta's own
+  smallest Apple Silicon artifact is 17.95 GB, text-only, which does not fit
+  that machine at all.
 
 ## [0.20.0] - 2026-08-10
 
