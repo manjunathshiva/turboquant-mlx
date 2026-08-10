@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-10
+
+Meta's **Muse Glimmer** (dense 30B VLM) lands, and with it the first case where
+TurboQuant beats MLX's affine quantizer on quality *and* size at matched bit
+width — PPL 4.3315 in 14.88 GiB against 4.3798 in 19.88 GiB. Alongside it,
+**`polar_qmm`** closes a long-standing hole in the kernel set: dense prefill no
+longer materializes dequantized weights, which cuts prefill peak memory for
+*every* dense TurboQuant model. `turboquant-plan` gains two prefill terms it was
+missing, which changes its output for existing models.
+
 ### Added
 
 - **Muse Glimmer (Meta, dense 30B VLM) support** — `muse_glimmer`, a
