@@ -90,6 +90,34 @@ def test_gated_attention_takes_the_attention_bit_tier():
     assert cfg.bits_for_path(f"{_L0}.mlp.down_proj") == 2
 
 
+def test_lm_head_is_kept_out_of_the_polar_path():
+    """lm_head must fall to affine, not PolarQuantizedLinear.
+
+    PolarQuantizedLinear only has a fused kernel for single-vector decode; any
+    batch > 1 dequantizes the weight through several full-size intermediates
+    (~14 bytes/param measured). At 202048x6656 = 1.345B params that is ~19 GB of
+    transient peak on every prefill, to save 0.21 GB on disk. Measured end to
+    end: prefill peak over weights fell 20.06 GB -> 3.86 GB when lm_head moved
+    to affine.
+    """
+    from turboquant_mlx.integration.vlm import VLM_SKIP_PATTERNS
+
+    assert "lm_head" in VLM_SKIP_PATTERNS["muse_glimmer"]
+
+
+def test_vlm_skip_predicate_excludes_lm_head_and_vision_tower():
+    pytest.importorskip("mlx_vlm", reason="mlx-vlm not installed")
+    from turboquant_mlx.integration.vlm import vlm_should_quantize
+
+    predicate = vlm_should_quantize("muse_glimmer", lambda p, m: True)
+    assert predicate("language_model.lm_head", None) is False
+    assert predicate("vision_tower.layers.0.attn.q_proj", None) is False
+    # the text stack still goes through TurboQuant
+    assert predicate(f"{_L0}.self_attn.q_proj", None) is True
+    assert predicate(f"{_L0}.self_attn.gate_proj", None) is True
+    assert predicate(f"{_L0}.mlp.down_proj", None) is True
+
+
 def test_normed_embedding_keeps_its_norm_when_quantized():
     """Quantizing `embed_tokens` must preserve the RMS normalization.
 

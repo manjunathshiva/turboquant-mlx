@@ -38,8 +38,20 @@ def _require_mlx_vlm():
 # and the dense per-layer MLP at >= 8-bit (quant-sensitive); the
 # self-conditioning MLP feeds every denoise step and is tiny. ".mlp." matches
 # only the dense MLP — experts live under ".experts." as SwitchLinear.
+# muse_glimmer: `lm_head` is deliberately left to the affine-extras path rather
+# than polar-quantized. PolarQuantizedLinear has a fused Metal kernel only for
+# the single-vector decode path; ANY batch > 1 (i.e. all of prefill) falls back
+# to polar_dequantize_weight + GEMM, which materializes the weight through
+# several full-size intermediates — measured at ~14 bytes per parameter.
+# lm_head is 202048x6656 = 1.345B params, by far the largest matrix in the
+# model, so that fallback costs **~19 GB of transient peak** during any prefill,
+# versus ~1.9 GB for the largest MLP projection. Polar only buys 0.21 GB of
+# steady-state size over 4-bit affine here. MLX's affine path has a fused
+# quantized matmul for batched input and materializes nothing.
+# Net: -19 GB prefill peak for +0.21 GB on disk.
 VLM_SKIP_PATTERNS: dict[str, tuple[str, ...]] = {
     "diffusion_gemma": ("router", "self_conditioning", "embed_vision", ".mlp."),
+    "muse_glimmer": ("lm_head",),
 }
 
 
