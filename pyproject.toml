@@ -43,7 +43,7 @@ dependencies = [
     # transformers 5.13 dropped string keys in AutoTokenizer.register, which
     # mlx-lm <= 0.31.3 still uses (NewlineTokenizer) — import breaks. Lift the
     # cap once an mlx-lm release is compatible.
-    "transformers<5.13",
+    "transformers<5.15",
     "numpy",
 ]
 
