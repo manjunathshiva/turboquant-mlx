@@ -74,7 +74,7 @@ is unaffected by the fix.
 
 The size advantage over `mlx-community/Muse-Glimmer-30B-4bit` exists largely
 because TurboQuant quantizes `embed_tokens` **and the entire 50-layer ViT-G/14
-vision tower** (3.3B params) that the affine build leaves in bf16. So vision is
+vision tower** (~1.8B params) that the affine build leaves in bf16. So vision is
 exactly where our compression could silently break — and it had never been
 tested on the quantized builds.
 
