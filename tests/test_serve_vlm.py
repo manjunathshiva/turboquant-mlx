@@ -11,6 +11,7 @@ Three things go silently wrong without this module, and none of them raise:
 """
 
 import json
+import sys
 
 import pytest
 
@@ -151,6 +152,35 @@ class TestServerArgv:
         _write_model(tmp_path, {"model_type": "qwen3_vl"})
         argv = ["--model", str(tmp_path)]
         assert build_server_argv(argv, tmp_path) == argv
+
+
+class TestHelp:
+    def test_help_documents_our_own_flag(self, capsys, monkeypatch):
+        """`--help` is handled by mlx-vlm's parser, which never sees our flag.
+
+        Without this, `--reasoning-strength` is documented on the model cards
+        but absent from `--help`, which reads as "the flag does not exist".
+        """
+        import turboquant_mlx.serve_vlm as serve_vlm
+
+        monkeypatch.setattr(serve_vlm, "install_turboquant_loader", lambda: None)
+
+        def fake_server_main():
+            raise SystemExit(0)
+
+        import types
+
+        fake_cli = types.ModuleType("mlx_vlm.server.cli")
+        fake_cli.main = fake_server_main
+        monkeypatch.setitem(sys.modules, "mlx_vlm.server.cli", fake_cli)
+
+        with pytest.raises(SystemExit):
+            serve_vlm.main(["--help"])
+
+        out = capsys.readouterr().out
+        assert "--reasoning-strength" in out
+        # and it must not swallow mlx-vlm's own help
+        assert "mlx-vlm" in out
 
 
 class TestChatTemplateDiscovery:

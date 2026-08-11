@@ -217,6 +217,25 @@ def main(argv=None):
     )
     args, server_argv = parser.parse_known_args(argv)
 
+    # `--help` falls through to mlx-vlm's parser, which owns every other flag
+    # and exits. Print ours first, or a documented flag looks nonexistent.
+    if any(a in ("-h", "--help") for a in server_argv):
+        print(
+            "turboquant-serve-vlm: mlx-vlm's server, taught to load TurboQuant "
+            "checkpoints.\n\nAdded by turboquant-mlx:\n"
+            "  --reasoning-strength LEVEL\n"
+            "                        Default reasoning effort for models whose "
+            "chat template\n"
+            "                        takes one (Muse Glimmer: "
+            "low/medium/high/xhigh, default\n"
+            "                        high). Used when a request does not ask "
+            "for one.\n\n"
+            "Muse Glimmer also gets its reasoning channel split out of "
+            "`content`\nautomatically; pass --thinking-start-token / "
+            "--thinking-end-token to override.\n\n"
+            "Everything below is mlx-vlm's own:\n"
+        )
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
     install_turboquant_loader()
