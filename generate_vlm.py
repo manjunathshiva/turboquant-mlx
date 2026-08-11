@@ -43,6 +43,20 @@ def main():
                         help="Cap the diffusion canvas length (model default "
                              "256). Lower = smaller activation memory, useful "
                              "on 16 GB machines (try 128)")
+    parser.add_argument("--reasoning", type=str, default=None,
+                        metavar="LEVEL",
+                        help="Reasoning effort for models whose chat template "
+                             "takes one (Muse Glimmer: low/medium/high/xhigh, "
+                             "default high). Lower spends far fewer tokens "
+                             "thinking before answering — worth a lot on slow "
+                             "machines. Ignored by templates without it.")
+    parser.add_argument("--no-think", action="store_true",
+                        help="Minimise reasoning: shorthand for the lowest "
+                             "effort the template supports, plus "
+                             "`enable_thinking=False` for Qwen-style "
+                             "templates. NOTE this does not guarantee zero "
+                             "reasoning — Muse Glimmer has no 'off' level and "
+                             "may still emit a short thinking channel.")
     args = parser.parse_args()
 
     _require_mlx_vlm()
@@ -56,8 +70,24 @@ def main():
     print(f"[INFO] Loaded in {time.time() - t0:.1f}s")
 
     num_images = 1 if args.image else 0
+
+    # Chat-template knobs for reasoning effort. Templates differ: Qwen-style
+    # ones take `enable_thinking`, Muse Glimmer takes `reasoning_strength`
+    # (low/medium/high/xhigh, defaulting to **high** — which spends hundreds of
+    # tokens deliberating before a short answer, and at a few tok/s that is most
+    # of the wall clock). Unknown keys are ignored by a template that does not
+    # reference them, so passing both is safe.
+    template_kwargs = {}
+    if args.reasoning:
+        template_kwargs["reasoning_strength"] = args.reasoning
+    if args.no_think:
+        template_kwargs.setdefault("reasoning_strength", "low")
+        template_kwargs["enable_thinking"] = False
+    if template_kwargs:
+        print(f"[INFO] chat template: {template_kwargs}")
+
     formatted = apply_chat_template(processor, config, args.prompt,
-                                    num_images=num_images)
+                                    num_images=num_images, **template_kwargs)
     gen_kwargs = {}
     if args.max_denoising_steps is not None:
         gen_kwargs["max_denoising_steps"] = args.max_denoising_steps
