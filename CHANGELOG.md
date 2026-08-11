@@ -6,6 +6,38 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-08-11
+
+Two `turboquant-serve-vlm` fixes found by using it: an agent harness never
+received the assistant's final message, and a documented flag was missing from
+`--help`.
+
+### Fixed
+
+- **Muse Glimmer returned an empty final message to any tools-enabled client.**
+  While streaming, mlx-vlm suppresses content deltas from the moment the tool
+  parser's `tool_call_start` appears in the output, and `in_tool_call` has no
+  release path — once latched, it stays latched for the rest of the generation.
+  ATEM's `tool_call_start` is `to=self<|message|>`, which is exactly the channel
+  router Muse Glimmer emits at the start of *every* turn, tool call or not. So
+  the latch closed on the first reasoning token of every request that declared
+  tools, and nothing the model said afterwards reached the client.
+
+  The asymmetry made it look like a model problem: a plain `curl` with no tools
+  answered correctly, tool calls kept working (those are parsed from the full
+  output, not the stream), and only prose went missing. In OpenCode the model
+  would find and fix the bug, run the tests green, and then say nothing.
+
+  `turboquant-serve-vlm` now maps that trigger to `<atem:function_calls>`, the
+  tag that genuinely opens a call — and the same string mlx-vlm uses to detect
+  the ATEM format in the first place. Tool-call *parsing* is untouched, since
+  `process_tool_calls` reads the marker from the parser itself. Parsers whose
+  `tool_call_start` is not a known collision pass through unchanged.
+
+- **`--reasoning-strength` was missing from `--help`.** `--help` falls through
+  to mlx-vlm's parser, which owns every other flag and exits before ours is
+  mentioned, so a flag the model cards document looked nonexistent.
+
 ## [0.21.0] - 2026-08-11
 
 Muse Glimmer becomes usable from a plain `pip install`, and serveable to an

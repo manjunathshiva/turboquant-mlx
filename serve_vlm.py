@@ -4,7 +4,7 @@
 multimodal architectures. mlx-vlm ships its own, considerably richer server
 (OpenAI *and* Anthropic routes, per-model tool parsers, continuous batching,
 speculative decoding), so this module drives that one instead of reimplementing
-it — it only teaches it the three things it cannot know about a TurboQuant VLM:
+it — it only teaches it the four things it cannot know about a TurboQuant VLM:
 
 1. **How to load the checkpoint.** mlx-vlm's server reaches the model through
    exactly one seam: ``mlx_vlm.server.generation.load_model_resources`` calls
@@ -20,6 +20,11 @@ it — it only teaches it the three things it cannot know about a TurboQuant VLM
 3. **What the reasoning knob is called.** The server sends OpenAI's
    ``reasoning_effort``; Muse Glimmer's chat template only reads
    ``reasoning_strength`` and otherwise deliberates at its ``high`` default.
+
+4. **Which marker really opens a tool call.** ATEM's ``tool_call_start`` is the
+   same string Muse Glimmer opens every turn with, so mlx-vlm's streaming
+   content suppressor latches on the first reasoning token and the answer never
+   reaches the client. See ``TOOL_CALL_SUPPRESSION_TRIGGER``.
 
 Usage:
     turboquant-serve-vlm --model <tq-dir-or-repo> --port 8080
@@ -52,6 +57,26 @@ CHANNEL_DELIMITERS: Dict[str, Tuple[str, str]] = {
         "to=self<|message|>",
         "<|start|>assistant to=user<|message|>",
     ),
+}
+
+# Tool-call openers that are unsafe as a *streaming* suppression trigger,
+# mapped to the marker that actually opens a call.
+#
+# While streaming, mlx-vlm drops every content delta from the moment the tool
+# parser's `tool_call_start` appears in the output, and has no release path —
+# `in_tool_call` latches on and stays on. ATEM's `tool_call_start` is
+# `to=self<|message|>`, which is the channel router Muse Glimmer emits at the
+# start of *every* turn, tool call or not. So on any tools-enabled request the
+# latch closes on the first reasoning token and the assistant's answer never
+# reaches the client — an agent harness sees the work happen and then an empty
+# final message.
+#
+# `<atem:function_calls>` is the tag that genuinely opens a call (mlx-vlm uses
+# it to *detect* the ATEM format in the first place), so it is both correct and
+# strictly more specific. Tool-call parsing is untouched: `process_tool_calls`
+# reads `tool_call_start` from the parser itself, not from here.
+TOOL_CALL_SUPPRESSION_TRIGGER: Dict[str, str] = {
+    "to=self<|message|>": "<atem:function_calls>",
 }
 
 # OpenAI's reasoning_effort vocabulary -> Muse Glimmer's reasoning_strength.
@@ -160,6 +185,40 @@ def install_reasoning_strength_mapping(default_strength: Optional[str] = None) -
     GenerationArguments.to_template_kwargs = to_template_kwargs
 
 
+def install_tool_call_suppression_fix() -> None:
+    """Stop a reasoning-channel opener from suppressing the streamed answer.
+
+    Rebinds the name inside each route module rather than in `responses_state`,
+    because both import it directly and would otherwise keep the original.
+    Idempotent, and a no-op for every parser whose `tool_call_start` is not a
+    known collision — those pass straight through unchanged.
+    """
+    modules = []
+    for name in ("openai", "anthropic"):
+        try:
+            modules.append(__import__(f"mlx_vlm.server.{name}", fromlist=[name]))
+        except ImportError:  # pragma: no cover - route set varies by version
+            continue
+
+    for module in modules:
+        original = getattr(module, "suppress_tool_call_content", None)
+        if original is None or getattr(original, "_turboquant_wrapper", False):
+            continue
+
+        def suppress_tool_call_content(
+            full_output, in_tool_call, tc_start, delta_content, _original=original
+        ):
+            return _original(
+                full_output,
+                in_tool_call,
+                TOOL_CALL_SUPPRESSION_TRIGGER.get(tc_start, tc_start),
+                delta_content,
+            )
+
+        suppress_tool_call_content._turboquant_wrapper = True
+        module.suppress_tool_call_content = suppress_tool_call_content
+
+
 def channel_delimiters_for(model_path) -> Optional[Tuple[str, str]]:
     """The thinking delimiters this model needs, if we know of any."""
     return CHANNEL_DELIMITERS.get(model_architecture(model_path) or "")
@@ -239,6 +298,7 @@ def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
     install_turboquant_loader()
+    install_tool_call_suppression_fix()
 
     model_path = _extract_option(server_argv, "--model")
     resolved = None
