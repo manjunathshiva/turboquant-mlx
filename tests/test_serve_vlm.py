@@ -222,9 +222,18 @@ class TestToolCallSuppressionFix:
         assert "<tool_call>" not in serve_vlm.TOOL_CALL_SUPPRESSION_TRIGGER
 
     def _patched_module(self):
-        """A stand-in route module carrying mlx-vlm's real suppressor."""
+        """A stand-in route module carrying mlx-vlm's real suppressor.
+
+        Deliberately the *real* upstream function rather than a fake: these
+        tests assert what mlx-vlm actually does, so a hand-written stand-in
+        would only prove the stand-in matches itself. That makes them require
+        the optional `[vlm]` extra, which CI does not install.
+        """
         import types
 
+        pytest.importorskip(
+            "mlx_vlm", reason="needs the [vlm] extra for the real suppressor"
+        )
         from mlx_vlm.server.responses_state import suppress_tool_call_content
 
         module = types.ModuleType("fake_routes")
