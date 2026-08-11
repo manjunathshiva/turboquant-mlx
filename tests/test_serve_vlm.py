@@ -1,6 +1,6 @@
 """Serving TurboQuant VLMs through mlx-vlm's server.
 
-Three things go silently wrong without this module, and none of them raise:
+Four things go silently wrong without this module, and none of them raise:
 
 1. mlx-vlm's server cannot load a polar checkpoint at all.
 2. Muse Glimmer's reasoning channel lands in `message.content`, because
@@ -8,6 +8,9 @@ Three things go silently wrong without this module, and none of them raise:
    An agent harness then reads the model's private deliberation as its answer.
 3. `reasoning_effort` never reaches the template, which reads
    `reasoning_strength` — so the model always deliberates at `high`.
+4. While streaming, ATEM's `tool_call_start` is the same string Muse Glimmer
+   opens every turn with, so mlx-vlm suppresses every content delta and the
+   client receives an empty answer.
 """
 
 import json
@@ -15,6 +18,7 @@ import sys
 
 import pytest
 
+from turboquant_mlx import serve_vlm
 from turboquant_mlx.serve_vlm import (
     CHANNEL_DELIMITERS,
     build_server_argv,
@@ -197,3 +201,72 @@ class TestChatTemplateDiscovery:
     def test_missing_template_is_empty_not_an_error(self, tmp_path):
         _write_model(tmp_path, {})
         assert chat_template_text(tmp_path) == ""
+
+
+class TestToolCallSuppressionFix:
+    """The reasoning-channel opener must not suppress the streamed answer.
+
+    ATEM declares `tool_call_start = "to=self<|message|>"`, which is exactly
+    what Muse Glimmer emits at the start of every turn. mlx-vlm's streaming
+    suppressor latches `in_tool_call` on that string and never releases it, so
+    without this fix a tools-enabled request streams no content at all.
+    """
+
+    ROUTER = "to=self<|message|>"
+    CALL_TAG = "<atem:function_calls>"
+
+    def test_the_router_is_remapped_to_the_real_call_tag(self):
+        assert serve_vlm.TOOL_CALL_SUPPRESSION_TRIGGER[self.ROUTER] == self.CALL_TAG
+
+    def test_unknown_parsers_pass_through_untouched(self):
+        assert "<tool_call>" not in serve_vlm.TOOL_CALL_SUPPRESSION_TRIGGER
+
+    def _patched_module(self):
+        """A stand-in route module carrying mlx-vlm's real suppressor."""
+        import types
+
+        from mlx_vlm.server.responses_state import suppress_tool_call_content
+
+        module = types.ModuleType("fake_routes")
+        module.suppress_tool_call_content = suppress_tool_call_content
+        return module
+
+    def _install_on(self, module, monkeypatch):
+        import sys
+
+        monkeypatch.setitem(sys.modules, "mlx_vlm.server.openai", module)
+        monkeypatch.setitem(sys.modules, "mlx_vlm.server.anthropic", module)
+        serve_vlm.install_tool_call_suppression_fix()
+
+    def test_reasoning_no_longer_swallows_the_answer(self, monkeypatch):
+        module = self._patched_module()
+        before = module.suppress_tool_call_content(
+            self.ROUTER + "thinking", False, self.ROUTER, "the answer"
+        )
+        assert before == (True, None), "precondition: upstream drops the answer"
+
+        self._install_on(module, monkeypatch)
+
+        latched, delta = module.suppress_tool_call_content(
+            self.ROUTER + "thinking", False, self.ROUTER, "the answer"
+        )
+        assert (latched, delta) == (False, "the answer")
+
+    def test_a_real_tool_call_is_still_suppressed(self, monkeypatch):
+        module = self._patched_module()
+        self._install_on(module, monkeypatch)
+
+        latched, delta = module.suppress_tool_call_content(
+            self.ROUTER + "thinking" + self.CALL_TAG,
+            False,
+            self.ROUTER,
+            "<atem:invoke name=",
+        )
+        assert (latched, delta) == (True, None), "tool markup must not reach the user"
+
+    def test_installing_twice_does_not_double_wrap(self, monkeypatch):
+        module = self._patched_module()
+        self._install_on(module, monkeypatch)
+        once = module.suppress_tool_call_content
+        serve_vlm.install_tool_call_suppression_fix()
+        assert module.suppress_tool_call_content is once
