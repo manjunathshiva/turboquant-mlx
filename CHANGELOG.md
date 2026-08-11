@@ -6,6 +6,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-11
+
+Muse Glimmer becomes usable from a plain `pip install`, and serveable to an
+agent. [Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838)
+merged the day after the port shipped, which collapsed the install to one line —
+and, because the released code differs from the PR head the port was written
+against, broke every Muse Glimmer entry point until fixed here.
+
 ### Added
 
 - **`turboquant-serve-vlm`: an OpenAI-compatible server for multimodal
