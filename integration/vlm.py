@@ -71,11 +71,23 @@ def _patch_muse_glimmer_normed_embedding() -> None:
     ``load_turboquant_vlm`` reach the embedding through ``nn.quantize``, so
     patching ``to_quantized`` fixes the write and read sides at once.
 
-    Idempotent, and a no-op if mlx-vlm has no muse_glimmer module.
+    Only needed for the pre-merge layout. mlx-vlm 0.6.12 shipped
+    [#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838) with the norm hoisted
+    out of the embedding — ``TextModel`` holds a paramless ``embed_norm`` and
+    applies it in ``__call__``, so a plain ``QuantizedEmbedding`` already keeps
+    the maths right and there is nothing to patch. The on-disk key set is the
+    same either way (``RMSNormNoScale`` has no parameters), so models converted
+    against either layout load against both.
+
+    Idempotent, and a no-op if mlx-vlm has no muse_glimmer module or already
+    applies the norm itself.
     """
     try:
         from mlx_vlm.models.muse_glimmer import language as _mg
     except ImportError:
+        return
+    # >=0.6.12: no NormedEmbedding to patch — the norm lives in TextModel.
+    if not hasattr(_mg, "NormedEmbedding"):
         return
     if getattr(_mg.NormedEmbedding, "_tq_patched", False):
         return

@@ -6,6 +6,49 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`--reasoning LEVEL` and `--no-think` for `generate_vlm`.** Muse Glimmer's
+  chat template defaults to `reasoning_strength: high`, which spends hundreds of
+  tokens deliberating before a short answer — on a 16 GB mini at ~3.5 tok/s that
+  is most of the wall clock. `--reasoning low|medium|high|xhigh` sets it, and
+  `--no-think` asks for the least reasoning a template supports (it also passes
+  `enable_thinking=False` for Qwen-style templates). Templates that do not
+  reference these keys ignore them. Note that Muse Glimmer has no "off" level,
+  so `--no-think` reduces but does not eliminate the thinking channel.
+
+### Changed
+
+- **Muse Glimmer installs with a plain `pip install "turboquant-mlx-full[vlm]"`.**
+  [Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838) merged on
+  2026-08-10 and shipped in **mlx-vlm 0.6.12**, so the git pin previously
+  documented in the README is obsolete and has been removed. `[vlm]` now
+  requires `mlx-vlm>=0.6.12`.
+
+- **The `transformers<5.13` cap is now a `!=5.13.*` exclusion.** The
+  `AutoTokenizer.register` breakage is confined to the 5.13 series — verified
+  against mlx-lm 0.31.3, where 5.12, 5.14 and 5.15 all import cleanly and only
+  5.13 raises. The old cap was incompatible with mlx-vlm 0.6.12
+  (`transformers>=5.14`), so a resolver honouring it would silently downgrade
+  mlx-vlm to a build with no `muse_glimmer` — the same failure mode that broke
+  the documented install order in 0.20.1.
+
+### Fixed
+
+- **`patch_vlm_arch` crashed on mlx-vlm >= 0.6.12**, taking `convert_vlm` and
+  `load_turboquant_vlm` — every Muse Glimmer entry point — down with it. The
+  released #1838 differs from the PR head this support was written against:
+  `NormedEmbedding` is gone, and `TextModel` now owns a paramless `embed_norm`
+  that it applies in `__call__`. The patch reached straight for
+  `_mg.NormedEmbedding` and raised `AttributeError`. It is now a no-op on the
+  merged layout, where a plain `QuantizedEmbedding` is already correct because
+  the norm is applied outside it.
+
+  **Checkpoints are unaffected in both directions**: `RMSNormNoScale` has no
+  parameters, so neither layout contributes an `embed_norm` key, and models
+  converted against either one load against both. Verified end-to-end by
+  generating with the published `tq4-g64` build on mlx-vlm 0.6.12.
+
 ## [0.20.1] - 2026-08-10
 
 A planner correctness fix and the field data behind it. `turboquant-plan`

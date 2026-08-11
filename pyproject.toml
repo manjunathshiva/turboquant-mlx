@@ -41,16 +41,21 @@ dependencies = [
     "mlx>=0.20.0",
     "mlx-lm>=0.31.3",
     # transformers 5.13 dropped string keys in AutoTokenizer.register, which
-    # mlx-lm <= 0.31.3 still uses (NewlineTokenizer) — import breaks. Lift the
-    # cap once an mlx-lm release is compatible.
-    "transformers<5.13",
+    # mlx-lm <= 0.31.3 still uses (NewlineTokenizer) at module scope — importing
+    # mlx_lm.tokenizer_utils raises AttributeError. 5.14 restored string keys,
+    # so the break is confined to the 5.13 series (verified against mlx-lm
+    # 0.31.3: 5.12 OK, 5.13 FAIL, 5.14 OK, 5.15 OK). A `<5.13` cap would now
+    # force the resolver to downgrade mlx-vlm, which needs >=5.14.
+    "transformers!=5.13.*",
     "numpy",
 ]
 
 [project.optional-dependencies]
 eval = ["datasets", "transformers"]
 dev = ["pytest", "build", "twine"]
-vlm = ["mlx-vlm>=0.6.3"]
+# 0.6.12 is the first release carrying the Muse Glimmer model classes
+# (Blaizzy/mlx-vlm#1838). Below that, `[vlm]` cannot load muse_glimmer.
+vlm = ["mlx-vlm>=0.6.12"]
 # Kimi K3 ships a tiktoken-based tokenizer that needs blobfile to load.
 kimi = ["tiktoken", "blobfile"]
 

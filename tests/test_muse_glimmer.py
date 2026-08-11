@@ -10,6 +10,12 @@ loads and generates fluent-looking garbage rather than raising:
 2. ``embed_tokens`` is a ``NormedEmbedding`` — an ``nn.Embedding`` subclass that
    RMS-normalizes the row it looks up. The inherited ``to_quantized`` returns a
    plain ``QuantizedEmbedding`` and drops the normalization.
+
+Point 2 describes the **pre-merge** mlx-vlm layout. mlx-vlm 0.6.12 released
+Blaizzy/mlx-vlm#1838 with the norm hoisted out of the embedding: ``embed_tokens``
+is a plain ``nn.Embedding`` and ``TextModel`` owns a paramless ``embed_norm``
+that it applies in ``__call__``. Both layouts are supported, so the tests below
+skip the ones that do not apply to the installed build.
 """
 
 import mlx.core as mx
@@ -23,6 +29,25 @@ from turboquant_mlx.integration.rotation_configs import (
 )
 
 _L0 = "language_model.model.layers.0"
+
+
+def _muse_language_module():
+    """The installed build's muse_glimmer language module, or skip."""
+    return pytest.importorskip(
+        "mlx_vlm.models.muse_glimmer.language",
+        reason="mlx-vlm build without muse_glimmer",
+    )
+
+
+def _require_normed_embedding():
+    """Skip on mlx-vlm >= 0.6.12, where there is no NormedEmbedding to patch."""
+    mg_language = _muse_language_module()
+    if not hasattr(mg_language, "NormedEmbedding"):
+        pytest.skip(
+            "mlx-vlm >= 0.6.12 applies the embedding norm in TextModel, so "
+            "there is no NormedEmbedding to patch"
+        )
+    return mg_language
 
 
 def test_rotation_config_registered():
@@ -124,10 +149,7 @@ def test_normed_embedding_keeps_its_norm_when_quantized():
     Without the patch, `nn.quantize` swaps in a plain QuantizedEmbedding and the
     normalization vanishes — no error, just wrong activations everywhere.
     """
-    mg_language = pytest.importorskip(
-        "mlx_vlm.models.muse_glimmer.language",
-        reason="mlx-vlm build without muse_glimmer",
-    )
+    mg_language = _require_normed_embedding()
     from turboquant_mlx.integration.vlm import patch_vlm_arch
 
     patch_vlm_arch("muse_glimmer")
@@ -153,11 +175,7 @@ def test_normed_embedding_keeps_its_norm_when_quantized():
 
 
 def test_normed_embedding_patch_is_idempotent():
-    pytest.importorskip(
-        "mlx_vlm.models.muse_glimmer.language",
-        reason="mlx-vlm build without muse_glimmer",
-    )
-    from mlx_vlm.models.muse_glimmer import language as mg_language
+    mg_language = _require_normed_embedding()
     from turboquant_mlx.integration.vlm import patch_vlm_arch
 
     patch_vlm_arch("muse_glimmer")
@@ -167,11 +185,7 @@ def test_normed_embedding_patch_is_idempotent():
 
 
 def test_quantized_normed_embedding_is_not_a_bare_quantized_embedding():
-    pytest.importorskip(
-        "mlx_vlm.models.muse_glimmer.language",
-        reason="mlx-vlm build without muse_glimmer",
-    )
-    from mlx_vlm.models.muse_glimmer import language as mg_language
+    mg_language = _require_normed_embedding()
     from turboquant_mlx.integration.vlm import patch_vlm_arch
 
     patch_vlm_arch("muse_glimmer")
@@ -182,3 +196,47 @@ def test_quantized_normed_embedding_is_not_a_bare_quantized_embedding():
     assert isinstance(q, nn.QuantizedEmbedding)
     assert type(q) is not nn.QuantizedEmbedding
     assert hasattr(q, "embed_norm")
+
+
+def test_patch_vlm_arch_survives_the_merged_mlx_vlm_layout():
+    """`patch_vlm_arch` must be a no-op, not a crash, on mlx-vlm >= 0.6.12.
+
+    The released #1838 dropped `NormedEmbedding` and applies the norm inside
+    `TextModel.__call__` instead. An earlier version of the patch reached
+    straight for `_mg.NormedEmbedding` and raised AttributeError, which broke
+    BOTH `convert_vlm` and `load_turboquant_vlm` — every Muse Glimmer entry
+    point — the moment a user installed a current mlx-vlm.
+    """
+    mg_language = _muse_language_module()
+    from turboquant_mlx.integration.vlm import patch_vlm_arch
+
+    had = hasattr(mg_language, "NormedEmbedding")
+    saved = getattr(mg_language, "NormedEmbedding", None)
+    if had:  # simulate the merged layout on a pre-merge build
+        delattr(mg_language, "NormedEmbedding")
+    try:
+        patch_vlm_arch("muse_glimmer")  # must not raise
+        patch_vlm_arch("muse_glimmer_text")
+    finally:
+        if had:
+            mg_language.NormedEmbedding = saved
+
+
+def test_merged_layout_applies_the_embedding_norm_outside_the_embedding():
+    """On >= 0.6.12 the norm must live in TextModel, or quantizing drops it.
+
+    This is the invariant that makes the no-op above safe: a plain
+    `QuantizedEmbedding` is only correct because something else normalizes.
+    """
+    mg_language = _muse_language_module()
+    if hasattr(mg_language, "NormedEmbedding"):
+        pytest.skip("pre-merge mlx-vlm: the norm lives inside the embedding")
+
+    import inspect
+
+    src = inspect.getsource(mg_language.TextModel)
+    assert "self.embed_norm" in src
+    assert "self.embed_norm(self.embed_tokens(" in src
+    # and it must be paramless, or it would add on-disk keys our converted
+    # checkpoints do not carry
+    assert mg_language.RMSNormNoScale(1e-6).parameters() == {}
