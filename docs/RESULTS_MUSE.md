@@ -90,6 +90,30 @@ limitation, a case only ours misses is our bug.
 | top-left shape | `triangle` | ✅ 11 s | ✅ 13 s | ✅ 7 s |
 | | | **4/4** | **4/4** | **4/4** |
 
+### Confirmed on the 16 GB Mac mini
+
+The table above is the 64 GB M4 Max. The identical battery
+(`scripts/mini_vision_test.py`) on a base M4 Mac mini, 16 GB, macOS 26.5.2,
+`iogpu.wired_limit_mb=14336`:
+
+| case | answer | ok | peak | secs |
+|---|---|---|---|---|
+| text | `VOLTAGE 47` | ✅ | 13.70 GiB | 257 ⁽²⁾ |
+| count | `3` | ✅ | 13.70 GiB | 58 |
+| chart | `C` | ✅ | 13.79 GiB | 62 |
+| spatial | `triangle` | ✅ | 13.71 GiB | 63 |
+| | | **4/4** | **max 13.79** | |
+
+⁽²⁾ cold load again — the following three at ~60 s are the real per-image cost,
+against 11–13 s on the M4 Max.
+
+**The mini's peak is LOWER than the 64 GB machine's** (13.79 vs 14.03 GiB) on
+byte-identical work. Peak memory is not a fixed property of the model: MLX's
+allocator retains more scratch when there is headroom and releases it when there
+is not. **Do not scale a peak down from a larger machine — measure on the
+target.** Headroom on the mini works out to ~0.66 GB, about 3x what the
+5,068-token text case had.
+
 ⁽¹⁾ cold load of a 19.88 GiB model, not inference — the following three cases at
 7 s confirm it. Our builds were already page-cached from the agentic runs.
 
