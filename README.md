@@ -377,6 +377,34 @@ for chunk in resp:
 All `mlx_lm.server` flags forward unchanged — see `turboquant-serve --help`
 for `--host`, `--temp`, `--top-p`, `--prompt-cache-size`, etc.
 
+#### Serve a multimodal model (`turboquant-serve-vlm`)
+
+`turboquant-serve` wraps `mlx_lm.server`, which knows nothing about multimodal
+architectures. For a VLM — Muse Glimmer, DiffusionGemma — use
+**`turboquant-serve-vlm`**, which drives *mlx-vlm's* server instead (OpenAI
+**and** Anthropic routes, per-model tool parsers, continuous batching):
+
+```bash
+turboquant-serve-vlm \
+    --model manjunathshiva/Muse-Glimmer-30B-tq4-g64 \
+    --reasoning-strength low --port 8080
+```
+
+All `mlx_vlm.server` flags forward unchanged. Two things are handled for you:
+
+- **The reasoning channel is split out of `content`.** Muse Glimmer answers in a
+  harmony-style channel format, and mlx-vlm's ATEM parser only strips that
+  envelope when a tool call was parsed — so an ordinary turn would hand your
+  agent the model's private deliberation as its reply. The right delimiters are
+  supplied per architecture; the thinking lands in `reasoning_content` where it
+  belongs. An explicit `--thinking-start-token`/`--thinking-end-token` still wins.
+- **`--reasoning-strength` actually reaches the template.** OpenAI clients send
+  `reasoning_effort`, but Muse Glimmer's template reads `reasoning_strength` and
+  otherwise deliberates at its `high` default. Requests are translated, and this
+  flag sets the default for clients that ask for nothing — which is most agent
+  harnesses. Measured on `tq4-g64`: a tool-result turn cost **54 completion
+  tokens at `low` versus 106 at the default `high`**, for the same answer.
+
 #### Serve a model bigger than RAM (expert streaming)
 
 Passing `--cache-budget-gb` routes the loader through the streaming path, so a

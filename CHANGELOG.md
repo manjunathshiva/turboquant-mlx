@@ -8,6 +8,51 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`turboquant-serve-vlm`: an OpenAI-compatible server for multimodal
+  TurboQuant models.** `turboquant-serve` wraps `mlx_lm.server`, which has no
+  notion of VLM architectures, so Muse Glimmer and DiffusionGemma could not be
+  served at all. Rather than reimplement a server, this drives *mlx-vlm's* —
+  OpenAI and Anthropic routes, per-model tool parsers, continuous batching — and
+  teaches it the three things it cannot infer about a polar checkpoint:
+
+  1. **How to load it.** mlx-vlm's server reaches the model through exactly one
+     seam (`mlx_vlm.server.generation.load`), so binding that name to a
+     TurboQuant-aware wrapper covers the whole stack. Non-TurboQuant models keep
+     mlx-vlm's own loader, so one server can still serve either.
+  2. **Where the reasoning channel ends** (see Fixed).
+  3. **What the reasoning knob is called** (see Fixed).
+
+  Verified end-to-end on `Muse-Glimmer-30B-tq4-g64`: tool calls return
+  `finish_reason: tool_calls` with correct name and arguments, tool-result round
+  trips answer correctly, and the streaming path emits no protocol markup.
+
+### Fixed
+
+- **Muse Glimmer leaked its entire reasoning channel into `message.content`.**
+  It answers in a harmony-style channel format
+  (`to=self<|message|>…<|eom|><|start|>assistant to=user<|message|>…`), and
+  mlx-vlm's ATEM parser only strips that envelope when a tool call was parsed —
+  so tool turns looked fine while ordinary turns handed the caller the model's
+  private deliberation as its reply, with `reasoning_content` left `None`. An
+  agent harness would ingest it as the answer.
+
+  mlx-vlm's generic thinking splitter handles this correctly once pointed at the
+  right delimiters, so `turboquant-serve-vlm` supplies them per architecture.
+  The span deliberately ends at the routing header rather than at `<|eom|>`, so
+  content starts at the first real answer token instead of carrying
+  `<|start|>assistant to=user<|message|>` on every reply. An explicit
+  `--thinking-start-token`/`--thinking-end-token` always wins.
+
+- **`reasoning_effort` was a silent no-op on Muse Glimmer.** The server passes
+  OpenAI's `reasoning_effort` to the chat template; Muse Glimmer's template only
+  reads `reasoning_strength` (`reasoning_effort` and `enable_thinking` appear
+  zero times in it), so the request was dropped without a warning and the model
+  always deliberated at its `high` default. Requests are now translated
+  (`minimal`/`none` → `low`, since Muse has no "off" level), and
+  `--reasoning-strength` sets the default for clients that ask for nothing —
+  which is most agent harnesses. Measured on `tq4-g64`: a tool-result turn cost
+  **54 completion tokens at `low` versus 106 at `high`**, same answer.
+
 - **`--reasoning LEVEL` and `--no-think` for `generate_vlm`.** Muse Glimmer's
   chat template defaults to `reasoning_strength: high`, which spends hundreds of
   tokens deliberating before a short answer — on a 16 GB mini at ~3.5 tok/s that
