@@ -5,5 +5,5 @@ tensors (norms, routers, attention, shared experts, embeddings) in memory
 and streaming the router-selected experts from an mmap'd safetensors file
 on demand, with an LRU cache.
 
-Status: proof-of-concept (qwen3_5_moe). See docs/design/layer_streaming_poc.md.
+Status: proof-of-concept (qwen3_5_moe).
 """

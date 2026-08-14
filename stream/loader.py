@@ -141,9 +141,17 @@ def _cap_active_experts(layers, max_active: int) -> None:
             mlp.top_k = new_k
             changed.append(native)
     if changed:
-        print(f"[stream] K-reduction: capped router top_k {changed[0]}->{min(changed[0], max_active)} "
+        native = changed[0]
+        print(f"[stream] K-reduction: capped router top_k {native}->{min(native, max_active)} "
               f"on {len(changed)} MoE blocks (~2x less disk I/O; pass "
               f"max_active_experts=0 / --max-active-experts 0 to use native routing)")
+        if native > 2 * max_active:
+            # Halving K was measured byte-identical (Qwen 8->4); deeper cuts
+            # are unvalidated. Kimi K3's native top-16 at the default cap of 4
+            # would be a 4x truncation — flag it rather than silently degrade.
+            print(f"[stream] WARNING: top_k cut {native}->{max_active} is more "
+                  f"aggressive than the validated 2x — quality may degrade; "
+                  f"consider --max-active-experts {native // 2} or higher")
 
 
 # Auto cache budget (ds4-style): size the expert cache from what the GPU can
@@ -261,6 +269,7 @@ def _pin_spec_to_layers(spec: dict) -> "tuple[dict, list]":
 
 def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                    prefetch_workers: int = 8, prefetch_ahead: int = 0,
+                   fanout: bool = False,
                    pin_file: str | None = None, max_active_experts: int = 4,
                    use_page_cache: bool | None = None, use_hotlist: bool = True,
                    preload_pins: bool = True, wire_memory: bool = False,
@@ -280,6 +289,12 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     prefetch_workers parallelizes per-layer expert reads (1 = serial baseline).
     prefetch_ahead speculatively prefetches this many upcoming layers' experts
     (predicted from the previous token's routing); 0 disables prefetch.
+    fanout (--fanout, off by default) submits each layer's known expert misses
+    to the read pool as soon as the router has chosen them, so the other
+    projections' reads overlap compute. Opt-in for the same reason as
+    prefetch_ahead: it trades the coalesced serial read path for parallelism,
+    which wins on a fast internal SSD with spare bandwidth and loses on
+    bandwidth-bound external storage.
     pin_file is an optional JSON {"pin": [[layer, expert], ...]} of hot experts
     to keep permanently resident (never LRU-evicted) — see calibrate_experts.py.
     When it is None and the model directory ships a ``hot_experts.json`` (same
@@ -347,6 +362,7 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
         reader, int(cache_budget_gb * 1e9),
         prefetch_workers=prefetch_workers,
         prefetch_ahead=prefetch_ahead,
+        fanout=fanout,
         usage_profile=profile,
     )
     # Fold this run into the persisted history at exit. Registered rather than
@@ -428,9 +444,12 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                 scales_key=skey,
                 cache=cache,
                 layer_idx=i,
-                # one trigger per layer fires the next-layer prefetch; gate_proj
-                # is first in _PROJS so it fires with maximum lead time.
-                is_trigger=(proj == _PROJS[0]),
+                # One trigger per layer fires the same-layer miss fan-out and
+                # the next-layer prefetch. It must be the FIRST projection the
+                # MoE block EXECUTES — SwitchGLU runs up_proj, then gate_proj,
+                # then down_proj — or every up_proj miss is read serially
+                # before the fan-out even fires.
+                is_trigger=(proj == "up_proj"),
                 trit=res.trit,
             )
             setattr(sm, proj, st)

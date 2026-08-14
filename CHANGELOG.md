@@ -6,7 +6,410 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-14
+
+`turboquant-plan` now models prefill the way it actually runs. Two
+corrections, both measured rather than reasoned about: a term it charged for
+that is never paid, and a term it never charged for that always is. Nothing
+outside the planner changes — no conversion, kernel, or serving behaviour is
+touched.
+
+### Fixed
+
+- **`turboquant-plan` over-estimated prefill workspace on big-vocab models by
+  charging for an lm_head output that is never computed.** The projection
+  billed `chunk x vocab x 2` for every prefill chunk. Both engines chunk
+  prefill (`mlx_lm.generate_step`, mlx-vlm `generate/ar.py`) and both *discard*
+  the chunk forward's return value, evaluating only the KV cache state — and
+  MLX is lazy, so an lm_head matmul nobody asks for never runs. Measured on an
+  M4 Max at 2048 x 202048, against a floor doing the cache work alone:
+  dropping the output costs **0 MB**, while slicing `[:, -1:]` out of it costs
+  the full **763 MiB**. Both loops also leave exactly one token for the scoring
+  step.
+
+  So the term is real only when the prompt fits in a *single* forward
+  (`context <= step`), where the slice happens after the matmul. On
+  Muse-Glimmer-30B at 5,068 tokens this cut the projected workspace from 5.21
+  GB to 4.39 GB, and it was making `--prefill-step-size` look like it bought
+  headroom it does not buy. The estimate is now the max of the widest chunk
+  pass and the one-token scoring step, rather than a sum of costs that never
+  coexist.
+
+  Also corrected: the chunk can no longer exceed the prompt, so a 900-token
+  prompt is billed as a 900-token forward instead of a 2048-token one.
+
+  The field-calibrated mini datapoints are unaffected — they were measured on
+  a config with no `vocab_size`, so they never depended on this term.
+
+### Added
+
+- **`turboquant-plan` now models the MoE prefill term**, the last one it left
+  out. It is not what the old TODO assumed. Expert *dequantization* is
+  essentially never paid during prefill: mlx-lm's SwitchGLU sorts any batch of
+  64+ routings, and sorted batches go to `polar_gather_qmm`, which tiles over
+  packed weights and materializes nothing. Measured on a 256-expert block at
+  chunk 2048: **357.8 MB** peak, against a **933.8 MB** control that does
+  dequantize all experts — the 768 MB tensor never appears.
+
+  What is actually there is routing-expanded activations. SwitchGLU fans every
+  token out to `top_k` rows before the expert matmuls, so the transient scales
+  with `chunk x top_k`, not `chunk`. Measured bytes per routing on one
+  gate/up/down block, against `8 x (hidden + moe_intermediate)`:
+
+  | geometry (experts, hidden, moe_inter) | measured | bound |
+  |---|---|---|
+  | 256, 2048, 768 (Qwen3.6-35B-A3B) | 21,077 | 22,528 |
+  | 128, 1024, 2048 (inverted ratio) | 20,564 | 24,576 |
+  | 64, 4096, 1024 (wide hidden) | 38,984 | 40,960 |
+  | 256, 2048, 512 (narrow expert) | 19,541 | 20,480 |
+  | 256, 3072, 1024 (Laguna-S-2.1) | 30,819 | 32,768 |
+
+  The bound holds on all of them with 3–16% slack, and is what the eight live
+  routing-expanded buffers cost if the allocator reused none. On Laguna-S-2.1
+  at 16K context this adds 0.67 GB to the projection at the default chunk.
+
+  The dequant fallback is still charged where it can genuinely fire: expert
+  output dims that `polar_gather_qmm` cannot tile (not a multiple of 64), and
+  only below the switch layer's 2 GiB cap, above which it reverts to gather
+  kernels that materialize nothing.
+
+  Expert width is read from `moe_intermediate_size`, never `intermediate_size`
+  — on Laguna those are 1024 and 12288, a 12x error. Models whose config does
+  not state `num_experts_per_tok` get no term rather than a guessed one.
+
+## [0.21.1] - 2026-08-11
+
+Two `turboquant-serve-vlm` fixes found by using it: an agent harness never
+received the assistant's final message, and a documented flag was missing from
+`--help`.
+
+### Fixed
+
+- **Muse Glimmer returned an empty final message to any tools-enabled client.**
+  While streaming, mlx-vlm suppresses content deltas from the moment the tool
+  parser's `tool_call_start` appears in the output, and `in_tool_call` has no
+  release path — once latched, it stays latched for the rest of the generation.
+  ATEM's `tool_call_start` is `to=self<|message|>`, which is exactly the channel
+  router Muse Glimmer emits at the start of *every* turn, tool call or not. So
+  the latch closed on the first reasoning token of every request that declared
+  tools, and nothing the model said afterwards reached the client.
+
+  The asymmetry made it look like a model problem: a plain `curl` with no tools
+  answered correctly, tool calls kept working (those are parsed from the full
+  output, not the stream), and only prose went missing. In OpenCode the model
+  would find and fix the bug, run the tests green, and then say nothing.
+
+  `turboquant-serve-vlm` now maps that trigger to `<atem:function_calls>`, the
+  tag that genuinely opens a call — and the same string mlx-vlm uses to detect
+  the ATEM format in the first place. Tool-call *parsing* is untouched, since
+  `process_tool_calls` reads the marker from the parser itself. Parsers whose
+  `tool_call_start` is not a known collision pass through unchanged.
+
+- **`--reasoning-strength` was missing from `--help`.** `--help` falls through
+  to mlx-vlm's parser, which owns every other flag and exits before ours is
+  mentioned, so a flag the model cards document looked nonexistent.
+
+## [0.21.0] - 2026-08-11
+
+Muse Glimmer becomes usable from a plain `pip install`, and serveable to an
+agent. [Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838)
+merged the day after the port shipped, which collapsed the install to one line —
+and, because the released code differs from the PR head the port was written
+against, broke every Muse Glimmer entry point until fixed here.
+
+### Added
+
+- **`turboquant-serve-vlm`: an OpenAI-compatible server for multimodal
+  TurboQuant models.** `turboquant-serve` wraps `mlx_lm.server`, which has no
+  notion of VLM architectures, so Muse Glimmer and DiffusionGemma could not be
+  served at all. Rather than reimplement a server, this drives *mlx-vlm's* —
+  OpenAI and Anthropic routes, per-model tool parsers, continuous batching — and
+  teaches it the three things it cannot infer about a polar checkpoint:
+
+  1. **How to load it.** mlx-vlm's server reaches the model through exactly one
+     seam (`mlx_vlm.server.generation.load`), so binding that name to a
+     TurboQuant-aware wrapper covers the whole stack. Non-TurboQuant models keep
+     mlx-vlm's own loader, so one server can still serve either.
+  2. **Where the reasoning channel ends** (see Fixed).
+  3. **What the reasoning knob is called** (see Fixed).
+
+  Verified end-to-end on `Muse-Glimmer-30B-tq4-g64`: tool calls return
+  `finish_reason: tool_calls` with correct name and arguments, tool-result round
+  trips answer correctly, and the streaming path emits no protocol markup.
+
+### Fixed
+
+- **Muse Glimmer leaked its entire reasoning channel into `message.content`.**
+  It answers in a harmony-style channel format
+  (`to=self<|message|>…<|eom|><|start|>assistant to=user<|message|>…`), and
+  mlx-vlm's ATEM parser only strips that envelope when a tool call was parsed —
+  so tool turns looked fine while ordinary turns handed the caller the model's
+  private deliberation as its reply, with `reasoning_content` left `None`. An
+  agent harness would ingest it as the answer.
+
+  mlx-vlm's generic thinking splitter handles this correctly once pointed at the
+  right delimiters, so `turboquant-serve-vlm` supplies them per architecture.
+  The span deliberately ends at the routing header rather than at `<|eom|>`, so
+  content starts at the first real answer token instead of carrying
+  `<|start|>assistant to=user<|message|>` on every reply. An explicit
+  `--thinking-start-token`/`--thinking-end-token` always wins.
+
+- **`reasoning_effort` was a silent no-op on Muse Glimmer.** The server passes
+  OpenAI's `reasoning_effort` to the chat template; Muse Glimmer's template only
+  reads `reasoning_strength` (`reasoning_effort` and `enable_thinking` appear
+  zero times in it), so the request was dropped without a warning and the model
+  always deliberated at its `high` default. Requests are now translated
+  (`minimal`/`none` → `low`, since Muse has no "off" level), and
+  `--reasoning-strength` sets the default for clients that ask for nothing —
+  which is most agent harnesses. Measured on `tq4-g64`: a tool-result turn cost
+  **54 completion tokens at `low` versus 106 at `high`**, same answer.
+
+- **`--reasoning LEVEL` and `--no-think` for `generate_vlm`.** Muse Glimmer's
+  chat template defaults to `reasoning_strength: high`, which spends hundreds of
+  tokens deliberating before a short answer — on a 16 GB mini at ~3.5 tok/s that
+  is most of the wall clock. `--reasoning low|medium|high|xhigh` sets it, and
+  `--no-think` asks for the least reasoning a template supports (it also passes
+  `enable_thinking=False` for Qwen-style templates). Templates that do not
+  reference these keys ignore them. Note that Muse Glimmer has no "off" level,
+  so `--no-think` reduces but does not eliminate the thinking channel.
+
 ### Changed
+
+- **Muse Glimmer installs with a plain `pip install "turboquant-mlx-full[vlm]"`.**
+  [Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838) merged on
+  2026-08-10 and shipped in **mlx-vlm 0.6.12**, so the git pin previously
+  documented in the README is obsolete and has been removed. `[vlm]` now
+  requires `mlx-vlm>=0.6.12`.
+
+- **The `transformers<5.13` cap is now a `!=5.13.*` exclusion.** The
+  `AutoTokenizer.register` breakage is confined to the 5.13 series — verified
+  against mlx-lm 0.31.3, where 5.12, 5.14 and 5.15 all import cleanly and only
+  5.13 raises. The old cap was incompatible with mlx-vlm 0.6.12
+  (`transformers>=5.14`), so a resolver honouring it would silently downgrade
+  mlx-vlm to a build with no `muse_glimmer` — the same failure mode that broke
+  the documented install order in 0.20.1.
+
+### Fixed
+
+- **`patch_vlm_arch` crashed on mlx-vlm >= 0.6.12**, taking `convert_vlm` and
+  `load_turboquant_vlm` — every Muse Glimmer entry point — down with it. The
+  released #1838 differs from the PR head this support was written against:
+  `NormedEmbedding` is gone, and `TextModel` now owns a paramless `embed_norm`
+  that it applies in `__call__`. The patch reached straight for
+  `_mg.NormedEmbedding` and raised `AttributeError`. It is now a no-op on the
+  merged layout, where a plain `QuantizedEmbedding` is already correct because
+  the norm is applied outside it.
+
+  **Checkpoints are unaffected in both directions**: `RMSNormNoScale` has no
+  parameters, so neither layout contributes an `embed_norm` key, and models
+  converted against either one load against both. Verified end-to-end by
+  generating with the published `tq4-g64` build on mlx-vlm 0.6.12.
+
+## [0.20.1] - 2026-08-10
+
+A planner correctness fix and the field data behind it. `turboquant-plan`
+told a 16 GB Mac it could not run a model that then ran **resident** on that
+exact machine — a units bug in `--ram-gb`. Also corrects the documented
+Muse Glimmer install order, which silently produced a broken environment.
+
+### Fixed
+
+- **`turboquant-plan --ram-gb` read its argument as decimal GB**, but a machine
+  sold as "16 GB" reports `hw.memsize` = 17.18e9 bytes. Planning for a 16 GB
+  Mac therefore understated its ceiling by 7.4% (14.40 vs 15.46 GB usable) and
+  returned `WILL NOT RUN` for Muse-Glimmer-30B `tq3-g64` — a model that then
+  ran **resident** on exactly that machine (Mac16,10, macOS 26.5.2,
+  `iogpu.wired_limit_mb=14336`), peaking at 14.21 GiB at 5068 tokens of prompt.
+  `--ram-gb` is now interpreted as the size the machine is sold as, which is
+  what anyone typing it means, and `--ram-gb 16` reproduces the real mini's
+  numbers exactly. Verdicts for machines planned this way become slightly more
+  optimistic; verdicts read from the local device are unchanged.
+
+  Fixing this exposed a second, opposite error the first was masking: with the
+  corrected ceiling, the chooser now picks `--prefill-step-size 512` for a MoE
+  at 21K context where the field measured 128 as necessary. The likely cause is
+  that MoE expert dequantization is still not modelled, so the undersized-RAM
+  bug had been compensating for it. The field test has been narrowed to the
+  part that was actually measured (2048 OOMs) with the open question recorded
+  in place; **re-measuring the real step ceiling for a MoE at 21K is
+  outstanding.**
+
+- **The documented Muse Glimmer install order was broken.** It installed the
+  pinned `mlx-vlm` from git *first* and `turboquant-mlx-full[vlm]` second — but
+  `[vlm]` depends on `mlx-vlm>=0.6.3`, so the resolver replaced the git build
+  with a PyPI one. Measured in clean venvs: the documented order yields
+  mlx-vlm **0.6.4** and `ImportError: cannot import name 'muse_glimmer'`; the
+  corrected order yields 0.6.11 and imports fine. Now documented as PyPI first,
+  pinned overrides last, with `--force-reinstall` (the PyPI build already
+  satisfies the constraint, so uv would skip the git one) and `--no-deps` (stops
+  it re-resolving transformers back below 5.15). README and both model cards
+  updated.
+
+### Added
+
+- Field validation for **Muse-Glimmer-30B `tq3-g64` on a 16 GB Mac mini**
+  (Mac16,10, macOS 26.5.2, `iogpu.wired_limit_mb=14336`): runs resident at
+  every prompt length tried up to 5068 tokens, peaking at 14.21 GiB with
+  0.20 GB of headroom, decode flat at ~3.5 tok/s. Prefill degrades from
+  20 tok/s at 868 tokens to 6.0 at 5068 — memory pressure during prefill, not
+  the kernel — so ~2000 tokens is the practical interactive limit. Meta's own
+  smallest Apple Silicon artifact is 17.95 GB, text-only, which does not fit
+  that machine at all.
+
+## [0.20.0] - 2026-08-10
+
+Meta's **Muse Glimmer** (dense 30B VLM) lands, and with it the first case where
+TurboQuant beats MLX's affine quantizer on quality *and* size at matched bit
+width — PPL 4.3315 in 14.88 GiB against 4.3798 in 19.88 GiB. Alongside it,
+**`polar_qmm`** closes a long-standing hole in the kernel set: dense prefill no
+longer materializes dequantized weights, which cuts prefill peak memory for
+*every* dense TurboQuant model. `turboquant-plan` gains two prefill terms it was
+missing, which changes its output for existing models.
+
+### Added
+
+- **Muse Glimmer (Meta, dense 30B VLM) support** — `muse_glimmer`, a
+  29.8B-parameter dense multimodal model with Gemma2-style sandwich norms,
+  gated attention, a 3:1 sliding(2048)/full attention pattern with NoPE on the
+  full-attention layers, and a 1.9B ViT-G/14 perception encoder. Converts
+  through `convert_vlm`.
+
+  At **matched 4-bit**, `tq4-g64` measures **PPL 4.3315 in 14.88 GiB** against
+  `mlx-community/Muse-Glimmer-30B-4bit`'s **4.3798 in 19.88 GiB** — better
+  quality in 25% less space, while quantizing the embedding and vision tower
+  that the affine build leaves at bf16. Decode is 2.4–2.8× slower, the usual
+  codebook-vs-affine trade.
+
+  The MLX model classes come from
+  [Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838), which is
+  **not merged and not on PyPI** — see the README for the pinned install.
+
+- **`polar_qmm`: fused dense batched GEMM on packed weights.**
+  `PolarQuantizedLinear` previously had a fused kernel only for single-vector
+  decode; every batch > 1, meaning all of prefill, fell back to
+  `polar_dequantize_weight` + GEMM and materialized the weight at ~14 bytes per
+  parameter. The new kernel decodes in registers and writes nothing, and is
+  dispatched for `2 <= n_tokens <= 256` with `output_dims >= 512` — bounds set
+  by measurement (9.3× faster than dequant+GEMM at N=2–8 on wide MLP
+  projections, 0.41× at N=2048 where MLX's tuned GEMM wins, 0.5–0.8× when the
+  output is too narrow to fill the GPU). `TURBOQUANT_QMM_MAX_TOKENS` overrides
+  the token bound for memory-constrained machines.
+
+  On Muse-Glimmer-30B tq3, prefill peak over resident weights at 64 tokens
+  drops **3.86 GB → 0.62 GB** and prefill runs **23.1 → 73.9 tok/s**. Benefits
+  every dense TurboQuant model, not just this one. Perplexity is unchanged
+  (5.0454 dequant vs 5.0452 fused — fp32 accumulate vs fp16 GEMM).
+
+- Rotation-fusion config entries may be **parent-qualified**
+  (`"self_attn.gate_proj"`), and qualified entries are matched before bare leaf
+  names. Muse Glimmer is the first architecture with the same leaf name under
+  two parents in one block — a sigmoid attention output gate and a SwiGLU gate,
+  reading different norms — which the old leaf-only match would have fused into
+  the wrong norm.
+
+- `convert_vlm` gained `--extras-bits` / `--extras-group-size`.
+  `--quantize-extras` was hard-wired to 8-bit; on models where the extras are a
+  large share (Muse Glimmer's embedding + vision tower are 3.3B params) that is
+  the difference between ~3.9 GB and ~1.8 GB.
+
+### Fixed
+
+- **`turboquant-plan` under-estimated prefill workspace**, which on small
+  machines turned a will-not-run into a false `RESIDENT` verdict. It modelled
+  attention scratch only, missing (1) the `lm_head` output for the chunk —
+  often the largest term on a big-vocab model, 0.77 GB at 202048 vocab × 2048
+  tokens — and (2) polar weight dequantization for dense TurboQuant layers
+  above the fused kernel's token bound. On Muse-Glimmer-30B at 16K context the
+  estimate goes 2.15 GB → 6.70 GB, against a measured 6.39 GB. **Existing
+  plan output for other models will change**: every model gains the logits
+  term, and dense TurboQuant models gain the dequantization term. MoE expert
+  dequantization is still not modelled.
+
+- `muse_glimmer`'s `lm_head` is kept out of the polar path. At
+  202048 × 6656 = 1.345B parameters it is 10× the largest MLP matrix, so the
+  dequantize-on-prefill fallback cost **18.84 GB of transient peak alone** to
+  save 0.21 GB on disk. Routing it to affine cut prefill peak over weights
+  from 20.06 GB to 3.86 GB for +0.16 GiB, with prefill slightly faster.
+
+- Muse Glimmer's `embed_tokens` is a `NormedEmbedding` — an `nn.Embedding`
+  subclass that RMS-normalizes the row it looks up. It inherits
+  `to_quantized`, which returns a plain `QuantizedEmbedding` and **silently
+  drops the normalization**. It now quantizes through a norm-preserving
+  subclass on both the convert and load sides. (mlx-vlm sidesteps this by
+  refusing to quantize the module at all, which is most of why a "4-bit" Muse
+  Glimmer weighs 19.88 GiB.)
+
+## [0.19.0] - 2026-08-04
+
+Two new architectures, both of which mlx-lm has no module for. **Kimi K3**
+(2.8T MoE) is the largest model TurboQuant-MLX has run — an external
+contribution from [@anders94](https://github.com/anders94), streaming 931 GB of
+experts from disk on a single 512 GB Mac Studio. **Sarvam MoE** converts and
+runs, but ships with a documented negative result rather than a published
+build. Same-layer read fan-out arrives as an opt-in `--fanout`.
+
+### Added
+
+- **Kimi K3 (2.8T MoE) support**, contributed by
+  [@anders94](https://github.com/anders94) in
+  [#71](https://github.com/manjunathshiva/turboquant-mlx/pull/71). MLX model
+  port (69 KDA linear-attention + 24 gated-NoPE MLA layers, LatentMoE experts
+  behind shared down/up projections), an mxfp4 compressed-tensors conversion
+  path, planner and expert-streaming coverage, and a model card for a 931 GB
+  `tq3a-tqTe-down4-g64` build that streams from disk on a 512 GB Mac Studio.
+  Verified against the HF reference at ≤ 2.7e-6 fp32 forward parity, with a
+  bit-exact mxfp4 unpack check.
+
+- **`sarvam_moe` architecture support** (Sarvam AI's sarvam-30b and any later
+  model of that type). mlx-lm has no module for it, so `compat.py` aliases our
+  port in the same way it already does for Laguna. The port is verified three
+  ways against the fp32 reference: full key/shape coverage of all 7122 source
+  tensors, layer-1 output parity at 5.4e-7, and whole-model logit agreement.
+
+  Two details of this architecture are easy to get wrong and are pinned by
+  tests. The checkpoint is Megatron-style, so attention arrives as a single
+  fused `attention.query_key_value` matrix — the reference views it as
+  `(heads + 2*kv_heads, head_dim)` and splits on the head axis, which makes a
+  plain row split exact, but a Q/K/V mis-slice still produces a model that
+  loads and generates plausible-looking text. Routing is DeepSeek-V3-style:
+  sigmoid scores with `expert_bias` added **for selection only**, so the bias
+  must not leak into the combine weights. The router is deliberately not an
+  `nn.Linear`, which keeps the quantizer's module walk from quantizing it.
+
+  Note on quantization: at 4-bit this model degenerates on long generations,
+  measured as a rate over repeated trials at temp 0.7 / top_p 0.9 —
+  **TurboQuant 4-bit degenerated 8/15 (53%), mlx-lm affine 4-bit 15/15
+  (100%)**. TurboQuant is clearly the better of the two, and neither is good
+  enough to ship, so no quantized sarvam build is published. Use a higher bit
+  width and validate long-form output on your own prompts.
+
+- **`--fanout` on `stream_generate` and `serve`** — same-layer read fan-out:
+  once a layer's router has chosen its experts, the other projections' misses
+  are submitted to the read pool at layer start so their reads overlap the
+  earlier projections' compute. Off by default. It trades away the coalesced
+  serial read path, which is a measured win on a fast internal SSD with spare
+  bandwidth and a loss on bandwidth-bound external storage, and unlike
+  `--prefetch-ahead` it has no self-disable: the saturation throttle judges by
+  rescue rate, and fan-out has none to judge (its claims are accounted as
+  misses by design). Measure it on your own storage.
+
+### Changed
+
+- **Always-on MoE plumbing is now exempt from the `--mlp-bits` tier.**
+  `bits_for_path` returns the base `--bits` for `shared_experts` and
+  latent-MoE `routed_expert_*` projections: unlike a routed expert (1 of many,
+  chosen top-k), these run on every token, so dropping them into a sub-2-bit
+  expert tier costs quality across the whole stream for a rounding-error size
+  saving. Affects new hybrid conversions of models with shared experts
+  (DeepSeek family); existing checkpoints are unaffected, since bit width is
+  recovered from the on-disk codebook rather than re-derived.
+
+- **`trust_remote_code` is auto-injected only for local Kimi K3 checkpoints.**
+  The new `compat.is_local_kimi_k3()` gate requires a local *directory* whose
+  `config.json` declares `model_type: "kimi_k3"`; hub repo ids, other local
+  models, and missing or corrupt configs are left to transformers' explicit
+  opt-in, and a `trust_remote_code` passed by the caller always wins.
+  Downloading tokenizer code and executing it are separate trust decisions.
 
 - **`--cache-budget-gb auto` is no longer double-conservative, and `plan` now
   predicts what the loader actually does.** The two computed the budget
@@ -30,6 +433,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The streaming layer trigger fired on the wrong projection.** It fired on
+  `_PROJS[0]` (`gate_proj`), but `SwitchGLU.__call__` executes `up_proj` first,
+  so every layer's prefetch was kicked off one projection late. Applies to
+  every streaming model, not just K3. Caught by @anders94.
 - **`turboquant-plan --model ~/typo` says the directory is missing.** Anything
   that was not a directory was handed to the Hub, so a mistyped path came back
   as "Repo id must be in the form 'repo_name' or 'namespace/repo_name'" — which

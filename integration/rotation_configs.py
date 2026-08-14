@@ -21,9 +21,12 @@ class LayerRotationConfig:
     """Rotation configuration for a single transformer block.
 
     fuse_norm_to_projs: Maps norm layer name -> list of projection layer names
-        whose rotation can be fused into that norm's weight.
+        whose rotation can be fused into that norm's weight. An entry may be a
+        bare leaf name ("q_proj") or a parent-qualified suffix
+        ("self_attn.gate_proj") when the same leaf name appears under two
+        parents in one block — see MUSE_GLIMMER_CONFIG.
     online_rotation_layers: Projection layer names that need online rotation
-        (their inputs pass through non-linearities).
+        (their inputs pass through non-linearities). Same two forms.
     """
     fuse_norm_to_projs: dict[str, list[str]] = field(default_factory=dict)
     online_rotation_layers: list[str] = field(default_factory=list)
@@ -129,6 +132,34 @@ DEEPSEEK_MLA_MOE_CONFIG = LayerRotationConfig(
 )
 
 
+# Muse Glimmer (Meta, dense 30B VLM; lives in mlx-vlm — see convert_vlm).
+# Gemma2-style sandwich norms, but with a GATED attention block:
+#   h   = x + post_attention_layernorm(attn(input_layernorm(x)))
+#   out = h + post_feedforward_layernorm(mlp(pre_feedforward_layernorm(h)))
+# The attention block reads its normed input four times — q/k/v AND a sigmoid
+# output gate (`self_attn.gate_proj`) — so all four fuse into input_layernorm.
+# The two `post_*` norms sit on the residual branch, after the sublayer, and
+# feed no projection at all, so nothing fuses into them.
+#
+# NOTE the leaf-name collision: this block has `self_attn.gate_proj` (attention
+# output gate) AND `mlp.gate_proj` (SwiGLU gate), which take their inputs from
+# two DIFFERENT norms. Both are written parent-qualified so they cannot be
+# confused — a bare "gate_proj" entry would silently fuse the attention gate
+# into the MLP's norm.
+MUSE_GLIMMER_CONFIG = LayerRotationConfig(
+    fuse_norm_to_projs={
+        "input_layernorm": ["q_proj", "k_proj", "v_proj", "self_attn.gate_proj"],
+        "pre_feedforward_layernorm": ["mlp.gate_proj", "up_proj"],
+    },
+    online_rotation_layers=[
+        # o_proj input is attn_out * sigmoid(gate) — non-linear
+        "o_proj",
+        # down_proj input is swiglu(gate, up) — non-linear
+        "down_proj",
+    ],
+)
+
+
 # Registry mapping architecture names to rotation configs
 ROTATION_CONFIGS: dict[str, LayerRotationConfig] = {
     "llama": LLAMA_CONFIG,
@@ -162,6 +193,10 @@ ROTATION_CONFIGS: dict[str, LayerRotationConfig] = {
     # Same pre-norm attn + SwitchGLU-style expert layout as MoE LLaMA; only
     # consulted when fuse_rotations=True (production uses online rotation).
     "diffusion_gemma": MOE_LLAMA_CONFIG,
+    # Muse Glimmer (dense VLM, mlx-vlm). Only consulted when
+    # fuse_rotations=True; production uses online rotation.
+    "muse_glimmer": MUSE_GLIMMER_CONFIG,
+    "muse_glimmer_text": MUSE_GLIMMER_CONFIG,
 }
 
 
@@ -204,6 +239,19 @@ def should_fuse_rotation(
     """
     # Extract the projection name from the path
     proj_name = layer_path.split(".")[-1]
+
+    # Parent-qualified entries ("self_attn.gate_proj") are matched FIRST and
+    # win over bare leaf names. Architectures like muse_glimmer repeat a leaf
+    # name under two parents within one block, and the two copies read
+    # different norms — matching on the leaf alone would fuse one of them into
+    # the wrong norm and silently corrupt the weights.
+    for norm_name, proj_list in config.fuse_norm_to_projs.items():
+        for entry in proj_list:
+            if "." in entry and layer_path.endswith("." + entry):
+                return True, norm_name
+    for entry in config.online_rotation_layers:
+        if "." in entry and layer_path.endswith("." + entry):
+            return False, None
 
     # Check if this projection can be fused into a norm
     for norm_name, proj_list in config.fuse_norm_to_projs.items():

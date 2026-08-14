@@ -29,7 +29,9 @@ import turboquant_mlx.compat  # noqa: F401 — registers upstream patches on imp
 import turboquant_mlx.quantize_model as _qm
 from turboquant_mlx.config import TurboQuantConfig
 from turboquant_mlx.quantize_model import turboquant_quantize, _detect_architecture
-from turboquant_mlx.integration.vlm import _require_mlx_vlm, vlm_should_quantize
+from turboquant_mlx.integration.vlm import (
+    _require_mlx_vlm, patch_vlm_arch, vlm_should_quantize,
+)
 
 _AUX_FILES = (
     "tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
@@ -38,6 +40,7 @@ _AUX_FILES = (
 )
 
 # --quantize-extras: affine quantization for the non-TurboQuant remainder.
+# Defaults; override per-conversion with --extras-bits / --extras-group-size.
 _EXTRAS_BITS = 8
 _EXTRAS_GROUP = 64
 
@@ -52,6 +55,8 @@ def convert_vlm(
     attn_bits: int = None,
     mlp_bits: int = None,
     quantize_extras: bool = False,
+    extras_bits: int = _EXTRAS_BITS,
+    extras_group_size: int = _EXTRAS_GROUP,
     protect_expert_layers: list = None,
     protect_bits: int = 3,
 ):
@@ -104,6 +109,7 @@ def convert_vlm(
 
     print(f"[INFO] Loading {hf_path} via mlx-vlm (lazy)")
     config = load_config(hf_path)
+    patch_vlm_arch(config.get("model_type", "").lower())
     model = load_model(hf_path, lazy=True)
 
     arch = _detect_architecture(config)
@@ -136,19 +142,19 @@ def convert_vlm(
                 return False
             if "router" in p or "self_conditioning" in p:
                 return False
-            if hasattr(m, "weight") and m.weight.shape[-1] % _EXTRAS_GROUP != 0:
+            if hasattr(m, "weight") and m.weight.shape[-1] % extras_group_size != 0:
                 return False  # e.g. vision MLP down (4304-wide) stays bf16
             n_extra[0] += 1
             return True
 
-        nn.quantize(model, group_size=_EXTRAS_GROUP, bits=_EXTRAS_BITS,
+        nn.quantize(model, group_size=extras_group_size, bits=extras_bits,
                     class_predicate=_extras_predicate)
         mx.eval(model.parameters())
         config["quantization"]["affine_extras"] = {
-            "bits": _EXTRAS_BITS, "group_size": _EXTRAS_GROUP,
+            "bits": extras_bits, "group_size": extras_group_size,
         }
         print(f"[INFO] Quantized {n_extra[0]} extra modules to "
-              f"{_EXTRAS_BITS}-bit affine (embeddings/dense MLP/vision)")
+              f"{extras_bits}-bit affine (embeddings/dense MLP/vision)")
 
     if protect_expert_layers:
         config["quantization"]["protected_expert_layers"] = sorted(
@@ -189,8 +195,19 @@ def main():
                         help="Override bits for MLP / MoE expert linears")
     parser.add_argument("--quantize-extras", action="store_true",
                         help="Also quantize embeddings, dense MLP and vision "
-                             "tower to 8-bit affine (for memory-constrained "
+                             "tower to affine (for memory-constrained "
                              "machines, e.g. 16 GB Macs)")
+    parser.add_argument("--extras-bits", type=int, default=_EXTRAS_BITS,
+                        choices=[4, 8],
+                        help=f"Bit width for --quantize-extras (default "
+                             f"{_EXTRAS_BITS}). Use 4 when the extras are a big "
+                             f"share of the model — Muse Glimmer's embedding + "
+                             f"vision tower are 3.3B params, ~3.9 GB at 8-bit "
+                             f"vs ~1.8 GB at 4-bit.")
+    parser.add_argument("--extras-group-size", type=int, default=_EXTRAS_GROUP,
+                        choices=[32, 64, 128],
+                        help=f"Group size for --quantize-extras (default "
+                             f"{_EXTRAS_GROUP})")
     parser.add_argument("--protect-expert-layers", type=str, default=None,
                         help="Comma-separated layer indices whose EXPERTS keep "
                              "--protect-bits instead of --bits (quality lift "
@@ -210,6 +227,8 @@ def main():
         attn_bits=args.attn_bits,
         mlp_bits=args.mlp_bits,
         quantize_extras=args.quantize_extras,
+        extras_bits=args.extras_bits,
+        extras_group_size=args.extras_group_size,
         protect_expert_layers=(
             [int(i) for i in args.protect_expert_layers.split(",")]
             if args.protect_expert_layers else None),

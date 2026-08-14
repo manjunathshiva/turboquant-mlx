@@ -55,6 +55,9 @@ _ITEMSIZE = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
              "F8_E5M2": 1, "I8": 1, "U8": 1, "BOOL": 1}
 
 _GB = 1e9
+# Machines are advertised in GiB ("16 GB Mac" -> hw.memsize 17.18e9), so user
+# input describing a machine is scaled by this, not by _GB.
+_GIB = float(1 << 30)
 
 # What we do NOT model line-by-line: the (capped) MLX buffer-reuse cache,
 # per-layer activations, and allocator fragmentation. Calibrated, not guessed:
@@ -162,11 +165,24 @@ def _attention_layers(cfg: dict) -> tuple:
       attention layer and `M`/`E` are Mamba/MLP. Only 8 of its 88 layers are
       attention; reading `num_hidden_layers` instead over-predicts KV by 11x.
     * `full_attention_interval` — older hybrids.
+    * `linear_attn_config.full_attn_layers` — Kimi Linear / Kimi K3 KDA
+      hybrids: an explicit (1-based) list of the full-attention (MLA) layers;
+      everything else is KDA linear attention with a fixed-size recurrent
+      state. K3: 24 of 93 layers — assuming dense over-predicts KV ~4x even
+      before MLA's latent geometry (see kv_bytes) is accounted for.
 
     Everything else is assumed dense full-attention.
     """
     c = _text_config(cfg)
     n_layers = c.get("num_hidden_layers")
+
+    lac = c.get("linear_attn_config")
+    if isinstance(lac, dict) and isinstance(lac.get("full_attn_layers"), list):
+        n_full = len(lac["full_attn_layers"])
+        n_kda = len(lac.get("kda_layers") or [])
+        n_total = n_layers or (n_full + n_kda)
+        return n_full, 0, n_total, \
+            f"KDA hybrid: {n_full}/{n_total} full-attention (MLA)"
 
     types = c.get("layer_types")
     if isinstance(types, list) and types:
@@ -214,9 +230,32 @@ def kv_bytes(cfg: dict, context: int, kv_bits: int | None = None) -> tuple:
         # TurboQuant KV-quant stores kv_bits/16 of the fp16 payload (+ scales,
         # which are small); --kv-bits 8 halving KV matches the measured 35B.
         itemsize = 2.0 * (kv_bits / 16.0)
-    per_layer_token = 2 * n_kv * head_dim * itemsize
+
+    kv_rank = _pos_int(c.get("kv_lora_rank"), 0)
+    if kv_rank:
+        # MLA caches the shared latent (kv_lora_rank) + the MQA rope key —
+        # once per layer, NOT per head, and K/V share it. Kimi K3: 576 dims
+        # ≈ 1.2 KB/token/layer vs the 48 KB the dense formula would charge.
+        rope_dim = _pos_int(c.get("qk_rope_head_dim"), 0)
+        per_layer_token = (kv_rank + rope_dim) * itemsize
+        note += ", MLA latent KV"
+    else:
+        per_layer_token = 2 * n_kv * head_dim * itemsize
 
     total = n_full * context * per_layer_token
+
+    lac = c.get("linear_attn_config")
+    if isinstance(lac, dict) and isinstance(lac.get("kda_layers"), list):
+        # KDA layers hold a fixed-size recurrent state (heads × head_dim² fp32
+        # + short-conv tails) that doesn't grow with context but isn't free:
+        # ~450 MB on K3. Charge it as a constant.
+        kh = _pos_int(lac.get("num_heads"), n_kv or 0)
+        kd = _pos_int(lac.get("head_dim"), head_dim or 0)
+        ck = _pos_int(lac.get("short_conv_kernel_size"), 4)
+        total += len(lac["kda_layers"]) * (
+            kh * kd * kd * 4.0 + 3 * (ck - 1) * kh * kd * 2.0
+        )
+        note += f" + fixed KDA state ({len(lac['kda_layers'])} layers)"
     if n_slide:
         # an absent/zero/negative/garbage window means "not windowed" -> full
         # context. Never let it shrink the total: that under-predicts, and
@@ -227,15 +266,187 @@ def kv_bytes(cfg: dict, context: int, kv_bits: int | None = None) -> tuple:
     return total, (total / context if context else 0.0), note
 
 
-def prefill_workspace_bytes(cfg: dict, context: int, step: int) -> float:
-    """Transient attention scratch for one prefill chunk (ESTIMATE).
+# Dequantizing a packed polar weight for the batched path costs ~14 bytes per
+# parameter transiently — unpack_indices -> dequantize_scalar -> scale multiply,
+# each a full-size intermediate. Measured on an M4 Max, and consistent across
+# matrices two orders of magnitude apart in size (a 132.9M-param MLP projection
+# cost 1.87 GB; a 1.345B-param lm_head cost 18.84 GB). Roughly two projections
+# are live at once as MLX walks a layer: one full decoder layer measured 3.85 GB
+# against a largest-projection cost of 1.87 GB.
+_POLAR_DEQUANT_BYTES_PER_PARAM = 14.0
+_POLAR_LIVE_PROJECTIONS = 2.0
 
-    Scales with chunk size AND context — which is why a long agent turn can OOM
-    at a chunk size that was fine when the conversation was short.
+# PolarQuantizedLinear routes batches this size or smaller to the fused
+# polar_qmm kernel, which materializes nothing. Keep in sync with
+# layers/polar_linear.py:_QMM_MAX_TOKENS.
+_QMM_MAX_TOKENS = 256
+
+
+# MoE prefill. SwitchGLU fans every token out to top_k rows before the expert
+# matmuls (mlx_lm/models/switch_layers.py:_gather_sort), so an expert block's
+# transient scales with chunk x top_k, not chunk. Measured on an M4 Max, one
+# gate/up/down block, sorted prefill, peak over resident packed weights:
+#
+#   geometry (experts, hidden, moe_inter)   measured B/routing   8x(h+m)
+#   256, 2048,  768  (Qwen3.6-35B-A3B)             21077          22528
+#   128, 1024, 2048  (inverted ratio)              20564          24576
+#    64, 4096, 1024  (wide hidden)                 38984          40960
+#   256, 2048,  512  (narrow expert)               19541          20480
+#   128, 6656, 1024  (big hidden, top-4)           59497          61440
+#
+# 8 x (hidden + moe_inter) bounds all five (3-16% slack) and is what the eight
+# live routing-expanded buffers cost if none were reused: the input rows, a
+# rotated copy each for gate and up, both projection outputs, the SwiGLU
+# product, the rotated down input, and the down output. MLX's allocator reuses
+# some, so the true peak lands under the sum. Bound, not a fit.
+_MOE_ROUTING_BYTES_PER_UNIT = 8
+
+# polar_gather_qmm handles sorted prefill by tiling over PACKED weights and
+# materializes nothing, but only for output dims it can tile
+# (kernels/polar_gather_qmm.py:supports -> output_dims % OB). Anything else
+# falls back to dequantizing every expert, capped by the switch layer at
+# _GATHER_MM_MAX_DEQUANT_BYTES (above the cap it uses the gather kernels
+# instead, which again materialize nothing).
+_GATHER_QMM_OUTPUT_MULTIPLE = 64        # kernels/polar_gather_qmm.py:OB
+_GATHER_MM_MAX_DEQUANT_BYTES = 2 << 30  # layers/polar_switch_linear.py
+
+
+def _moe_geometry(cfg: dict) -> tuple:
+    """(n_experts, top_k, hidden, moe_intermediate), 0 for anything unknown.
+
+    Expert counts and top-k are spelled differently per family: num_experts
+    (Qwen), num_local_experts (Mixtral/GPT-OSS), n_routed_experts (DeepSeek),
+    and num_experts_per_token (Kimi K3) beside the usual num_experts_per_tok.
     """
     c = _text_config(cfg)
-    heads = c.get("num_attention_heads") or 16
-    return float(step) * float(context) * float(heads) * 2.0
+    n_experts = _pos_int(c.get("num_experts"),
+                         _pos_int(c.get("num_local_experts"),
+                                  _pos_int(c.get("n_routed_experts"), 0)))
+    top_k = _pos_int(c.get("num_experts_per_tok"),
+                     _pos_int(c.get("num_experts_per_token"), 0))
+    hidden = _pos_int(c.get("hidden_size"), 0)
+    moe_inter = _pos_int(c.get("moe_intermediate_size"),
+                         _pos_int(c.get("intermediate_size"), 0))
+    return n_experts, top_k, hidden, moe_inter
+
+
+def _moe_prefill_bytes(cfg: dict, chunk: int, quant: dict | None) -> float:
+    """Transient for ONE MoE expert block during a prefill chunk.
+
+    Two parts, and the weight one is usually zero — see the constants above.
+    Returns 0 when the config does not say how many experts a token routes to,
+    since guessing that would move the verdict on no evidence.
+    """
+    n_experts, top_k, hidden, moe_inter = _moe_geometry(cfg)
+    if not (top_k and hidden and moe_inter):
+        return 0.0
+
+    routings = float(chunk) * float(top_k)
+    activations = (routings * _MOE_ROUTING_BYTES_PER_UNIT
+                   * float(hidden + moe_inter))
+
+    dequant = 0.0
+    if quant and quant.get("mode") == "turboquant" and n_experts:
+        # gate/up project hidden -> moe_inter; down projects back.
+        for out_dims, in_dims in ((moe_inter, hidden), (hidden, moe_inter)):
+            if out_dims % _GATHER_QMM_OUTPUT_MULTIPLE == 0:
+                continue        # fused gather-GEMM: nothing materialized
+            b = float(n_experts) * float(out_dims) * float(in_dims) * 2.0
+            if b <= _GATHER_MM_MAX_DEQUANT_BYTES:
+                dequant = max(dequant, b)
+
+    return activations + dequant
+
+
+def _largest_projection_params(cfg: dict) -> float:
+    """Parameter count of the widest dense projection in one decoder layer."""
+    c = _text_config(cfg)
+    hidden = _pos_int(c.get("hidden_size"), 0)
+    inter = _pos_int(c.get("intermediate_size"), 0)
+    heads = _pos_int(c.get("num_attention_heads"), 0)
+    head_dim = _pos_int(c.get("head_dim"), hidden // heads if heads else 0)
+    return float(max(hidden * inter, hidden * heads * head_dim, 0))
+
+
+def prefill_workspace_bytes(cfg: dict, context: int, step: int,
+                            quant: dict | None = None,
+                            is_moe: bool = False) -> float:
+    """Transient memory for prefill (ESTIMATE), modelling the CHUNKED path.
+
+    `context` is treated as the prompt length being prefilled — the planner's
+    existing convention, and the case the tool exists to protect (a long agent
+    turn).
+
+    Three terms:
+
+    1. Attention scratch — chunk x context. The only term with a real cliff,
+       and the one `--prefill-step-size` actually buys down. The last chunk
+       sees the full context, so `context` (not the chunk) is the second factor.
+    2. The lm_head output, which is NOT simply chunk-shaped — see below.
+    3. Weight dequantization, for TurboQuant DENSE layers only, and only above
+       the fused kernel's token bound. A step function, not a gradient: it
+       appears in full the moment the chunk exceeds _QMM_MAX_TOKENS.
+
+    On the lm_head term. Both engines chunk prefill (`mlx_lm.generate_step`,
+    mlx-vlm `generate/ar.py`) and both DISCARD the chunk forward's return value,
+    evaluating only the KV cache state. MLX is lazy, so an lm_head matmul whose
+    output nobody asks for is never computed at all. Measured on an M4 Max at
+    2048 x 202048, against a floor that does the cache work alone:
+
+        dropped output (what the chunk loop does)     +0 MB
+        sliced [:, -1:] out of it (unchunked step)  +763 MiB
+
+    Both loops then leave exactly ONE token for the scoring step. So the full
+    `chunk x vocab x 2` cost is real only when the prompt fits in a single
+    forward (context <= step); past that it collapses to one token's worth.
+    Modelling it as always-chunk-shaped over-predicted peak by up to 0.83 GB on
+    a 202k-vocab model and made `--prefill-step-size` look like it bought
+    headroom it does not buy. Do not "restore" the term without re-measuring.
+
+    4. For MoE, one expert block's transient (`_moe_prefill_bytes`). Dominated
+       by routing-expanded activations, NOT by weight dequantization: sorted
+       prefill goes to `polar_gather_qmm`, which tiles over packed weights and
+       materializes nothing. Measured on a 256-expert Qwen block at chunk 2048:
+       357.8 MB peak against a 933.8 MB control that does dequantize all
+       experts — the fallback costs the full 768 MB tensor, the prefill path
+       pays none of it.
+
+    Terms 1 and 4 are summed even though attention finishes before the MLP
+    starts, so they do not truly coexist. That is deliberate: both are real and
+    nonzero, and this tool exists to prevent OOMs. It is a different case from
+    the lm_head term above, which is dropped because it measured at exactly
+    zero, not merely at a different moment.
+    """
+    c = _text_config(cfg)
+    heads = _pos_int(c.get("num_attention_heads"), 16)
+    vocab = _pos_int(c.get("vocab_size"), _pos_int(cfg.get("vocab_size"), 0))
+
+    # Chunking engages only when the prompt is longer than the chunk; a shorter
+    # prompt goes through in one forward whose width is the prompt itself.
+    chunk = min(step, context) if context else step
+    chunked = context > step
+
+    attn = float(chunk) * float(context) * float(heads) * 2.0
+
+    dequant = 0.0
+    if (quant and quant.get("mode") == "turboquant" and not is_moe
+            and chunk > _QMM_MAX_TOKENS):
+        dequant = (_largest_projection_params(cfg)
+                   * _POLAR_DEQUANT_BYTES_PER_PARAM
+                   * _POLAR_LIVE_PROJECTIONS)
+    if is_moe:
+        dequant += _moe_prefill_bytes(cfg, chunk, quant)
+
+    if not chunked:
+        # One forward: logits[:, -1, :] slices AFTER the matmul has run, so the
+        # whole chunk x vocab tensor is materialized first.
+        return attn + float(chunk) * float(vocab) * 2.0 + dequant
+
+    # Chunked: the widest chunk pass (lm_head elided) and the 1-token scoring
+    # step (full vocab, one token) peak at different moments, so take the max
+    # rather than summing costs that never coexist.
+    scoring = float(context) * float(heads) * 2.0 + float(vocab) * 2.0
+    return max(attn + dequant, scoring)
 
 
 # --------------------------------------------------------------------------
@@ -266,10 +477,17 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
     working set while the caller has assumed someone else's RAM is how you tell
     a 16 GB mini that a 30 GB model fits — so an assumed --ram-gb estimates the
     cap from that RAM instead of querying Metal here.
+
+    `--ram-gb` is interpreted as the size the machine is SOLD as, i.e. GiB:
+    `--ram-gb 16` means a 16 GB Mac, whose `hw.memsize` is 17.18e9 bytes, not
+    16e9. Treating it as decimal understated a real 16 GB mini's ceiling by
+    7.4% (14.40 vs 15.46 GB usable) and produced a false WILL-NOT-RUN for a
+    model that then ran on that exact machine. Nobody types their RAM in
+    decimal gigabytes.
     """
     out = {"assumed": bool(wired_gb or ram_gb), "wss_estimated": False}
     if ram_gb:
-        out["ram_bytes"] = ram_gb * _GB
+        out["ram_bytes"] = ram_gb * _GIB
     else:
         try:
             out["ram_bytes"] = float(subprocess.check_output(
@@ -350,7 +568,9 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         # capped it, and activations/fragmentation live here too. Same 2 GB the
         # auto-guards reserve.
         return (fp["total_bytes"] + kv_total
-                + prefill_workspace_bytes(cfg, context, s) + _RESERVE_BYTES)
+                + prefill_workspace_bytes(cfg, context, s,
+                                          cfg.get("quantization"), is_moe)
+                + _RESERVE_BYTES)
 
     # Largest chunk whose projection keeps real headroom under the (possibly
     # raised) ceiling. The 0.95 is deliberate: a chunk size chosen to *just* fit
@@ -366,7 +586,8 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     if chosen is None:
         chosen = steps[-1]
     peak = peak_at(chosen)
-    workspace = prefill_workspace_bytes(cfg, context, chosen)
+    workspace = prefill_workspace_bytes(cfg, context, chosen,
+                                        cfg.get("quantization"), is_moe)
 
     # ---- verdict -------------------------------------------------------
     needs_bump = False
@@ -407,7 +628,7 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
                      f"here, peaking near {peak_bytes / _GB:.1f} GB)")
     if chosen != 2048:
         flags.append(f"--prefill-step-size {chosen}   (the default 2048 needs "
-                     f"{_gb(prefill_workspace_bytes(cfg, context, 2048))} of "
+                     f"{_gb(prefill_workspace_bytes(cfg, context, 2048, cfg.get('quantization'), is_moe))} of "
                      f"transient workspace at this context)")
     if kv_bits:
         flags.append(f"--kv-bits {kv_bits}")
@@ -437,7 +658,8 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
                 "expert_down_bits"),
             "n_layers": n_layers,
             "n_experts": c.get("num_experts"),
-            "experts_per_tok": c.get("num_experts_per_tok"),
+            "experts_per_tok": c.get("num_experts_per_tok")
+            or c.get("num_experts_per_token"),  # Kimi K3 spelling
             "is_moe": is_moe,
             **fp,
         },
@@ -680,7 +902,8 @@ def _common_args(ap):
     ap.add_argument("--wired-gb", type=float, default=None,
                     help="assume this Metal working set (plan for another Mac)")
     ap.add_argument("--ram-gb", type=float, default=None,
-                    help="assume this much system RAM")
+                    help="assume this much system RAM, as the machine is sold "
+                         "(--ram-gb 16 = a 16 GB Mac = 17.18e9 bytes)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
 
 

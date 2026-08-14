@@ -6,6 +6,7 @@ Achieves much better quality at 2-3 bits than standard affine quantization.
 """
 
 import math
+import os
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -17,6 +18,23 @@ from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequ
 from turboquant_mlx.core.qjl import qjl_quantize, qjl_correct
 # Use Python kernels - native C++ extension has ABI issues with MLX
 from turboquant_mlx.kernels.polar_qmv import polar_qmv
+from turboquant_mlx.kernels.polar_qmm import polar_qmm
+
+# Batched dispatch bounds for the fused polar_qmm kernel, measured on an M4 Max
+# against the dequantize + GEMM path it replaces (3-bit, g64):
+#
+#   shape                N=2    N=8   N=32  N=128  N=512  N=2048   dq spike
+#   mlp gate/up (19968) 9.30x  9.19x  5.81x  1.95x  0.75x   0.41x    1.35 GB
+#   o_proj      ( 6656) 5.81x  5.84x  4.29x  1.81x  0.73x   0.42x    0.12 GB
+#   q_proj      ( 4096) 2.18x  4.44x  2.81x  1.35x  1.88x   0.42x    0.27 GB
+#   k/v_proj    (  256) 0.71x  0.75x  0.79x  0.84x  0.60x   0.51x    0.00 GB
+#
+# Above ~256 tokens MLX's tuned GEMM beats the fused kernel on time, so the
+# default keeps the old path there. Below 512 output dims there are too few
+# 64-row output blocks to fill the GPU, and the weight is small enough that
+# materializing it costs nothing anyway.
+_QMM_MAX_TOKENS = int(os.environ.get("TURBOQUANT_QMM_MAX_TOKENS", "256"))
+_QMM_MIN_OUTPUT_DIMS = 512
 
 
 class PolarQuantizedLinear(nn.Module):
@@ -84,8 +102,12 @@ class PolarQuantizedLinear(nn.Module):
         if self._needs_rotation:
             x = rotate_input(x, self.signs)
 
-        # Decode path: fused Metal kernel (no weight materialization)
-        # Prefill path: software dequant + optimized GEMM
+        # Decode path (1 token): fused matrix-vector kernel.
+        # Small batch: fused matrix-matrix kernel — faster AND allocates
+        #   nothing, because it decodes the packed weight in registers.
+        # Large batch: dequantize + MLX GEMM, which wins on time above
+        #   _QMM_MAX_TOKENS but materializes the full weight (~14 bytes per
+        #   parameter transient — the reason prefill peak dwarfs the model).
         n_vectors = 1 if x.ndim <= 1 else math.prod(x.shape[:-1])
         if n_vectors == 1:
             orig_shape = x.shape
@@ -95,6 +117,15 @@ class PolarQuantizedLinear(nn.Module):
                 x_vec, self.bits, self.group_size,
             )
             y = y.reshape(*orig_shape[:-1], -1) if x.ndim >= 2 else y
+        elif (n_vectors <= _QMM_MAX_TOKENS
+                and self.output_dims >= _QMM_MIN_OUTPUT_DIMS):
+            orig_shape = x.shape
+            y = polar_qmm(
+                self.weight, self.scales, self.codebook,
+                x.reshape(n_vectors, orig_shape[-1]),
+                self.bits, self.group_size,
+            )
+            y = y.reshape(*orig_shape[:-1], -1)
         else:
             # Batched: dequantize and use MLX's optimized GEMM
             w = polar_dequantize_weight(

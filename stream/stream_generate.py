@@ -75,6 +75,14 @@ def main():
                         "helps only on fast NVMe with spare bandwidth, ~neutral on a "
                         "saturated USB bus). Set 1 to enable; it self-disables if the "
                         "storage proves bandwidth-bound.")
+    p.add_argument("--fanout", action="store_true", default=False,
+                   help="Enable the same-layer read fan-out: submit a layer's known "
+                        "expert misses to the read pool at layer start so the other "
+                        "projections' reads overlap compute. Off by default; it "
+                        "trades away the coalesced serial read path, which wins on "
+                        "a fast internal SSD with spare bandwidth and loses on "
+                        "bandwidth-bound external storage. Unlike --prefetch-ahead "
+                        "it does not self-disable, so measure it on your storage.")
     p.add_argument("--pin-file", default=None,
                    help="JSON {'pin': [[layer, expert], ...]} of hot experts to keep "
                         "permanently resident (from calibrate_experts.py). Without it, "
@@ -131,6 +139,7 @@ def main():
     model, tok, cache = load_streaming(
         args.model, cache_budget_gb=args.cache_budget_gb, fast=args.fast,
         prefetch_workers=args.prefetch_workers, prefetch_ahead=args.prefetch_ahead,
+        fanout=args.fanout,
         pin_file=args.pin_file, max_active_experts=args.max_active_experts,
         use_page_cache=args.use_page_cache, use_hotlist=args.use_hotlist,
         learn_experts=args.learn_experts, usage_file=args.usage_file,
@@ -213,6 +222,13 @@ def main():
     print(f"[stream] disk: critical_read={s['bytes_read_gb']:.1f} GB "
           f"prefetched={s['bytes_prefetched_gb']:.1f} GB total={s['bytes_total_gb']:.1f} GB "
           f"| prefetched_experts={s['prefetched']} dropped_unused={s['prefetch_dropped']}")
+    if s['fanout_hits'] or s['prefetch_errors']:
+        # fan-out reads are critical-path (they sit inside misses/critical_read);
+        # they were merely parallelized, so surface them rather than let the
+        # hit_rate above look worse for no visible reason.
+        print(f"[stream] fan-out: {s['fanout_hits']} of {s['misses']} misses read in "
+              f"parallel at layer start | background read errors="
+              f"{s['prefetch_errors']}")
     print(f"[stream] coalescing: {s['expert_reads']} expert-loads in {s['read_runs']} "
           f"range-reads = {s['experts_per_read']:.2f} experts/read")
 

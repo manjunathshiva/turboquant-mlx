@@ -15,6 +15,7 @@ from pathlib import Path
 import mlx.core as mx
 
 import turboquant_mlx.compat  # noqa: F401 — registers upstream patches on import
+from turboquant_mlx.compat import is_local_kimi_k3
 from turboquant_mlx.config import TurboQuantConfig
 from turboquant_mlx.quantize_model import turboquant_quantize
 
@@ -78,6 +79,11 @@ def convert(
     print(f"[INFO] Loading model from {hf_path}")
     model, tokenizer, config = load(
         hf_path,
+        # K3's custom tokenizer class (tokenization_kimi.py) needs the code
+        # opt-in; gated on a local kimi_k3 config so no other model gets it.
+        tokenizer_config=(
+            {"trust_remote_code": True} if is_local_kimi_k3(hf_path) else {}
+        ),
         return_config=True,
         lazy=True,
     )

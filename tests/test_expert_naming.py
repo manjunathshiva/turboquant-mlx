@@ -25,6 +25,10 @@ from turboquant_mlx.plan import footprint
 _QWEN = "model.layers.3.mlp.switch_mlp.{proj}.{suffix}"      # qwen3_5_moe/deepseek
 _LAGUNA = "model.layers.3.mlp.experts.{proj}.{suffix}"       # laguna SwitchGLU
 _SHARED = "model.layers.3.mlp.shared_experts.{proj}.{suffix}"  # dense, resident
+# Kimi K3 as converted: language_model wrapper prefix + switch_mlp container.
+_K3 = "language_model.model.layers.3.mlp.switch_mlp.{proj}.{suffix}"
+# K3's always-resident latent-MoE plumbing must NOT be classified streamable.
+_K3_LATENT = "language_model.model.layers.3.mlp.routed_expert_down_proj.{suffix}"
 
 
 def test_counts_switch_mlp_keys():
@@ -111,7 +115,7 @@ def test_plan_and_loader_agree_on_the_same_index():
         def __init__(self, idx):
             self._index = {k: _Loc(*v) for k, v in idx.items()}
 
-    for template in (_QWEN, _LAGUNA, _SHARED):
+    for template in (_QWEN, _LAGUNA, _SHARED, _K3):
         idx = _index(template)
         assert footprint(idx)["expert_bytes"] == _streamed_expert_bytes(
             _Reader(idx)), f"plan/loader disagree on {template}"
@@ -193,3 +197,16 @@ def test_real_laguna_index_if_present():
     orphaned = sorted(l for l in router if expert[l] == 0)
     assert not orphaned, (
         f"layers {orphaned} would permute the router but not the experts")
+
+
+def test_counts_kimi_k3_wrapped_keys():
+    """K3's converted keys carry the language_model wrapper prefix."""
+    for suffix in ("weight", "scales"):
+        assert is_streamed_expert_key(_K3.format(proj="gate_proj", suffix=suffix))
+
+
+def test_k3_latent_projections_stay_resident():
+    """routed_expert_{down,up}_proj / routed_expert_norm run on every token and
+    live outside the expert stack — paging them would break every forward."""
+    for suffix in ("weight", "scales"):
+        assert not is_streamed_expert_key(_K3_LATENT.format(suffix=suffix))
