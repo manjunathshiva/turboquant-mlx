@@ -28,3 +28,6 @@ venv/
 *.bin
 *.gguf
 *.npz
+
+# Design notes — local working documents, deliberately untracked
+docs/design/
