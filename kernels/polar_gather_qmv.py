@@ -20,8 +20,6 @@ identical — so the kernel keeps the packed weight at ~1.6 bpw in VRAM
 instead of unpacking to the 2-bit slot (2.0 bpw) first.
 """
 
-import math
-from typing import Optional
 
 import mlx.core as mx
 

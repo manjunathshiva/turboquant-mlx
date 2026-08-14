@@ -16,7 +16,6 @@ Or run both back-to-back:
 """
 
 import argparse
-import sys
 import time
 
 import mlx.core as mx

@@ -15,7 +15,6 @@ Covers:
 import io
 import json
 
-import pytest
 
 from turboquant_mlx.serve import _extract_prefill_stats_args
 from turboquant_mlx.prefill_stats import (

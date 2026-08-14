@@ -17,7 +17,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from turboquant_mlx.core.codebook import get_codebook, get_trit_codebook
-from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
+from turboquant_mlx.core.polar_quantize import polar_quantize_weight
 from turboquant_mlx.core.rotation import rotate_input
 from turboquant_mlx.core.packing import TRITS_PER_U32
 
@@ -198,7 +198,6 @@ class PolarQuantizedSwitchLinear(nn.Module):
             # Multi-input decode: k expert vectors (down_proj path)
             # x shape: (..., k, 1, input_dims) — one vector per expert
             # Use polar_multi_gather_qmv to avoid dequantizing all experts
-            orig_shape = x.shape
             x_2d = x.reshape(k, self.input_dims)  # (k, input_dims)
             idx_flat = indices.reshape(-1)  # (k,)
 

@@ -14,8 +14,6 @@ Memory-bandwidth savings vs software dequant:
   - ~3× less memory traffic → proportional speedup on bandwidth-bound decode
 """
 
-import math
-from typing import Optional
 
 import mlx.core as mx
 

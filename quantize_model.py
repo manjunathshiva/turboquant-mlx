@@ -8,7 +8,6 @@ Handles the full pipeline:
 """
 
 import gc
-import math
 from functools import partial
 
 import mlx.core as mx
@@ -21,11 +20,7 @@ from turboquant_mlx.core.rotation import (
 )
 from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
 from turboquant_mlx.layers.polar_switch_linear import PolarQuantizedSwitchLinear
-from turboquant_mlx.integration.rotation_configs import (
-    get_rotation_config,
-    should_fuse_rotation,
-    LayerRotationConfig,
-)
+from turboquant_mlx.integration.rotation_configs import get_rotation_config, should_fuse_rotation
 
 # Try importing SwitchLinear for MoE detection
 try:
@@ -315,6 +310,9 @@ def turboquant_quantize(
                             fused_norms.add(norm_path)
                             del norm_module
                     except AttributeError:
+                        # Not every norm module exposes `weight` (some
+                        # architectures use a scale buffer or none at all).
+                        # Nothing to fuse there — skip and leave it unrotated.
                         pass
 
         # Quantize the linear layer

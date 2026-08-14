@@ -11,8 +11,7 @@ import os
 import mlx.core as mx
 import mlx.nn as nn
 
-from turboquant_mlx.core.codebook import get_codebook, dequantize_scalar
-from turboquant_mlx.core.packing import unpack_indices
+from turboquant_mlx.core.codebook import get_codebook
 from turboquant_mlx.core.rotation import rotate_input, rotate_weight
 from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
 from turboquant_mlx.core.qjl import qjl_quantize, qjl_correct

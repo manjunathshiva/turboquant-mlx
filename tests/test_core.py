@@ -1,6 +1,5 @@
 """Comprehensive tests for TurboQuant-MLX core modules."""
 
-import math
 import mlx.core as mx
 import mlx.nn as nn
 

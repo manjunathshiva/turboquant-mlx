@@ -17,7 +17,6 @@ Usage:
 import argparse
 import glob
 import json
-import sys
 from pathlib import Path
 
 import mlx.core as mx
@@ -449,7 +448,7 @@ def main():
                   f"sink={args.kv_min_tokens}")
 
     print(f"\nPrompt: {args.prompt}\n")
-    response = generate(
+    generate(
         model, tokenizer,
         prompt=prompt,
         max_tokens=args.max_tokens,
