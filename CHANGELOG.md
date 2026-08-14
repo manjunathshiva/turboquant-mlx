@@ -6,6 +6,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-14
+
+`turboquant-plan` now models prefill the way it actually runs. Two
+corrections, both measured rather than reasoned about: a term it charged for
+that is never paid, and a term it never charged for that always is. Nothing
+outside the planner changes — no conversion, kernel, or serving behaviour is
+touched.
+
 ### Fixed
 
 - **`turboquant-plan` over-estimated prefill workspace on big-vocab models by
