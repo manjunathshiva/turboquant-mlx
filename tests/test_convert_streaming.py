@@ -31,7 +31,8 @@ def test_streaming_shard_writer_multishard():
         n = w.finalize()
         assert n >= 2, f"expected multiple shards, got {n}"
 
-        idx = json.load(open(Path(d) / "model.safetensors.index.json"))
+        with open(Path(d) / "model.safetensors.index.json") as fh:
+            idx = json.load(fh)
         assert set(idx["weight_map"]) == set(tensors)
         assert idx["metadata"]["total_size"] == sum(v.nbytes for v in tensors.values())
         # every referenced shard file actually exists
