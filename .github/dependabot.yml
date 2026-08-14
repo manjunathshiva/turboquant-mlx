@@ -14,7 +14,19 @@ updates:
         patterns:
           - "mlx*"
 
-  # GitHub Actions versions in workflow files
+  # GitHub Actions versions in workflow files.
+  #
+  # Every action here tracks a floating MAJOR tag (actions/checkout@v7,
+  # github/codeql-action@v4, ...), which is what GitHub recommends: patches and
+  # security fixes to the action arrive automatically, including to the security
+  # scanner itself. Patch/minor PRs would therefore only ever propose replacing
+  # a working floating tag with an exact pin that goes stale immediately —
+  # codeql-action alone patches often enough to consume the whole PR budget
+  # below (see #72).
+  #
+  # Note an exact version tag is NOT immutable; genuine supply-chain pinning
+  # needs a full commit SHA. So pinning to a patch buys the churn without the
+  # security property. Majors still open a PR, because those need a human.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -23,3 +35,8 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-patch"
+          - "version-update:semver-minor"
