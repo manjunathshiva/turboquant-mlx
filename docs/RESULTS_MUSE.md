@@ -190,9 +190,9 @@ protocol share a marker, every consumer that keys off that marker becomes
 ambiguous. Check what the inferred tool parser declares against what the model
 emits on an *ordinary* turn, not just a tool turn.
 
-## 4. Two serving gotchas specific to `turboquant-serve-vlm`
+## 4. Four serving gotchas specific to `turboquant-serve-vlm`
 
-Neither exists with `turboquant-serve`, and both cost real time here.
+None of these exist with `turboquant-serve`, and all four cost real time here.
 
 1. **The model id must be the exact path the server preloaded.** mlx-vlm's
    server routes by `request.model` and will fetch+load *any* other id from the
@@ -204,6 +204,25 @@ Neither exists with `turboquant-serve`, and both cost real time here.
    reply came back `content: None` — reasoning consumed the whole allowance
    before any answer token. Fine at 150; opencode allows 8192. A client with a
    tight cap sees empty replies and blames the model.
+3. **Do not read the model id back from `/v1/models`.** It does not report what
+   is loaded. `models_endpoint` (mlx-vlm `server/app.py`) scans the *entire* HF
+   cache with `scan_cache_dir` and lists every repo that looks like an MLX model,
+   appending the loaded one **last**. So `data[0].id` is an unrelated repo. On
+   this box it was `meta-models/Muse-Glimmer-30B` — the bf16 original — so a
+   script that "discovers" the id instead of guessing it walks straight into
+   gotcha 1, and does so silently, because the wrong model answers a health probe
+   perfectly well. Hard-code the exact `--model` path and use `/v1/models` only
+   to assert that path is present in the list.
+4. **opencode issues a second, concurrent request on every turn.** Alongside the
+   real turn it fires a ~618-token title/summary generation, so the server sees
+   `in_flight=2`, and the `continuous_batching` backend merges them into one
+   ragged batch. On mlx-vlm 0.6.13 that produced
+   `[broadcast_shapes] Shapes (2,1,1,2048) and (2,32,2,2049) cannot be broadcast`
+   — batch 2, two different sequence lengths, mask built for only one of them.
+   0.6.12 survives the same ragged batch, which is one reason to stay pinned
+   there. Practical consequence: **never let a second client touch the server
+   during an agentic run**, and treat a broadcast error mid-run as a concurrency
+   symptom rather than a model or quantization fault.
 
 ## Reproduce
 
@@ -215,5 +234,10 @@ turboquant-serve-vlm --model manjunathshiva/Muse-Glimmer-30B-tq4-g64 \
 # exact --model path, agent.build.temperature 1.0 / top_p 0.95
 cd /tmp/task && opencode run "<the prompt above>"
 ```
+
+`scripts/capture_opencode_pass.sh` does all of the above with gates for gotchas
+1–3: it pins mlx-vlm 0.6.12, hard-codes the model id to the `--model` path,
+asserts a completion round-trips before spending ten minutes on an agent run, and
+prints the fix / `3 passed` / md5 evidence block at the end.
 
 Vision battery: `make_vision_tests.py` + `run_vision_tests.py` (scratchpad).
