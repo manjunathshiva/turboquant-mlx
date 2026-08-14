@@ -282,6 +282,82 @@ _POLAR_LIVE_PROJECTIONS = 2.0
 _QMM_MAX_TOKENS = 256
 
 
+# MoE prefill. SwitchGLU fans every token out to top_k rows before the expert
+# matmuls (mlx_lm/models/switch_layers.py:_gather_sort), so an expert block's
+# transient scales with chunk x top_k, not chunk. Measured on an M4 Max, one
+# gate/up/down block, sorted prefill, peak over resident packed weights:
+#
+#   geometry (experts, hidden, moe_inter)   measured B/routing   8x(h+m)
+#   256, 2048,  768  (Qwen3.6-35B-A3B)             21077          22528
+#   128, 1024, 2048  (inverted ratio)              20564          24576
+#    64, 4096, 1024  (wide hidden)                 38984          40960
+#   256, 2048,  512  (narrow expert)               19541          20480
+#   128, 6656, 1024  (big hidden, top-4)           59497          61440
+#
+# 8 x (hidden + moe_inter) bounds all five (3-16% slack) and is what the eight
+# live routing-expanded buffers cost if none were reused: the input rows, a
+# rotated copy each for gate and up, both projection outputs, the SwiGLU
+# product, the rotated down input, and the down output. MLX's allocator reuses
+# some, so the true peak lands under the sum. Bound, not a fit.
+_MOE_ROUTING_BYTES_PER_UNIT = 8
+
+# polar_gather_qmm handles sorted prefill by tiling over PACKED weights and
+# materializes nothing, but only for output dims it can tile
+# (kernels/polar_gather_qmm.py:supports -> output_dims % OB). Anything else
+# falls back to dequantizing every expert, capped by the switch layer at
+# _GATHER_MM_MAX_DEQUANT_BYTES (above the cap it uses the gather kernels
+# instead, which again materialize nothing).
+_GATHER_QMM_OUTPUT_MULTIPLE = 64        # kernels/polar_gather_qmm.py:OB
+_GATHER_MM_MAX_DEQUANT_BYTES = 2 << 30  # layers/polar_switch_linear.py
+
+
+def _moe_geometry(cfg: dict) -> tuple:
+    """(n_experts, top_k, hidden, moe_intermediate), 0 for anything unknown.
+
+    Expert counts and top-k are spelled differently per family: num_experts
+    (Qwen), num_local_experts (Mixtral/GPT-OSS), n_routed_experts (DeepSeek),
+    and num_experts_per_token (Kimi K3) beside the usual num_experts_per_tok.
+    """
+    c = _text_config(cfg)
+    n_experts = _pos_int(c.get("num_experts"),
+                         _pos_int(c.get("num_local_experts"),
+                                  _pos_int(c.get("n_routed_experts"), 0)))
+    top_k = _pos_int(c.get("num_experts_per_tok"),
+                     _pos_int(c.get("num_experts_per_token"), 0))
+    hidden = _pos_int(c.get("hidden_size"), 0)
+    moe_inter = _pos_int(c.get("moe_intermediate_size"),
+                         _pos_int(c.get("intermediate_size"), 0))
+    return n_experts, top_k, hidden, moe_inter
+
+
+def _moe_prefill_bytes(cfg: dict, chunk: int, quant: dict | None) -> float:
+    """Transient for ONE MoE expert block during a prefill chunk.
+
+    Two parts, and the weight one is usually zero — see the constants above.
+    Returns 0 when the config does not say how many experts a token routes to,
+    since guessing that would move the verdict on no evidence.
+    """
+    n_experts, top_k, hidden, moe_inter = _moe_geometry(cfg)
+    if not (top_k and hidden and moe_inter):
+        return 0.0
+
+    routings = float(chunk) * float(top_k)
+    activations = (routings * _MOE_ROUTING_BYTES_PER_UNIT
+                   * float(hidden + moe_inter))
+
+    dequant = 0.0
+    if quant and quant.get("mode") == "turboquant" and n_experts:
+        # gate/up project hidden -> moe_inter; down projects back.
+        for out_dims, in_dims in ((moe_inter, hidden), (hidden, moe_inter)):
+            if out_dims % _GATHER_QMM_OUTPUT_MULTIPLE == 0:
+                continue        # fused gather-GEMM: nothing materialized
+            b = float(n_experts) * float(out_dims) * float(in_dims) * 2.0
+            if b <= _GATHER_MM_MAX_DEQUANT_BYTES:
+                dequant = max(dequant, b)
+
+    return activations + dequant
+
+
 def _largest_projection_params(cfg: dict) -> float:
     """Parameter count of the widest dense projection in one decoder layer."""
     c = _text_config(cfg)
@@ -327,8 +403,19 @@ def prefill_workspace_bytes(cfg: dict, context: int, step: int,
     a 202k-vocab model and made `--prefill-step-size` look like it bought
     headroom it does not buy. Do not "restore" the term without re-measuring.
 
-    MoE expert dequantization is still NOT modelled — SwitchLinear has its own
-    dequant-all fallback with different residency.
+    4. For MoE, one expert block's transient (`_moe_prefill_bytes`). Dominated
+       by routing-expanded activations, NOT by weight dequantization: sorted
+       prefill goes to `polar_gather_qmm`, which tiles over packed weights and
+       materializes nothing. Measured on a 256-expert Qwen block at chunk 2048:
+       357.8 MB peak against a 933.8 MB control that does dequantize all
+       experts — the fallback costs the full 768 MB tensor, the prefill path
+       pays none of it.
+
+    Terms 1 and 4 are summed even though attention finishes before the MLP
+    starts, so they do not truly coexist. That is deliberate: both are real and
+    nonzero, and this tool exists to prevent OOMs. It is a different case from
+    the lm_head term above, which is dropped because it measured at exactly
+    zero, not merely at a different moment.
     """
     c = _text_config(cfg)
     heads = _pos_int(c.get("num_attention_heads"), 16)
@@ -347,6 +434,8 @@ def prefill_workspace_bytes(cfg: dict, context: int, step: int,
         dequant = (_largest_projection_params(cfg)
                    * _POLAR_DEQUANT_BYTES_PER_PARAM
                    * _POLAR_LIVE_PROJECTIONS)
+    if is_moe:
+        dequant += _moe_prefill_bytes(cfg, chunk, quant)
 
     if not chunked:
         # One forward: logits[:, -1, :] slices AFTER the matmul has run, so the

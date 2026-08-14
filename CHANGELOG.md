@@ -30,9 +30,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Also corrected: the chunk can no longer exceed the prompt, so a 900-token
   prompt is billed as a 900-token forward instead of a 2048-token one.
 
-  MoE expert dequantization remains unmodelled. The field-calibrated mini
-  datapoints are unaffected — they were measured on a config with no
-  `vocab_size`, so they never depended on this term.
+  The field-calibrated mini datapoints are unaffected — they were measured on
+  a config with no `vocab_size`, so they never depended on this term.
+
+### Added
+
+- **`turboquant-plan` now models the MoE prefill term**, the last one it left
+  out. It is not what the old TODO assumed. Expert *dequantization* is
+  essentially never paid during prefill: mlx-lm's SwitchGLU sorts any batch of
+  64+ routings, and sorted batches go to `polar_gather_qmm`, which tiles over
+  packed weights and materializes nothing. Measured on a 256-expert block at
+  chunk 2048: **357.8 MB** peak, against a **933.8 MB** control that does
+  dequantize all experts — the 768 MB tensor never appears.
+
+  What is actually there is routing-expanded activations. SwitchGLU fans every
+  token out to `top_k` rows before the expert matmuls, so the transient scales
+  with `chunk x top_k`, not `chunk`. Measured bytes per routing on one
+  gate/up/down block, against `8 x (hidden + moe_intermediate)`:
+
+  | geometry (experts, hidden, moe_inter) | measured | bound |
+  |---|---|---|
+  | 256, 2048, 768 (Qwen3.6-35B-A3B) | 21,077 | 22,528 |
+  | 128, 1024, 2048 (inverted ratio) | 20,564 | 24,576 |
+  | 64, 4096, 1024 (wide hidden) | 38,984 | 40,960 |
+  | 256, 2048, 512 (narrow expert) | 19,541 | 20,480 |
+  | 256, 3072, 1024 (Laguna-S-2.1) | 30,819 | 32,768 |
+
+  The bound holds on all of them with 3–16% slack, and is what the eight live
+  routing-expanded buffers cost if the allocator reused none. On Laguna-S-2.1
+  at 16K context this adds 0.67 GB to the projection at the default chunk.
+
+  The dequant fallback is still charged where it can genuinely fire: expert
+  output dims that `polar_gather_qmm` cannot tile (not a multiple of 64), and
+  only below the switch layer's 2 GiB cap, above which it reverts to gather
+  kernels that materialize nothing.
+
+  Expert width is read from `moe_intermediate_size`, never `intermediate_size`
+  — on Laguna those are 1024 and 12288, a 12x error. Models whose config does
+  not state `num_experts_per_tok` get no term rather than a guessed one.
 
 ## [0.21.1] - 2026-08-11
 
