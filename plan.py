@@ -295,37 +295,69 @@ def _largest_projection_params(cfg: dict) -> float:
 def prefill_workspace_bytes(cfg: dict, context: int, step: int,
                             quant: dict | None = None,
                             is_moe: bool = False) -> float:
-    """Transient memory for one prefill chunk (ESTIMATE). Three terms:
+    """Transient memory for prefill (ESTIMATE), modelling the CHUNKED path.
 
-    1. Attention scratch — scales with chunk size AND context, which is why a
-       long agent turn can OOM at a chunk size that was fine when the
-       conversation was short.
-    2. The lm_head output for the whole chunk. Easy to forget and often the
-       largest term on a big-vocab model: 202048 vocab x 2048 tokens = 0.77 GB.
+    `context` is treated as the prompt length being prefilled — the planner's
+    existing convention, and the case the tool exists to protect (a long agent
+    turn).
+
+    Three terms:
+
+    1. Attention scratch — chunk x context. The only term with a real cliff,
+       and the one `--prefill-step-size` actually buys down. The last chunk
+       sees the full context, so `context` (not the chunk) is the second factor.
+    2. The lm_head output, which is NOT simply chunk-shaped — see below.
     3. Weight dequantization, for TurboQuant DENSE layers only, and only above
-       the fused kernel's token bound. This one is a step function, not a
-       gradient: it appears in full the moment the chunk exceeds
-       _QMM_MAX_TOKENS.
+       the fused kernel's token bound. A step function, not a gradient: it
+       appears in full the moment the chunk exceeds _QMM_MAX_TOKENS.
 
-    MoE expert dequantization is NOT modelled — SwitchLinear has its own
-    dequant-all fallback with different residency, so MoE estimates here remain
-    attention + logits only.
+    On the lm_head term. Both engines chunk prefill (`mlx_lm.generate_step`,
+    mlx-vlm `generate/ar.py`) and both DISCARD the chunk forward's return value,
+    evaluating only the KV cache state. MLX is lazy, so an lm_head matmul whose
+    output nobody asks for is never computed at all. Measured on an M4 Max at
+    2048 x 202048, against a floor that does the cache work alone:
+
+        dropped output (what the chunk loop does)     +0 MB
+        sliced [:, -1:] out of it (unchunked step)  +763 MiB
+
+    Both loops then leave exactly ONE token for the scoring step. So the full
+    `chunk x vocab x 2` cost is real only when the prompt fits in a single
+    forward (context <= step); past that it collapses to one token's worth.
+    Modelling it as always-chunk-shaped over-predicted peak by up to 0.83 GB on
+    a 202k-vocab model and made `--prefill-step-size` look like it bought
+    headroom it does not buy. Do not "restore" the term without re-measuring.
+
+    MoE expert dequantization is still NOT modelled — SwitchLinear has its own
+    dequant-all fallback with different residency.
     """
     c = _text_config(cfg)
     heads = _pos_int(c.get("num_attention_heads"), 16)
-    attn = float(step) * float(context) * float(heads) * 2.0
-
     vocab = _pos_int(c.get("vocab_size"), _pos_int(cfg.get("vocab_size"), 0))
-    logits = float(step) * float(vocab) * 2.0
+
+    # Chunking engages only when the prompt is longer than the chunk; a shorter
+    # prompt goes through in one forward whose width is the prompt itself.
+    chunk = min(step, context) if context else step
+    chunked = context > step
+
+    attn = float(chunk) * float(context) * float(heads) * 2.0
 
     dequant = 0.0
     if (quant and quant.get("mode") == "turboquant" and not is_moe
-            and step > _QMM_MAX_TOKENS):
+            and chunk > _QMM_MAX_TOKENS):
         dequant = (_largest_projection_params(cfg)
                    * _POLAR_DEQUANT_BYTES_PER_PARAM
                    * _POLAR_LIVE_PROJECTIONS)
 
-    return attn + logits + dequant
+    if not chunked:
+        # One forward: logits[:, -1, :] slices AFTER the matmul has run, so the
+        # whole chunk x vocab tensor is materialized first.
+        return attn + float(chunk) * float(vocab) * 2.0 + dequant
+
+    # Chunked: the widest chunk pass (lm_head elided) and the 1-token scoring
+    # step (full vocab, one token) peak at different moments, so take the max
+    # rather than summing costs that never coexist.
+    scoring = float(context) * float(heads) * 2.0 + float(vocab) * 2.0
+    return max(attn + dequant, scoring)
 
 
 # --------------------------------------------------------------------------

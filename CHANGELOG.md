@@ -6,6 +6,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`turboquant-plan` over-estimated prefill workspace on big-vocab models by
+  charging for an lm_head output that is never computed.** The projection
+  billed `chunk x vocab x 2` for every prefill chunk. Both engines chunk
+  prefill (`mlx_lm.generate_step`, mlx-vlm `generate/ar.py`) and both *discard*
+  the chunk forward's return value, evaluating only the KV cache state — and
+  MLX is lazy, so an lm_head matmul nobody asks for never runs. Measured on an
+  M4 Max at 2048 x 202048, against a floor doing the cache work alone:
+  dropping the output costs **0 MB**, while slicing `[:, -1:]` out of it costs
+  the full **763 MiB**. Both loops also leave exactly one token for the scoring
+  step.
+
+  So the term is real only when the prompt fits in a *single* forward
+  (`context <= step`), where the slice happens after the matmul. On
+  Muse-Glimmer-30B at 5,068 tokens this cut the projected workspace from 5.21
+  GB to 4.39 GB, and it was making `--prefill-step-size` look like it bought
+  headroom it does not buy. The estimate is now the max of the widest chunk
+  pass and the one-token scoring step, rather than a sum of costs that never
+  coexist.
+
+  Also corrected: the chunk can no longer exceed the prompt, so a 900-token
+  prompt is billed as a 900-token forward instead of a 2048-token one.
+
+  MoE expert dequantization remains unmodelled. The field-calibrated mini
+  datapoints are unaffected — they were measured on a config with no
+  `vocab_size`, so they never depended on this term.
+
 ## [0.21.1] - 2026-08-11
 
 Two `turboquant-serve-vlm` fixes found by using it: an agent harness never

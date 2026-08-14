@@ -46,6 +46,25 @@ Q35 = {
 }
 
 
+# Muse-Glimmer-30B geometry (the real one). Unlike Q35 this carries a
+# vocab_size, and a big one — it is the fixture for anything lm_head-shaped.
+MUSE = {
+    "model_type": "muse_glimmer",
+    "quantization": {"mode": "turboquant", "bits": 3, "group_size": 64},
+    "text_config": {
+        "num_hidden_layers": 32,
+        "hidden_size": 6656,
+        "intermediate_size": 19968,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 202048,
+        "sliding_window": 2048,
+        "layer_types": (["sliding_attention"] * 3 + ["full_attention"]) * 8,
+    },
+}
+
+
 def _write_model(tmp_path, cfg, tensors):
     """Minimal on-disk model: config.json + one shard whose HEADER is real but
     whose payload is zero-filled (the planner must never read the payload)."""
@@ -209,6 +228,42 @@ class TestWorkspace:
         assert a == pytest.approx(b * 16)          # linear in chunk
         c = prefill_workspace_bytes(Q35, 42000, 128)
         assert c == pytest.approx(b * 2)           # linear in context
+
+    def test_chunked_prefill_does_not_pay_for_the_lm_head(self):
+        """The chunk loop discards the forward's output and evaluates only the
+        cache state; MLX being lazy, the lm_head matmul never runs. Measured on
+        an M4 Max at 2048x202048: dropping the output costs 0 MB, while slicing
+        [:, -1:] out of it costs the full 763 MiB.
+
+        So a big-vocab model prefilled in chunks must be billed attention
+        scratch, NOT chunk x vocab x 2 (0.83 GB at 2048 x 202048 on Muse).
+        """
+        w = prefill_workspace_bytes(MUSE, 5068, 2048)
+        attn = 2048 * 5068 * MUSE["text_config"]["num_attention_heads"] * 2
+        assert w == pytest.approx(attn)
+
+        naive = attn + 2048 * MUSE["text_config"]["vocab_size"] * 2
+        assert naive - w > 0.8 * GB, "the term this test exists to keep out"
+
+    def test_unchunked_prefill_does_pay_for_the_lm_head(self):
+        """A prompt that fits in ONE forward gets no such relief: the engine
+        slices logits[:, -1, :] after the matmul has already run."""
+        w = prefill_workspace_bytes(MUSE, 1500, 2048)
+        heads = MUSE["text_config"]["num_attention_heads"]
+        assert w == pytest.approx(1500 * 1500 * heads * 2
+                                  + 1500 * MUSE["text_config"]["vocab_size"] * 2)
+
+    def test_chunk_never_exceeds_the_prompt(self):
+        """context <= step means the forward is prompt-wide, not step-wide."""
+        assert (prefill_workspace_bytes(MUSE, 900, 2048)
+                == prefill_workspace_bytes(MUSE, 900, 900))
+
+    def test_chunking_crossover_is_a_drop_not_a_jump(self):
+        """Crossing the chunk size must not make the estimate worse: past the
+        bound the lm_head term is elided, which is a saving, not a cost."""
+        just_under = prefill_workspace_bytes(MUSE, 2048, 2048)
+        just_over = prefill_workspace_bytes(MUSE, 2100, 2048)
+        assert just_over < just_under
 
 
 class TestFieldCalibration:
