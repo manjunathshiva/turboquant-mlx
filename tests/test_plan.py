@@ -17,6 +17,7 @@ from turboquant_mlx.plan import (
     machine,
     footprint,
     _attention_layers,
+    _moe_prefill_bytes,
     _resolve,
     is_complete_checkpoint,
     kv_bytes,
@@ -28,7 +29,11 @@ from turboquant_mlx.plan import (
 
 GB = 1e9
 
-# Qwen3.6-35B-A3B geometry (the real one, from the shipped config)
+# Qwen3.6-35B-A3B geometry (the real one, from the shipped config).
+# NOTE: this fixture carries neither `vocab_size` nor `moe_intermediate_size`,
+# so the lm_head and MoE-routing terms of prefill_workspace_bytes are both
+# ZERO here. That is why the field calibration below is unaffected by changes
+# to either — it is not coverage of them. Use MUSE / LAGUNA for those.
 Q35 = {
     "model_type": "qwen3_5_moe",
     "quantization": {"mode": "turboquant", "bits": 3, "group_size": 64},
@@ -42,6 +47,45 @@ Q35 = {
         "num_experts_per_tok": 8,
         # 10 of 40 layers are full attention (hybrid GatedDeltaNet)
         "layer_types": (["linear_attention"] * 3 + ["full_attention"]) * 10,
+    },
+}
+
+
+# Muse-Glimmer-30B geometry (the real one). Unlike Q35 this carries a
+# vocab_size, and a big one — it is the fixture for anything lm_head-shaped.
+MUSE = {
+    "model_type": "muse_glimmer",
+    "quantization": {"mode": "turboquant", "bits": 3, "group_size": 64},
+    "text_config": {
+        "num_hidden_layers": 32,
+        "hidden_size": 6656,
+        "intermediate_size": 19968,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 202048,
+        "sliding_window": 2048,
+        "layer_types": (["sliding_attention"] * 3 + ["full_attention"]) * 8,
+    },
+}
+
+
+# Laguna-S-2.1 geometry, read off the shipped config.json. Unlike Q35 this
+# carries moe_intermediate_size + num_experts_per_tok, so it is the fixture for
+# anything that depends on expert routing.
+LAGUNA = {
+    "model_type": "laguna",
+    "quantization": {"mode": "turboquant", "bits": 3, "group_size": 64},
+    "text_config": {
+        "num_hidden_layers": 48,
+        "hidden_size": 3072,
+        "moe_intermediate_size": 1024,
+        "intermediate_size": 12288,      # the DENSE mlp — must not be used
+        "num_experts": 256,
+        "num_experts_per_tok": 10,
+        "num_attention_heads": 48,
+        "vocab_size": 100352,
+        "layer_types": (["sliding_attention"] * 3 + ["full_attention"]) * 12,
     },
 }
 
@@ -210,6 +254,118 @@ class TestWorkspace:
         c = prefill_workspace_bytes(Q35, 42000, 128)
         assert c == pytest.approx(b * 2)           # linear in context
 
+    def test_chunked_prefill_does_not_pay_for_the_lm_head(self):
+        """The chunk loop discards the forward's output and evaluates only the
+        cache state; MLX being lazy, the lm_head matmul never runs. Measured on
+        an M4 Max at 2048x202048: dropping the output costs 0 MB, while slicing
+        [:, -1:] out of it costs the full 763 MiB.
+
+        So a big-vocab model prefilled in chunks must be billed attention
+        scratch, NOT chunk x vocab x 2 (0.83 GB at 2048 x 202048 on Muse).
+        """
+        w = prefill_workspace_bytes(MUSE, 5068, 2048)
+        attn = 2048 * 5068 * MUSE["text_config"]["num_attention_heads"] * 2
+        assert w == pytest.approx(attn)
+
+        naive = attn + 2048 * MUSE["text_config"]["vocab_size"] * 2
+        assert naive - w > 0.8 * GB, "the term this test exists to keep out"
+
+    def test_unchunked_prefill_does_pay_for_the_lm_head(self):
+        """A prompt that fits in ONE forward gets no such relief: the engine
+        slices logits[:, -1, :] after the matmul has already run."""
+        w = prefill_workspace_bytes(MUSE, 1500, 2048)
+        heads = MUSE["text_config"]["num_attention_heads"]
+        assert w == pytest.approx(1500 * 1500 * heads * 2
+                                  + 1500 * MUSE["text_config"]["vocab_size"] * 2)
+
+    def test_chunk_never_exceeds_the_prompt(self):
+        """context <= step means the forward is prompt-wide, not step-wide."""
+        assert (prefill_workspace_bytes(MUSE, 900, 2048)
+                == prefill_workspace_bytes(MUSE, 900, 900))
+
+    def test_moe_term_bounds_the_measured_per_routing_cost(self):
+        """SwitchGLU fans each token out to top_k rows, so an expert block's
+        transient scales with chunk x top_k.
+
+        MEASURED on an M4 Max, Laguna-S-2.1's exact geometry (256 experts,
+        hidden 3072, moe_inter 1024, top-10), one gate/up/down block, sorted
+        prefill, peak over resident packed weights: 30,833 B/routing at step
+        256 and 30,819 at step 1024. The model must BOUND that, not match it —
+        this tool exists to prevent OOMs.
+        """
+        step, top_k = 1024, LAGUNA["text_config"]["num_experts_per_tok"]
+        per_routing = (_moe_prefill_bytes(LAGUNA, step, LAGUNA["quantization"])
+                       / (step * top_k))
+        assert per_routing >= 30833, "must not under-predict the measurement"
+        assert per_routing < 30833 * 1.25, "bound has drifted loosely"
+
+    def test_moe_term_scales_with_top_k_not_just_chunk(self):
+        few = dict(LAGUNA, text_config=dict(LAGUNA["text_config"],
+                                            num_experts_per_tok=5))
+        assert (_moe_prefill_bytes(LAGUNA, 512, None)
+                == pytest.approx(_moe_prefill_bytes(few, 512, None) * 2))
+        assert (_moe_prefill_bytes(LAGUNA, 1024, None)
+                == pytest.approx(_moe_prefill_bytes(LAGUNA, 512, None) * 2))
+
+    def test_moe_uses_the_expert_width_not_the_dense_mlp(self):
+        """moe_intermediate_size (1024), never intermediate_size (12288) — a
+        12x error on any model that carries both."""
+        step = 512
+        c = LAGUNA["text_config"]
+        routings = step * c["num_experts_per_tok"]
+        assert _moe_prefill_bytes(LAGUNA, step, None) == pytest.approx(
+            routings * 8 * (c["hidden_size"] + c["moe_intermediate_size"]))
+
+    def test_sorted_prefill_pays_no_expert_dequantization(self):
+        """polar_gather_qmm tiles over PACKED weights when output dims are a
+        multiple of 64, materializing nothing. Measured: a 256-expert block at
+        chunk 2048 peaks at 357.8 MB, against 933.8 MB for a control that does
+        dequantize all experts — the 768 MB tensor never appears.
+
+        So the term is activations only. Break the tiling constraint and the
+        fallback cost shows up.
+        """
+        step = 512
+        c = LAGUNA["text_config"]
+        q = LAGUNA["quantization"]
+        routings = step * c["num_experts_per_tok"]
+
+        # Real geometry: activations only, even with TurboQuant weights.
+        assert _moe_prefill_bytes(LAGUNA, step, q) == pytest.approx(
+            routings * 8 * (c["hidden_size"] + c["moe_intermediate_size"])), \
+            "no dequant term should appear for 64-divisible expert dims"
+
+        # 1000 is not a multiple of 64, so gate/up cannot be tiled and fall
+        # back to dequantizing every expert: 256 x 1000 x 3072 x 2 B = 1.57 GB,
+        # under the switch layer's 2 GiB cap.
+        odd = dict(LAGUNA, text_config=dict(c, moe_intermediate_size=1000))
+        assert (_moe_prefill_bytes(odd, step, q)
+                - routings * 8 * (3072 + 1000)) == pytest.approx(
+            256 * 1000 * 3072 * 2)
+
+        # Past the cap the switch layer uses the gather kernels instead, which
+        # materialize nothing — so a huge expert tensor is NOT charged.
+        huge = dict(LAGUNA, text_config=dict(c, moe_intermediate_size=1000,
+                                             num_experts=4096))
+        assert _moe_prefill_bytes(huge, step, q) == pytest.approx(
+            routings * 8 * (3072 + 1000))
+
+    def test_no_moe_term_for_a_dense_model(self):
+        assert (prefill_workspace_bytes(MUSE, 5068, 512, is_moe=False)
+                == prefill_workspace_bytes(MUSE, 5068, 512))
+
+    def test_moe_term_skipped_when_routing_is_unknown(self):
+        """Q35 has no moe_intermediate_size; guessing it would move a verdict
+        on no evidence, so the term stays out."""
+        assert _moe_prefill_bytes(Q35, 512, Q35["quantization"]) == 0.0
+
+    def test_chunking_crossover_is_a_drop_not_a_jump(self):
+        """Crossing the chunk size must not make the estimate worse: past the
+        bound the lm_head term is elided, which is a saving, not a cost."""
+        just_under = prefill_workspace_bytes(MUSE, 2048, 2048)
+        just_over = prefill_workspace_bytes(MUSE, 2100, 2048)
+        assert just_over < just_under
+
 
 class TestFieldCalibration:
     """The mini datapoints. These are the reason the tool is trustworthy."""
@@ -255,13 +411,17 @@ class TestFieldCalibration:
         The measured fact is only that **2048 OOMed and 128 worked** — 512 and
         256 were never tried, so the field data does not actually contradict
         512. What it does suggest is that two errors were cancelling: the
-        undersized-RAM bug was compensating for MoE expert dequantization,
-        which `prefill_workspace_bytes` still does not model (SwitchLinear has
-        its own dequant-all fallback). This assertion therefore pins the part
-        that was measured and no more.
+        undersized-RAM bug was compensating for an unmodelled MoE term. This
+        assertion therefore pins the part that was measured and no more.
+
+        That MoE term is now modelled (`_moe_prefill_bytes`), and it turned out
+        NOT to be expert dequantization — sorted prefill tiles over packed
+        weights and materializes nothing. It is routing-expanded activations,
+        chunk x top_k wide. This fixture still does not exercise it, because
+        Q35 carries no `moe_intermediate_size`; see the note on the fixture.
 
         TODO: re-measure the real step ceiling for a MoE at 21K on the mini,
-        then model the MoE dequant term and tighten this back up.
+        then tighten this back up.
         """
         pl = self._plan(tmp_path, 12.59, context=21000, kv_bits=8)
         step = pl["projection"]["prefill_step_size"]
