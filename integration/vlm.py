@@ -49,9 +49,28 @@ def _require_mlx_vlm():
 # steady-state size over 4-bit affine here. MLX's affine path has a fused
 # quantized matmul for batched input and materializes nothing.
 # Net: -19 GB prefill peak for +0.21 GB on disk.
+# qwen3_5: the same lm_head reasoning, and the arithmetic is if anything worse
+# — 248320x5120 = 1.271B params against a 248K vocab. Measured on a real
+# PolarQuantizedLinear of that exact shape at 3-bit/g64:
+#
+#     tokens    1  ->   +0.000 GiB      (fused kernel, materializes nothing)
+#     tokens  256  ->   +0.116 GiB
+#     tokens  257  ->  +13.141 GiB      <-- fused kernel switches off
+#     tokens 2048  ->  +13.953 GiB
+#
+# against +1.895 GiB for the same shape as an 8-bit affine layer, which is the
+# logits array itself and carries no weight-dequant term at all.
+#
+# mlx-vlm's chunked prefill discards the chunk forward's return value, so MLX
+# never evaluates that matmul and the cliff stays hidden — but chunking only
+# engages above `prefill_step_size` (default 2048). A prompt of 257..2048
+# tokens takes the single-shot branch in `generate/ar.py`, which slices
+# `logits[:, -1, :]` and so DOES evaluate lm_head over the whole sequence.
+# That is an ordinary chat turn, not an edge case.
 VLM_SKIP_PATTERNS: dict[str, tuple[str, ...]] = {
     "diffusion_gemma": ("router", "self_conditioning", "embed_vision", ".mlp."),
     "muse_glimmer": ("lm_head",),
+    "qwen3_5": ("lm_head",),
 }
 
 
