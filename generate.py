@@ -106,6 +106,24 @@ def _prepare_polar_layers(model, weights, tq_config):
             if (1 << layer_bits) != cb_size:  # non-power-of-two: fall back
                 layer_bits = tq_config.bits_for_path(path)
 
+        def _group_size_for(input_dims: int) -> int:
+            """Recover the group size from the saved scales, not the config.
+
+            scales are (..., output_dims, n_groups) with
+            n_groups = input_dims // group_size, so the on-disk tensor states
+            the group size exactly. Re-deriving it from the config rules
+            instead means any change to those rules silently misreads every
+            older checkpoint — the failure mode CLAUDE.md records as having
+            already caused one real bug. Falls back to the config rule only
+            when scales are absent.
+            """
+            sc = weights.get(f"{path}.scales")
+            if sc is not None and sc.shape[-1] > 0:
+                derived, rem = divmod(input_dims, int(sc.shape[-1]))
+                if rem == 0 and derived > 0:
+                    return derived
+            return tq_config.group_size_for_path(path)
+
         if has_switch and isinstance(module, SwitchLinear):
             num_experts, output_dims, input_dims = module.weight.shape
             pq = PolarQuantizedSwitchLinear(
@@ -117,7 +135,7 @@ def _prepare_polar_layers(model, weights, tq_config):
                 # Match the convert side, which quantizes experts at
                 # group_size_for_path — so a model built with a finer
                 # --mlp-group-size loads with the correct scale shape.
-                group_size=tq_config.group_size_for_path(path),
+                group_size=_group_size_for(input_dims),
                 trit=is_trit,
                 needs_rotation=needs_rotation,
             )
@@ -129,7 +147,7 @@ def _prepare_polar_layers(model, weights, tq_config):
                 output_dims=output_dims,
                 bias=has_bias,
                 bits=layer_bits,
-                group_size=tq_config.group_size,
+                group_size=_group_size_for(input_dims),
                 use_qjl=has_qjl,
                 needs_rotation=needs_rotation,
             )
