@@ -1,0 +1,53 @@
+{
+  "corpus": {
+    "dataset": "wikitext/wikitext-2-raw-v1:test",
+    "rows": 4358,
+    "hf_fingerprint": "7ccd6deaa4fc56e5",
+    "text_sha256": "c5b5caea5bd655cb221545a484f2f0f59d35092a17a66840d7b9513d0b99687d"
+  },
+  "seq_len": 512,
+  "chunks": 32,
+  "note": "teacher-forced NLL over the whole corpus slice; tokenization asserted identical across models",
+  "results": [
+    {
+      "model": "./Qwen3.8-27B-tq4-g64",
+      "kind": "turboquant 4-bit g64 + 8-bit affine extras",
+      "ppl": 7.249630815134445,
+      "tokens": 16384,
+      "peak_gib": 17.801740968599916,
+      "identity": {
+        "spec": "./Qwen3.8-27B-tq4-g64",
+        "kind": "local",
+        "path": "Qwen3.8-27B-tq4-g64",
+        "safetensors_bytes": 16267476171,
+        "n_shards": 4
+      }
+    },
+    {
+      "model": "./Qwen3.8-27B-tq4-g64-x4",
+      "kind": "turboquant 4-bit g64 + 4-bit affine extras",
+      "ppl": 7.304318310563907,
+      "tokens": 16384,
+      "peak_gib": 16.467008912935853,
+      "identity": {
+        "spec": "./Qwen3.8-27B-tq4-g64-x4",
+        "kind": "local",
+        "path": "Qwen3.8-27B-tq4-g64-x4",
+        "safetensors_bytes": 14833737981,
+        "n_shards": 3
+      }
+    },
+    {
+      "model": "mlx-community/Qwen3.8-27B-4bit",
+      "kind": "affine 4-bit g64",
+      "ppl": 7.268542229379161,
+      "tokens": 16384,
+      "peak_gib": 16.155393222346902,
+      "identity": {
+        "spec": "mlx-community/Qwen3.8-27B-4bit",
+        "kind": "hub",
+        "revision": "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+      }
+    }
+  ]
+}

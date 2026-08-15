@@ -1,0 +1,140 @@
+[
+  {
+    "model": "./Qwen3.8-27B-tq4-g64",
+    "engine": "turboquant_mlx.generate_vlm",
+    "passed": 4,
+    "total": 4,
+    "peak_gib": 18.52,
+    "identity": {
+      "spec": "./Qwen3.8-27B-tq4-g64",
+      "kind": "local",
+      "path": "Qwen3.8-27B-tq4-g64",
+      "safetensors_bytes": 16267476171,
+      "n_shards": 4
+    },
+    "inputs": {
+      "font": {
+        "path": "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "sha256": "d72db21f9242aedd6b917d8549ad5921766b24d5f8d0becfda2ff4c620b3c2e0"
+      },
+      "images": {
+        "chart.png": "7c0340187ab10aed548db4eee48c2971e5f9d37e6e5147568f9b06589250f5a4",
+        "count.png": "768b147eb76c1ed3d6ae7108612bb1c5e2f328560601b3de277ff15ec4c0d750",
+        "spatial.png": "97b46fd94fbf5e6bbdd417129a2175802979e42c69db30757d4c87b53e082c5d",
+        "text.png": "4542e0bcd7c1879136921faf2505fbbbce92ad7f6f2c720f38e50a92b50ad389"
+      }
+    },
+    "cases": [
+      {
+        "case": "text.png",
+        "passed": true,
+        "answer": "VOLTAGE47",
+        "accept": [
+          "voltage 47",
+          "voltage47"
+        ],
+        "seconds": 7.9,
+        "peak_gib": 16.73
+      },
+      {
+        "case": "count.png",
+        "passed": true,
+        "answer": "3",
+        "accept": [
+          "3",
+          "three"
+        ],
+        "seconds": 6.8,
+        "peak_gib": 18.48
+      },
+      {
+        "case": "chart.png",
+        "passed": true,
+        "answer": "C",
+        "accept": [
+          "c"
+        ],
+        "seconds": 6.8,
+        "peak_gib": 18.52
+      },
+      {
+        "case": "spatial.png",
+        "passed": true,
+        "answer": "triangle",
+        "accept": [
+          "triangle"
+        ],
+        "seconds": 6.8,
+        "peak_gib": 18.48
+      }
+    ]
+  },
+  {
+    "model": "mlx-community/Qwen3.8-27B-4bit",
+    "engine": "mlx_vlm.generate",
+    "passed": 3,
+    "total": 4,
+    "peak_gib": 17.66905188560486,
+    "identity": {
+      "spec": "mlx-community/Qwen3.8-27B-4bit",
+      "kind": "hub",
+      "revision": "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+    },
+    "inputs": {
+      "font": {
+        "path": "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "sha256": "d72db21f9242aedd6b917d8549ad5921766b24d5f8d0becfda2ff4c620b3c2e0"
+      },
+      "images": {
+        "chart.png": "7c0340187ab10aed548db4eee48c2971e5f9d37e6e5147568f9b06589250f5a4",
+        "count.png": "768b147eb76c1ed3d6ae7108612bb1c5e2f328560601b3de277ff15ec4c0d750",
+        "spatial.png": "97b46fd94fbf5e6bbdd417129a2175802979e42c69db30757d4c87b53e082c5d",
+        "text.png": "4542e0bcd7c1879136921faf2505fbbbce92ad7f6f2c720f38e50a92b50ad389"
+      }
+    },
+    "cases": [
+      {
+        "case": "text.png",
+        "passed": false,
+        "answer": "VOLTAGE",
+        "accept": [
+          "voltage 47",
+          "voltage47"
+        ],
+        "seconds": 6.4,
+        "peak_gib": 17.562881112098694
+      },
+      {
+        "case": "count.png",
+        "passed": true,
+        "answer": "3",
+        "accept": [
+          "3",
+          "three"
+        ],
+        "seconds": 4.8,
+        "peak_gib": 17.636455595493317
+      },
+      {
+        "case": "chart.png",
+        "passed": true,
+        "answer": "C",
+        "accept": [
+          "c"
+        ],
+        "seconds": 4.8,
+        "peak_gib": 17.66905188560486
+      },
+      {
+        "case": "spatial.png",
+        "passed": true,
+        "answer": "triangle",
+        "accept": [
+          "triangle"
+        ],
+        "seconds": 4.7,
+        "peak_gib": 17.638318240642548
+      }
+    ]
+  }
+]
