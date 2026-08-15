@@ -82,17 +82,17 @@ def resolved_identity(spec, resolved_path=None):
         return {"spec": str(spec), "kind": "unresolved", "error": str(exc)[:120]}
 
 
-def engine_for(model):
+def engine_for(resolved):
     """(module, temp_flag) — TurboQuant checkpoints need our loader, others mlx-vlm's.
 
-    Same images, same prompts, same accept lists either way; only the entry
-    point differs, because `generate_vlm` refuses non-TurboQuant checkpoints
-    and `mlx_vlm.generate` cannot read a polar one.
+    Takes an ALREADY-resolved path so the whole run resolves the spec exactly
+    once. Same images, same prompts, same accept lists either way; only the
+    entry point differs, because `generate_vlm` refuses non-TurboQuant
+    checkpoints and `mlx_vlm.generate` cannot read a polar one.
     """
     from turboquant_mlx.serve_vlm import is_turboquant_checkpoint
-    from turboquant_mlx.generate import resolve_model_path
 
-    if is_turboquant_checkpoint(Path(resolve_model_path(str(model)))):
+    if is_turboquant_checkpoint(Path(resolved)):
         return "turboquant_mlx.generate_vlm", "--temp"
     return "mlx_vlm.generate", "--temperature"
 
@@ -252,17 +252,23 @@ def peak_gib(text):
 
 def run(model, max_tokens=128):
     manifest = build_images()
-    module, temp_flag = engine_for(model)
     from turboquant_mlx.generate import resolve_model_path
 
+    # Resolve once, here, and hand every child the resolved path. Passing the
+    # raw spec would let each subprocess re-resolve a mutable Hub id on its
+    # own, so a repo updated mid-run could be scored under the revision
+    # recorded in `identity` while actually loading a different one — which
+    # would quietly defeat the point of recording it. Also saves a Hub
+    # round-trip per case (measured ~0.4 s each).
     resolved = resolve_model_path(str(model))
+    module, temp_flag = engine_for(resolved)
     print(f"model: {model}   (via {module})\n")
     cases, peaks = [], []
     for name, prompt, accept in CASES:
         t0 = time.time()
         proc = subprocess.run(
             [PYTHON, "-m", module,
-             "--model", str(model), "--image", str(OUT / name),
+             "--model", str(resolved), "--image", str(OUT / name),
              "--prompt", prompt, "--max-tokens", str(max_tokens), temp_flag, "0"],
             capture_output=True, text=True,
         )

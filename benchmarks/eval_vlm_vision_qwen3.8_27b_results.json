@@ -33,7 +33,7 @@
           "voltage 47",
           "voltage47"
         ],
-        "seconds": 7.0,
+        "seconds": 7.9,
         "peak_gib": 16.73
       },
       {
@@ -54,7 +54,7 @@
         "accept": [
           "c"
         ],
-        "seconds": 6.9,
+        "seconds": 6.8,
         "peak_gib": 18.52
       },
       {
@@ -101,7 +101,7 @@
           "voltage 47",
           "voltage47"
         ],
-        "seconds": 6.1,
+        "seconds": 6.4,
         "peak_gib": 17.562881112098694
       },
       {
@@ -112,7 +112,7 @@
           "3",
           "three"
         ],
-        "seconds": 5.0,
+        "seconds": 4.8,
         "peak_gib": 17.636455595493317
       },
       {
@@ -122,7 +122,7 @@
         "accept": [
           "c"
         ],
-        "seconds": 5.2,
+        "seconds": 4.8,
         "peak_gib": 17.66905188560486
       },
       {
@@ -132,7 +132,7 @@
         "accept": [
           "triangle"
         ],
-        "seconds": 5.4,
+        "seconds": 4.7,
         "peak_gib": 17.638318240642548
       }
     ]
