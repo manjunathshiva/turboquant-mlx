@@ -27,7 +27,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the VLM loader shares `_prepare_polar_layers`, so every load path agrees.
 
   The default path is untouched: `--rotation hadamard` still hashes to
-  `99def7a6…`.
+  `99def7a6…`. Verified on real models beyond the dense case: **Laguna-S-2.1
+  tqTe** (256-expert MoE + ternary/trit, 526 quantized layers) and **Muse
+  Glimmer 30B tq4** (VLM, bfloat16 source) both load and generate normally,
+  covering `PolarQuantizedSwitchLinear`, the trit decode path, and the VLM
+  loader. A Qwen3-0.6B tq3 build produces output identical to `main`.
+
+  **Legacy guard.** Because the flag was ignored, a model converted *before*
+  this release with `--rotation none` records `"rotation": "none"` but has
+  ROTATED weights — trusting the config alone would skip the input rotation
+  and produce noise. The loader therefore checks the saved `signs`, which are
+  the ground truth: the genuinely unrotated path writes all-ones, the old
+  path always wrote randomized ±1. A negative entry anywhere means the
+  weights really were rotated, so rotation stays on. Verified by forging such
+  a model (rotated weights, config edited to `"none"`): it still generates
+  coherently.
 
   As an ablation it confirms the rotation is load-bearing. Reconstruction
   error on real Llama-3.2-1B weights at 3-bit/g64 is a **uniform 0.1828**

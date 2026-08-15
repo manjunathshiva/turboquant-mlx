@@ -64,12 +64,30 @@ def _prepare_polar_layers(model, weights, tq_config):
     # rotation="none" has UNROTATED weights, so rotating the input here would
     # land it in the wrong space and produce noise. The value round-trips
     # through the `quantization` block of config.json.
-    needs_rotation = tq_config.rotation != "none"
+    #
+    # LEGACY GUARD: `rotation` was silently ignored by every converter before
+    # this release, so a model built back then with --rotation none has
+    # rotation="none" in its config but ROTATED weights. Trusting the config
+    # alone would skip the input rotation and produce noise. The saved `signs`
+    # tell us the truth: the unrotated path writes all-ones (see
+    # polar_quantize_weight), while the old path always wrote randomized ±1.
+    # So a negative entry anywhere means the weights really were rotated.
+    config_says_none = tq_config.rotation == "none"
+
+    def _needs_rotation_for(path: str) -> bool:
+        if not config_says_none:
+            return True
+        s = weights.get(f"{path}.signs")
+        if s is None:
+            return False
+        return bool((s < 0).any().item())
 
     updates = {}
     for path, module in model.named_modules():
         if path not in quantized_paths:
             continue
+
+        needs_rotation = _needs_rotation_for(path)
 
         has_bias = f"{path}.bias" in weights
         has_qjl = f"{path}.qjl_packed" in weights

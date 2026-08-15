@@ -338,6 +338,48 @@ def test_rotation_none_skips_rotation_on_both_sides():
     print("test_rotation_none_skips_rotation_on_both_sides: PASSED")
 
 
+def test_loader_legacy_rotation_none_guard():
+    """A pre-0.23 model with rotation="none" still has ROTATED weights.
+
+    `rotation` was silently ignored by every converter before that release, so
+    trusting the config alone would skip the input rotation on those models and
+    produce noise. The saved `signs` are the ground truth: the genuinely
+    unrotated path writes all-ones, the old path always wrote randomized +/-1.
+    """
+    import mlx.nn as nn
+    from turboquant_mlx.config import TurboQuantConfig
+    from turboquant_mlx.generate import _prepare_polar_layers
+    from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
+
+    dim = 128
+
+    class _Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(dim, dim, bias=False)
+
+    def build(signs, rotation="none"):
+        model = _Tiny()
+        weights = {"proj.codebook": mx.zeros((8,)), "proj.signs": signs}
+        cfg = TurboQuantConfig(bits=3, group_size=64, rotation=rotation)
+        _prepare_polar_layers(model, weights, cfg)
+        assert isinstance(model.proj, PolarQuantizedLinear)
+        return model.proj._needs_rotation
+
+    # Legacy model: randomized signs mean the weights really were rotated.
+    legacy = mx.ones((dim,), dtype=mx.float16)
+    legacy[3] = -1.0
+    assert build(legacy) is True, "legacy rotation=none model must still rotate"
+
+    # Genuinely unrotated model: all-ones signs.
+    assert build(mx.ones((dim,), dtype=mx.float16)) is False
+
+    # rotation="hadamard" always rotates regardless of signs.
+    assert build(mx.ones((dim,), dtype=mx.float16), rotation="hadamard") is True
+
+    print("test_loader_legacy_rotation_none_guard: PASSED")
+
+
 def test_metal_kernel_correctness():
     """Test fused Metal kernel matches software dequant exactly."""
     from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
@@ -555,6 +597,7 @@ def run_all():
     test_quality_vs_affine()
     test_rotation_cannot_fuse_into_norm()
     test_rotation_none_skips_rotation_on_both_sides()
+    test_loader_legacy_rotation_none_guard()
     test_metal_kernel_correctness()
     test_qjl_packing_roundtrip()
     test_qjl_unbiasedness()
