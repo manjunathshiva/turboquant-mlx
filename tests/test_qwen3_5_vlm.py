@@ -83,6 +83,30 @@ def test_vision_tower_stays_full_precision():
     )
 
 
+@pytest.mark.parametrize("bad", ["0", "-1", "-256"])
+def test_prefill_step_size_rejects_non_positive(bad):
+    """``--prefill-step-size 0`` would spin mlx-vlm's prefill loop forever.
+
+    The loop is ``while inputs_embeds.shape[1] > 1: n = min(step, len - 1);
+    embeds = embeds[:, n:]``. At step 0 the slice removes nothing, so the length
+    never falls and it never terminates; a negative step slices from the wrong
+    end. mlx-vlm validates this in its diffusion path but not the
+    autoregressive one, so the flag has to reject it at parse time.
+    """
+    from turboquant_mlx.generate_vlm import _positive_int
+
+    with pytest.raises(Exception) as exc:
+        _positive_int(bad)
+    assert "positive" in str(exc.value)
+
+
+@pytest.mark.parametrize("good", ["1", "256", "2048"])
+def test_prefill_step_size_accepts_positive(good):
+    from turboquant_mlx.generate_vlm import _positive_int
+
+    assert _positive_int(good) == int(good)
+
+
 def test_the_fused_kernel_bound_is_what_makes_the_skip_load_bearing():
     """The cliff is real, and it is a step function at ``_QMM_MAX_TOKENS``.
 
