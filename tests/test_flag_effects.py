@@ -249,17 +249,59 @@ def test_every_cli_flag_is_referenced(module):
              if kw.arg == "dest" and isinstance(kw.value, ast.Constant)),
             None,
         )
-        for arg in node.args:
-            if isinstance(arg, ast.Constant) and str(arg.value).startswith("--"):
-                # argparse derives the attribute from the option name unless
-                # dest= overrides it; check whichever one actually gets read.
-                declared.add(explicit or str(arg.value)[2:].replace("-", "_"))
+        # argparse derives the dest from the FIRST long option only; any
+        # further strings are aliases sharing that same dest (convert.py
+        # declares "--hf-path", "--model" on one call, and there is no
+        # args.model). An explicit dest= overrides all of them.
+        first_long = next(
+            (str(a.value) for a in node.args
+             if isinstance(a, ast.Constant) and str(a.value).startswith("--")),
+            None,
+        )
+        if first_long is not None:
+            declared.add(explicit or first_long[2:].replace("-", "_"))
 
-    # Reads only. Deliberately NOT seeded with the dest= values themselves:
-    # declaring `dest="x"` is not evidence that anything ever reads `args.x`,
-    # and counting it as such would make every dest-renamed flag pass for free.
-    used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-    used |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    # Only reads off the parsed namespace count. Matching bare attribute or
+    # variable names anywhere in the module makes this check near-vacuous:
+    # `--bits` would look "read" because `config.bits` or a local `bits`
+    # exists, and an orphaned flag sails through. Verified: with that looser
+    # rule, deleting every `args.bits` read still passed.
+    namespaces = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        call = node.value
+        if (isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr in ("parse_args", "parse_known_args")):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    namespaces.add(tgt.id)
+                elif isinstance(tgt, ast.Tuple):  # parse_known_args() -> (ns, rest)
+                    for el in tgt.elts:
+                        if isinstance(el, ast.Name):
+                            namespaces.add(el.id)
+                            break
+
+    assert namespaces, f"{module}: found no parse_args() result to check against"
+
+    used = {
+        n.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute)
+        and isinstance(n.value, ast.Name)
+        and n.value.id in namespaces
+        and isinstance(n.ctx, ast.Load)
+    }
+    # getattr(args, "x") / vars(args)["x"] style reads
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in namespaces
+                and isinstance(node.args[1], ast.Constant)):
+            used.add(str(node.args[1].value))
 
     orphans = sorted(f for f in declared if f not in used)
     assert not orphans, (

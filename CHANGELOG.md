@@ -41,8 +41,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **`tests/test_flag_effects.py` — a mechanical audit of the whole flag
   surface**, in two independent layers, because a flag can break at either.
-  A *static* pass asserts every `--flag` declared by an entry point is read
-  somewhere in that module (catches "declared and forgotten"), and a
+  A *static* pass asserts every `--flag` declared by an entry point is
+  actually read off the `parse_args()` namespace (catches "declared and
+  forgotten"), and a
   *behavioural* pass asserts each config field actually changes the quantized
   bytes (catches "plumbed all the way through, then ignored" — exactly how
   `--rotation` passed every review for the project's entire history).
