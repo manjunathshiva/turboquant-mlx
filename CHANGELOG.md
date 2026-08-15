@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-15
+
+A correctness release. Every item below is a setting that was accepted,
+validated, stored in `config.json` and printed at conversion time — and then
+did not reach the quantizer. Two produced word salad when used; one made a
+layer 10.6x worse than not using it at all.
+
+**No shipped model is affected and no default output changes.** Verified by
+converting Llama-3.2-1B before and after under a fixed `PYTHONHASHSEED`: the
+`model.safetensors` are byte-identical (SHA256 `99def7a6…`). Additionally
+validated on Laguna-S-2.1 tqTe (256-expert MoE + ternary), Muse Glimmer 30B
+tq4 (VLM), and Laguna under expert streaming.
+
+The last entry is what keeps this from recurring: a mechanical audit of the
+flag surface, which is what found the `--mlp-group-size` bug.
+
 ### Fixed
 
 - **The dense group-size compatibility check validated the wrong value.** It
