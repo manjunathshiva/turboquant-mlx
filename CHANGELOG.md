@@ -71,7 +71,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to float32 explicitly — the same dtype the rotated path already hands the
   kernel. The check is deliberately narrow (`== mx.bfloat16`): after
   `rotate_input` the dtype is float32 or float16 and never bfloat16, so it
-  is provably a no-op whenever rotation ran.
+  is provably a no-op whenever rotation ran. `StreamingSwitchLinear` carries
+  the same guard — it has its own `__call__` with its own rotation branch, so
+  fixing only the two resident layers would have left the streaming path
+  exposed. Streaming was verified end-to-end on Laguna-S-2.1 tqTe (141 expert
+  projections swapped, 2.74 GB resident vs 28.9 GB fully resident, 36.1 GB of
+  expert reads, coherent output).
 
 ### Removed
 
