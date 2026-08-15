@@ -35,6 +35,32 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
+def resolved_identity(spec):
+    """A record of exactly which bytes were measured.
+
+    Repo ids and dataset defaults are mutable — `mlx-community/X-4bit` can be
+    re-uploaded and a published number would silently start describing
+    different weights. For a Hub repo this pins the commit sha; for a local
+    directory it records the path and the total size of its safetensors, which
+    is enough to notice a swap.
+    """
+    from pathlib import Path as _P
+
+    p = _P(spec)
+    if p.is_dir():
+        shards = sorted(p.glob("*.safetensors"))
+        return {"spec": str(spec), "kind": "local",
+                "safetensors_bytes": sum(f.stat().st_size for f in shards),
+                "n_shards": len(shards)}
+    try:
+        from huggingface_hub import HfApi
+
+        return {"spec": str(spec), "kind": "hub",
+                "revision": HfApi().model_info(str(spec)).sha}
+    except Exception as exc:  # offline, private, or not a repo id
+        return {"spec": str(spec), "kind": "unresolved", "error": str(exc)[:120]}
+
+
 def load_any(path):
     """Load a TurboQuant or a stock mlx-vlm checkpoint, returning (model, kind)."""
     from mlx_vlm.utils import get_model_path, load_config
@@ -127,10 +153,14 @@ def main():
         ppl, n = perplexity(model, ids, args.seq_len, args.chunks, kind)
         peak = mx.get_peak_memory() / 1024**3
         results.append({"model": spec, "kind": kind, "ppl": ppl,
-                        "tokens": n, "peak_gib": peak})
+                        "tokens": n, "peak_gib": peak,
+                        "identity": resolved_identity(spec)})
         print(f"  peak {peak:.2f} GiB")
         del model
-        import gc; gc.collect(); mx.clear_cache()
+        import gc
+
+        gc.collect()
+        mx.clear_cache()
 
     print(f"\n{'model':<44}{'quantization':<34}{'PPL':>9}")
     print("-" * 88)
@@ -142,9 +172,16 @@ def main():
         print(f"\n{a['model']} vs {b['model']}: {d:+.2f}% PPL "
               f"({'better' if d < 0 else 'worse'})")
     if args.json:
-        Path(args.json).write_text(json.dumps(results, indent=2))
+        Path(args.json).write_text(json.dumps({
+            "corpus": "wikitext-2-raw-v1 test",
+            "seq_len": args.seq_len,
+            "chunks": args.chunks,
+            "note": ("teacher-forced NLL over the whole corpus slice; "
+                     "tokenization asserted identical across models"),
+            "results": results,
+        }, indent=2))
         print(f"\nwrote {args.json}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

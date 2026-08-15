@@ -1,14 +1,14 @@
 {
   "corpus": "wikitext-2-raw-v1 test",
   "seq_len": 512,
-  "chunks": 64,
+  "chunks": 32,
   "note": "teacher-forced NLL over the whole corpus slice; tokenization asserted identical across models",
   "results": [
     {
       "model": "./Qwen3.8-27B-tq4-g64",
       "kind": "turboquant 4-bit g64 + 8-bit affine extras",
-      "ppl": 8.332125769262642,
-      "tokens": 32768,
+      "ppl": 7.249630815134445,
+      "tokens": 16384,
       "peak_gib": 17.801740968599916,
       "identity": {
         "spec": "./Qwen3.8-27B-tq4-g64",
@@ -20,9 +20,9 @@
     {
       "model": "./Qwen3.8-27B-tq4-g64-x4",
       "kind": "turboquant 4-bit g64 + 4-bit affine extras",
-      "ppl": 8.40609137395774,
-      "tokens": 32768,
-      "peak_gib": 16.54513002745807,
+      "ppl": 7.304318310563907,
+      "tokens": 16384,
+      "peak_gib": 16.467008912935853,
       "identity": {
         "spec": "./Qwen3.8-27B-tq4-g64-x4",
         "kind": "local",
@@ -33,8 +33,8 @@
     {
       "model": "mlx-community/Qwen3.8-27B-4bit",
       "kind": "affine 4-bit g64",
-      "ppl": 8.35929115350064,
-      "tokens": 32768,
+      "ppl": 7.268542229379161,
+      "tokens": 16384,
       "peak_gib": 16.155393222346902,
       "identity": {
         "spec": "mlx-community/Qwen3.8-27B-4bit",

@@ -22,6 +22,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -35,6 +36,32 @@ from PIL import Image, ImageDraw, ImageFont
 # the environment the caller actually set up.
 PYTHON = sys.executable
 OUT = Path(tempfile.mkdtemp(prefix="tq_vision_"))
+
+
+def resolved_identity(spec):
+    """A record of exactly which bytes were measured.
+
+    Repo ids and dataset defaults are mutable — `mlx-community/X-4bit` can be
+    re-uploaded and a published number would silently start describing
+    different weights. For a Hub repo this pins the commit sha; for a local
+    directory it records the path and the total size of its safetensors, which
+    is enough to notice a swap.
+    """
+    from pathlib import Path as _P
+
+    p = _P(spec)
+    if p.is_dir():
+        shards = sorted(p.glob("*.safetensors"))
+        return {"spec": str(spec), "kind": "local",
+                "safetensors_bytes": sum(f.stat().st_size for f in shards),
+                "n_shards": len(shards)}
+    try:
+        from huggingface_hub import HfApi
+
+        return {"spec": str(spec), "kind": "hub",
+                "revision": HfApi().model_info(str(spec)).sha}
+    except Exception as exc:  # offline, private, or not a repo id
+        return {"spec": str(spec), "kind": "unresolved", "error": str(exc)[:120]}
 
 
 def engine_for(model):
@@ -52,16 +79,41 @@ def engine_for(model):
     return "mlx_vlm.generate", "--temperature"
 
 
+# Scalable fonts to draw the OCR and chart labels with, most-preferred first.
+# Covers macOS and the usual Linux packages. Override with TQ_VISION_FONT.
+_FONT_CANDIDATES = (
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+)
+
+
 def _font(size):
-    for path in (
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-    ):
+    """A scalable font at `size`, or a hard failure.
+
+    Deliberately no `ImageFont.load_default()` fallback. That returns a small
+    fixed-size bitmap face, so the text would render a few pixels tall and the
+    OCR case would measure nothing — while still reporting a tidy PASS/FAIL as
+    if the result meant something. A missing font is a setup problem and should
+    look like one.
+
+    Not bundled in the repo: shipping a font means carrying its licence and a
+    few hundred KB for a benchmark most people never run. Point
+    TQ_VISION_FONT at one instead.
+    """
+    explicit = os.environ.get("TQ_VISION_FONT")
+    for path in ((explicit,) if explicit else ()) + _FONT_CANDIDATES:
         try:
             return ImageFont.truetype(path, size)
         except OSError:
             continue
-    return ImageFont.load_default()
+    raise SystemExit(
+        "no scalable font found — the OCR and chart cases need one to render "
+        "legible text. Set TQ_VISION_FONT=/path/to/font.ttf, or install e.g. "
+        "fonts-dejavu. Looked in:\n  " + "\n  ".join(_FONT_CANDIDATES)
+    )
 
 
 def build_images():
@@ -158,6 +210,16 @@ def run(model, max_tokens=128):
              "--prompt", prompt, "--max-tokens", str(max_tokens), temp_flag, "0"],
             capture_output=True, text=True,
         )
+        if proc.returncode != 0:
+            # Never score a crash. A failed load or an OOM would otherwise be
+            # extracted as a wrong "answer" and recorded as a failed case,
+            # which reads as a model capability result rather than the setup
+            # failure it is.
+            raise SystemExit(
+                f"{model}: `{module}` exited {proc.returncode} on case "
+                f"{name!r} — this is an execution failure, not a wrong answer."
+                f"\n--- stderr ---\n{proc.stderr[-2000:]}"
+            )
         blob = proc.stdout + proc.stderr
         answer = extract_answer(blob)
         peak = peak_gib(blob)
@@ -175,7 +237,7 @@ def run(model, max_tokens=128):
           + (f", peak {max(peaks):.2f} GiB" if peaks else ""))
     return {"model": str(model), "engine": module, "passed": n_pass,
             "total": len(CASES), "peak_gib": max(peaks) if peaks else None,
-            "cases": cases}
+            "identity": resolved_identity(model), "cases": cases}
 
 
 def main():

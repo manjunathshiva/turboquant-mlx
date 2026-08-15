@@ -5,6 +5,12 @@
     "passed": 4,
     "total": 4,
     "peak_gib": 18.52,
+    "identity": {
+      "spec": "./Qwen3.8-27B-tq4-g64",
+      "kind": "local",
+      "safetensors_bytes": 16267476171,
+      "n_shards": 4
+    },
     "cases": [
       {
         "case": "text.png",
@@ -14,7 +20,7 @@
           "voltage 47",
           "voltage47"
         ],
-        "seconds": 7.8,
+        "seconds": 10.7,
         "peak_gib": 16.73
       },
       {
@@ -25,7 +31,7 @@
           "3",
           "three"
         ],
-        "seconds": 6.7,
+        "seconds": 8.4,
         "peak_gib": 18.48
       },
       {
@@ -35,7 +41,7 @@
         "accept": [
           "c"
         ],
-        "seconds": 6.8,
+        "seconds": 8.5,
         "peak_gib": 18.52
       },
       {
@@ -45,7 +51,7 @@
         "accept": [
           "triangle"
         ],
-        "seconds": 6.8,
+        "seconds": 8.3,
         "peak_gib": 18.48
       }
     ]
@@ -56,6 +62,11 @@
     "passed": 3,
     "total": 4,
     "peak_gib": 17.66905188560486,
+    "identity": {
+      "spec": "mlx-community/Qwen3.8-27B-4bit",
+      "kind": "hub",
+      "revision": "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
+    },
     "cases": [
       {
         "case": "text.png",
@@ -65,7 +76,7 @@
           "voltage 47",
           "voltage47"
         ],
-        "seconds": 6.7,
+        "seconds": 6.0,
         "peak_gib": 17.562881112098694
       },
       {
@@ -76,7 +87,7 @@
           "3",
           "three"
         ],
-        "seconds": 5.1,
+        "seconds": 5.0,
         "peak_gib": 17.636455595493317
       },
       {
@@ -86,7 +97,7 @@
         "accept": [
           "c"
         ],
-        "seconds": 5.2,
+        "seconds": 5.1,
         "peak_gib": 17.66905188560486
       },
       {
@@ -96,7 +107,7 @@
         "accept": [
           "triangle"
         ],
-        "seconds": 5.0,
+        "seconds": 5.1,
         "peak_gib": 17.638318240642548
       }
     ]
