@@ -256,10 +256,14 @@ def turboquant_quantize(
             del module
             continue
 
-        # Check group_size compatibility
+        # Check group_size compatibility against the group size this layer
+        # will ACTUALLY be quantized at — --mlp-group-size can differ from the
+        # base, and validating the base would let a layer past the check and
+        # then fail inside polar_quantize_weight.
         _, input_dims = module.weight.shape
-        if input_dims % tq_config.group_size != 0:
-            print(f"[WARNING] Skipping {path}: input_dims={input_dims} not divisible by group_size={tq_config.group_size}")
+        layer_group_size = tq_config.group_size_for_path(path)
+        if input_dims % layer_group_size != 0:
+            print(f"[WARNING] Skipping {path}: input_dims={input_dims} not divisible by group_size={layer_group_size}")
             n_skipped += 1
             del module
             continue
@@ -277,11 +281,11 @@ def turboquant_quantize(
         pq_layer = PolarQuantizedLinear.from_linear(
             module,
             bits=layer_bits,
-            # group_size_for_path, not the base group_size: --mlp-group-size
-            # must reach dense MLP linears exactly as --mlp-bits already does.
-            # (The loader recovers the real value from the saved scales, so
-            # this rule changing cannot desync convert from load.)
-            group_size=tq_config.group_size_for_path(path),
+            # Per-path, not the base group_size: --mlp-group-size must reach
+            # dense MLP linears exactly as --mlp-bits already does. (The loader
+            # recovers the real value from the saved scales, so this rule
+            # changing cannot desync convert from load.)
+            group_size=layer_group_size,
             seed=seed,
             needs_rotation=needs_rotation,
             use_qjl=tq_config.use_qjl,

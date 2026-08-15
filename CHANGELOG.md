@@ -8,6 +8,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The dense group-size compatibility check validated the wrong value.** It
+  tested `input_dims % tq_config.group_size` while the layer is quantized at
+  `group_size_for_path(path)`, so with e.g. `--group-size 64
+  --mlp-group-size 128` an MLP whose `input_dims` divides 64 but not 128
+  passed the check and then raised inside `polar_quantize_weight`. The MoE
+  branch already checked the per-path value; the dense branch now does too.
+
 - **`--mlp-group-size` silently did nothing on dense models.** Found by a
   systematic audit of every converter flag (see below). `bits_for_path`
   applies `--mlp-bits` to dense MLP linears, but the dense branch of the
@@ -48,9 +55,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   15 effect cases across dense and MoE, covering `bits`, `group_size`,
   `rotation`, `rotation_seed`, `attn_bits`, `mlp_bits`, `mlp_group_size`,
-  `use_qjl`, `ternary_experts` and `expert_down_bits`. All pass.
+  `use_qjl`, `ternary_experts` and `expert_down_bits`, plus a save/load
+  round-trip pinning the per-layer group-size derivation. All pass.
 
-### Fixed
+  The fingerprint hashes each parameter in its **own** dtype rather than
+  widening to float32. Packed weights are `uint32` and reach ~1.07e9 in
+  practice, 64x past float32's exact-integer limit of 2^24, so widening would
+  round distinct packings onto the same value and report "unchanged" for
+  genuinely different weights — a false pass in exactly the direction that
+  hides the bug being hunted.
 
 - **`--rotation` was accepted, stored, printed — and ignored.** All three
   values produced identical output. `polar_quantize_weight` had no rotation

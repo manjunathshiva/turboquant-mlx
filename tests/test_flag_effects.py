@@ -26,6 +26,7 @@ import pathlib
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 import pytest
 
 from turboquant_mlx.config import TurboQuantConfig
@@ -96,19 +97,26 @@ def _flatten(prefix, obj, out):
 
 
 def _fingerprint(model):
-    """Hash every quantized parameter: name, shape, dtype and bytes.
+    """Hash every quantized parameter: name, shape, dtype and native bytes.
 
     Shape alone is not enough — that is precisely what let a rotated-vs-
     unrotated mixup through. The bytes are the part that has to move.
+
+    Hashed in the parameter's OWN dtype, never widened to float32. Packed
+    weights are uint32, and float32 has a 24-bit mantissa, so casting would
+    round distinct packings onto the same value and make this audit report
+    "unchanged" for genuinely different weights — a false pass in the exact
+    direction that hides the bug being hunted.
     """
     items = []
     _flatten("", model.parameters(), items)
     h = hashlib.sha256()
     for name, arr in sorted(items):
+        mx.eval(arr)
         h.update(name.encode())
         h.update(str(arr.shape).encode())
         h.update(str(arr.dtype).encode())
-        h.update(bytes(memoryview(mx.array(arr).astype(mx.float32))))
+        h.update(np.ascontiguousarray(np.array(arr, copy=False)).tobytes())
     return h.hexdigest()
 
 
@@ -164,6 +172,59 @@ def test_flag_changes_output(label, moe, override, should_change):
         )
 
 
+def test_mixed_group_sizes_survive_a_save_load_round_trip():
+    """A checkpoint whose layers use DIFFERENT group sizes must reload right.
+
+    ``--group-size 64 --mlp-group-size 32`` produces attention and MLP tiers
+    with different scale shapes in one file. The loader must take each layer's
+    group size from its saved scales rather than re-deriving it from the
+    config rules — so the reload here is deliberately given a config whose
+    rules would answer 64 for the MLP. If the derivation regresses to reading
+    the config, the MLP scales are misread and the outputs diverge.
+    """
+    from turboquant_mlx.generate import _prepare_polar_layers
+
+    mx.random.seed(0)
+    cfg = {"model_type": "llama", "hidden_size": _DIM,
+           "num_hidden_layers": 2, "num_attention_heads": 4}
+    quantized, _ = turboquant_quantize(
+        _Tiny(e=0), cfg,
+        TurboQuantConfig(bits=3, group_size=64, mlp_group_size=32),
+    )
+    mx.eval(quantized.parameters())
+
+    items = []
+    _flatten("", quantized.parameters(), items)
+    weights = dict(items)
+
+    # The two tiers really are stored at different granularities.
+    assert weights["layers.0.self_attn.q_proj.scales"].shape[-1] == _DIM // 64
+    assert weights["layers.0.mlp.gate_proj.scales"].shape[-1] == _DIM // 32
+
+    # Reload with a config that does NOT mention mlp_group_size: its rules say
+    # 64 everywhere, so only the saved scales can give the MLP its true 32.
+    reloaded = _Tiny(e=0)
+    _prepare_polar_layers(reloaded, weights,
+                          TurboQuantConfig(bits=3, group_size=64))
+    reloaded.load_weights(list(weights.items()), strict=False)
+    mx.eval(reloaded.parameters())
+
+    assert reloaded.layers[0].self_attn.q_proj.group_size == 64
+    assert reloaded.layers[0].mlp.gate_proj.group_size == 32
+
+    x = mx.random.normal((2, _DIM)).astype(mx.float16)
+    for getter in (lambda m: m.layers[0].self_attn.q_proj,
+                   lambda m: m.layers[0].mlp.gate_proj):
+        want = getter(quantized)(x)
+        got = getter(reloaded)(x)
+        assert mx.allclose(want, got, atol=1e-4).item(), (
+            "mixed-group-size checkpoint did not reload identically — the "
+            "loader is not taking the group size from the saved scales"
+        )
+
+    print("test_mixed_group_sizes_survive_a_save_load_round_trip: PASSED")
+
+
 _ENTRY_POINTS = ["convert.py", "convert_vlm.py"]
 
 
@@ -179,26 +240,26 @@ def test_every_cli_flag_is_referenced(module):
 
     declared = set()
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
+        if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "add_argument"):
-            for arg in node.args:
-                if isinstance(arg, ast.Constant) and str(arg.value).startswith("--"):
-                    declared.add(str(arg.value)[2:].replace("-", "_"))
+            continue
+        explicit = next(
+            (str(kw.value.value) for kw in node.keywords
+             if kw.arg == "dest" and isinstance(kw.value, ast.Constant)),
+            None,
+        )
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and str(arg.value).startswith("--"):
+                # argparse derives the attribute from the option name unless
+                # dest= overrides it; check whichever one actually gets read.
+                declared.add(explicit or str(arg.value)[2:].replace("-", "_"))
 
+    # Reads only. Deliberately NOT seeded with the dest= values themselves:
+    # declaring `dest="x"` is not evidence that anything ever reads `args.x`,
+    # and counting it as such would make every dest-renamed flag pass for free.
     used = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     used |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-    used |= {kw.arg for n in ast.walk(tree)
-             if isinstance(n, ast.Call) for kw in n.keywords if kw.arg}
-
-    # `dest=` renames the attribute, so honour it before declaring a miss.
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "add_argument"):
-            for kw in node.keywords:
-                if kw.arg == "dest" and isinstance(kw.value, ast.Constant):
-                    used.add(str(kw.value.value))
 
     orphans = sorted(f for f in declared if f not in used)
     assert not orphans, (
