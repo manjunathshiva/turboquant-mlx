@@ -8,6 +8,50 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`--mlp-group-size` silently did nothing on dense models.** Found by a
+  systematic audit of every converter flag (see below). `bits_for_path`
+  applies `--mlp-bits` to dense MLP linears, but the dense branch of the
+  quantizer asked for `tq_config.group_size` directly instead of
+  `group_size_for_path`, so its documented sibling `--mlp-group-size` reached
+  MoE experts only. The two are documented as a matched pair; they now behave
+  like one. No shipped model is affected — the loader read the base group
+  size too, so convert and load agreed and no checkpoint was mis-scaled, and
+  no local or published model sets the flag. Default conversions remain
+  byte-identical (Llama-3.2-1B, SHA256 `99def7a6…`).
+
+- **The loader now recovers each layer's group size from the saved scales
+  rather than re-deriving it from the config rules.** `scales` are
+  `(..., output_dims, n_groups)` with `n_groups = input_dims // group_size`,
+  so the on-disk tensor states the group size exactly. Re-deriving it meant
+  any change to the path rules would silently mis-scale every older
+  checkpoint — the failure mode `CLAUDE.md` records as having already caused
+  one real bug, and the reason the fix above would otherwise have been unsafe
+  to ship. This also makes per-layer group sizes work end to end: a model
+  converted with `--group-size 64 --mlp-group-size 32` now loads with
+  attention at 64 and MLP at 32 and generates correctly.
+
+### Added
+
+- **`tests/test_flag_effects.py` — a mechanical audit of the whole flag
+  surface**, in two independent layers, because a flag can break at either.
+  A *static* pass asserts every `--flag` declared by an entry point is read
+  somewhere in that module (catches "declared and forgotten"), and a
+  *behavioural* pass asserts each config field actually changes the quantized
+  bytes (catches "plumbed all the way through, then ignored" — exactly how
+  `--rotation` passed every review for the project's entire history).
+  Documented no-ops are asserted to stay no-ops, so a flag leaking into
+  layers it should not touch fails too.
+
+  The fingerprint hashes parameter **bytes**, not just shapes. Shapes stay
+  correct no matter which domain the numbers live in, which is precisely why
+  the existing suite missed the rotation bugs.
+
+  15 effect cases across dense and MoE, covering `bits`, `group_size`,
+  `rotation`, `rotation_seed`, `attn_bits`, `mlp_bits`, `mlp_group_size`,
+  `use_qjl`, `ternary_experts` and `expert_down_bits`. All pass.
+
+### Fixed
+
 - **`--rotation` was accepted, stored, printed — and ignored.** All three
   values produced identical output. `polar_quantize_weight` had no rotation
   parameter at all, so the randomized Hadamard was applied unconditionally;

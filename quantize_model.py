@@ -277,7 +277,11 @@ def turboquant_quantize(
         pq_layer = PolarQuantizedLinear.from_linear(
             module,
             bits=layer_bits,
-            group_size=tq_config.group_size,
+            # group_size_for_path, not the base group_size: --mlp-group-size
+            # must reach dense MLP linears exactly as --mlp-bits already does.
+            # (The loader recovers the real value from the saved scales, so
+            # this rule changing cannot desync convert from load.)
+            group_size=tq_config.group_size_for_path(path),
             seed=seed,
             needs_rotation=needs_rotation,
             use_qjl=tq_config.use_qjl,
