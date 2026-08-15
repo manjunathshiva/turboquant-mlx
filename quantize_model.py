@@ -296,24 +296,26 @@ def turboquant_quantize(
                 if norm_path not in fused_norms:
                     try:
                         norm_module = _get_nested_attr(model, norm_path)
-                        if hasattr(norm_module, "weight"):
-                            input_dims = module.weight.shape[-1]
-                            signs = generate_random_signs(
-                                input_dims,
-                                seed=_get_layer_seed(tq_config.rotation_seed, path),
-                            )
-                            fused_weight = fuse_rotation_into_norm(
-                                norm_module.weight.astype(mx.float32),
-                                signs.astype(mx.float32),
-                            ).astype(norm_module.weight.dtype)
-                            norm_module.weight = fused_weight
-                            fused_norms.add(norm_path)
-                            del norm_module
                     except AttributeError:
-                        # Not every norm module exposes `weight` (some
-                        # architectures use a scale buffer or none at all).
-                        # Nothing to fuse there — skip and leave it unrotated.
-                        pass
+                        # `norm_path` is *guessed* — the layer path trimmed
+                        # back to its block plus the norm name — so it does
+                        # not resolve on every architecture. Only the lookup
+                        # is guarded: an AttributeError raised by the fusion
+                        # below is a real bug, not a missing norm.
+                        norm_module = None
+                    if norm_module is not None and hasattr(norm_module, "weight"):
+                        input_dims = module.weight.shape[-1]
+                        signs = generate_random_signs(
+                            input_dims,
+                            seed=_get_layer_seed(tq_config.rotation_seed, path),
+                        )
+                        fused_weight = fuse_rotation_into_norm(
+                            norm_module.weight.astype(mx.float32),
+                            signs.astype(mx.float32),
+                        ).astype(norm_module.weight.dtype)
+                        norm_module.weight = fused_weight
+                        fused_norms.add(norm_path)
+                    del norm_module
 
         # Quantize the linear layer
         seed = _get_layer_seed(tq_config.rotation_seed, path)
