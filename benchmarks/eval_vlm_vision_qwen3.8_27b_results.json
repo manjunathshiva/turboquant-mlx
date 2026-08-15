@@ -1,0 +1,104 @@
+[
+  {
+    "model": "./Qwen3.8-27B-tq4-g64",
+    "engine": "turboquant_mlx.generate_vlm",
+    "passed": 4,
+    "total": 4,
+    "peak_gib": 18.52,
+    "cases": [
+      {
+        "case": "text.png",
+        "passed": true,
+        "answer": "VOLTAGE47",
+        "accept": [
+          "voltage 47",
+          "voltage47"
+        ],
+        "seconds": 7.8,
+        "peak_gib": 16.73
+      },
+      {
+        "case": "count.png",
+        "passed": true,
+        "answer": "3",
+        "accept": [
+          "3",
+          "three"
+        ],
+        "seconds": 6.7,
+        "peak_gib": 18.48
+      },
+      {
+        "case": "chart.png",
+        "passed": true,
+        "answer": "C",
+        "accept": [
+          "c"
+        ],
+        "seconds": 6.8,
+        "peak_gib": 18.52
+      },
+      {
+        "case": "spatial.png",
+        "passed": true,
+        "answer": "triangle",
+        "accept": [
+          "triangle"
+        ],
+        "seconds": 6.8,
+        "peak_gib": 18.48
+      }
+    ]
+  },
+  {
+    "model": "mlx-community/Qwen3.8-27B-4bit",
+    "engine": "mlx_vlm.generate",
+    "passed": 3,
+    "total": 4,
+    "peak_gib": 17.66905188560486,
+    "cases": [
+      {
+        "case": "text.png",
+        "passed": false,
+        "answer": "VOLTAGE",
+        "accept": [
+          "voltage 47",
+          "voltage47"
+        ],
+        "seconds": 6.7,
+        "peak_gib": 17.562881112098694
+      },
+      {
+        "case": "count.png",
+        "passed": true,
+        "answer": "3",
+        "accept": [
+          "3",
+          "three"
+        ],
+        "seconds": 5.1,
+        "peak_gib": 17.636455595493317
+      },
+      {
+        "case": "chart.png",
+        "passed": true,
+        "answer": "C",
+        "accept": [
+          "c"
+        ],
+        "seconds": 5.2,
+        "peak_gib": 17.66905188560486
+      },
+      {
+        "case": "spatial.png",
+        "passed": true,
+        "answer": "triangle",
+        "accept": [
+          "triangle"
+        ],
+        "seconds": 5.0,
+        "peak_gib": 17.638318240642548
+      }
+    ]
+  }
+]

@@ -1,0 +1,32 @@
+{
+  "corpus": "wikitext-2-raw-v1 test",
+  "chunks": 64,
+  "seq_len": 512,
+  "machine": "Apple M4 Max 64 GB, macOS 26.5.2",
+  "mlx_lm": "0.31.3",
+  "mlx_vlm": "0.6.3",
+  "note": "teacher-forced NLL, greedy-irrelevant; tokenization asserted identical across models",
+  "results": [
+    {
+      "model": "mlx-community/Qwen3.8-27B-4bit",
+      "kind": "affine 4-bit g64",
+      "ppl": 8.35929115350064,
+      "tokens": 32768,
+      "peak_gib": 16.155393160879612
+    },
+    {
+      "model": "./Qwen3.8-27B-tq4-g64",
+      "kind": "turboquant 4-bit g64 + 8-bit affine extras",
+      "ppl": 8.332125769262642,
+      "tokens": 32768,
+      "peak_gib": 17.80174097046256
+    },
+    {
+      "model": "./Qwen3.8-27B-tq4-g64-x4",
+      "kind": "turboquant 4-bit g64 + 4-bit affine extras",
+      "ppl": 8.40609137395774,
+      "tokens": 32768,
+      "peak_gib": 16.467008914798498
+    }
+  ]
+}

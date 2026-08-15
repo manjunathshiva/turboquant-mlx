@@ -1554,6 +1554,55 @@ tokens takes the single-shot branch in `generate/ar.py`, which slices
 `logits[:, -1, :]` and therefore does evaluate `lm_head` across the whole
 sequence. That is an ordinary chat turn, not an edge case.
 
+#### Against MLX's own affine 4-bit
+
+[`mlx-community/Qwen3.8-27B-4bit`](https://huggingface.co/mlx-community/Qwen3.8-27B-4bit)
+is the same architecture at the same 4-bit / group-size-64 setting, with no MTP
+weights on either side — so this is a like-for-like comparison, run through the
+same harnesses and the same server.
+
+| | affine 4-bit | TurboQuant `tq4-g64` |
+|---|---|---|
+| on disk | 14.95 GiB | 15.15 GiB · **13.81** with `--extras-bits 4` |
+| bits/weight | 4.500 | **4.251** |
+| WikiText-2 PPL (16K / 32K tok) | 7.2685 / 8.3593 | **7.2496 / 8.3321** |
+| decode | **29.7 tok/s** | 11.3 tok/s |
+| peak, same harness | **16.16 GiB** | 17.80 GiB |
+| vision battery | 3/4 | 4/4 |
+| Opencode agentic | **pass** (6m42s) | **pass** (6m12s) |
+
+**Take the affine build if you want 4-bit Qwen3.8-27B.** It is 2.6× faster to
+decode at a lower peak, and the perplexity difference is 0.3% — real and stable
+in ordering across both corpus sizes, but far too small to trade that speed for.
+
+The one place TurboQuant is structurally ahead is storage. At identical bit
+width and group size, on the same 17408×5120 projection:
+
+| | weight | scales | biases | bits/weight |
+|---|---|---|---|---|
+| affine 4-bit | 42.50 MiB | 2.66 | **2.66** | **4.500** |
+| polar 4-bit | 42.50 MiB | 2.66 | — | **4.251** |
+
+The Hadamard rotation symmetrizes each group, so there is no zero-point to
+store — 5.5% leaner for free. That margin is a rounding error at 4-bit and the
+reason the codebook only earns its keep at 2-bit and below (see
+[the speed flip](#the-speed-flip)).
+
+Two cautions on reading the table. The vision split is **not** a capability
+gap: affine's single miss is one string (`VOLTAGE 47` → `VOLTAGE`), and a
+five-string follow-up probe put it at 4/5, so treat 3/4-vs-4/4 as a tie. And
+the agentic wall-clock is **not** a speed metric — affine decodes 2.6× faster
+yet finished *slower*, because it spent more tool turns.
+
+Reproduce both halves:
+
+```bash
+python -m turboquant_mlx.benchmarks.eval_vlm_perplexity \
+    ./Qwen3.8-27B-tq4-g64 mlx-community/Qwen3.8-27B-4bit --chunks 64
+python -m turboquant_mlx.benchmarks.eval_vlm_vision \
+    ./Qwen3.8-27B-tq4-g64 mlx-community/Qwen3.8-27B-4bit
+```
+
 #### Will it fit?
 
 `turboquant-plan --model <path>` at 16K context, per machine:
