@@ -6,6 +6,43 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`qwen3_5` VLMs keep `lm_head` off the polar path.** Qwen3.5-family
+  multimodal models (e.g. Qwen3.8-27B) have a 248,320-token vocabulary, making
+  `lm_head` 248320x5120 = 1.271B parameters — the largest matrix in the model.
+  `PolarQuantizedLinear` is fused only up to `_QMM_MAX_TOKENS` (256) tokens;
+  above that it dequantizes the weight through full-size intermediates. Measured
+  on that exact shape at 3-bit/g64: **+0.116 GiB at 256 tokens, +13.141 GiB at
+  257**. End to end on a 1342-token prompt the polar build peaks at **33.34 GB
+  against 22.85 GB** for the affine one, while saving only 0.63 GB on disk —
+  enough to put an otherwise-fine build over the limit on a 36 GB Mac.
+
+  It hides because mlx-vlm's chunked prefill discards the chunk forward's return
+  value, so MLX never evaluates the matmul. But chunking only engages *above*
+  `prefill_step_size` (default 2048), and a prompt of 257..2048 tokens takes the
+  single-shot branch in `generate/ar.py`, which slices `logits[:, -1, :]` and
+  does evaluate it. `muse_glimmer` already carried this skip for the same
+  reason; `qwen3_5` did not.
+
+### Added
+
+- **`generate_vlm --prefill-step-size`.** The VLM generate path had no way to
+  set the prefill chunk size, so the planner could recommend a value that was
+  not runnable there (`turboquant-plan` suggests one whenever the default would
+  not fit). It is the main memory knob for long prompts: on Qwen3.8-27B with a
+  1342-token prompt, `--prefill-step-size 256` measures **16.77 GB peak against
+  21.28 GB** at the 2048 default, for 2.1x slower prefill. mlx-vlm only chunks
+  *above* the step size, so prompts shorter than it run unchunked.
+
+- **Qwen3.8-27B validated** (dense 27.8B hybrid Gated-DeltaNet VLM, 48 linear +
+  16 full attention layers). `tq4-g64` = 15.15 GiB, `tq3-g64` = 12.88 GiB; both
+  pass an Opencode agentic task and the vision path. `tq4` is both faster and
+  better than `tq3` here. No architecture work was needed — mlx-lm 0.31.3
+  already carries `qwen3_5`. Verified on **both mlx-vlm 0.6.3 and 0.6.13**
+  (identical peaks and identical vision results), so the `[vlm]` floor of
+  0.6.12 reproduces the measurements.
+
 ## [0.23.0] - 2026-08-15
 
 A correctness release. Every item below is a setting that was accepted,

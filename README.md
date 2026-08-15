@@ -2,7 +2,7 @@
 
 Extreme **weight** and **KV cache** compression for LLMs on Apple Silicon. MLX implementation of Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (Zandieh et al., 2025) — Hadamard rotation + Lloyd-Max codebooks applied both to weights (compile time) and the KV cache (run time).
 
-Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE, Qwen3.6-35B-A3B, Qwen3-235B-A22B, DeepSeek-V2/V3), and **Mamba/attention hybrids** (Nemotron-3-Nano-4B, Nemotron-3-Super-120B). Compatible with hybrid attention architectures, attention sinks, sliding-window attention, and linear attention layers.
+Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE, Qwen3.6-35B-A3B, Qwen3-235B-A22B, DeepSeek-V2/V3), **Mamba/attention hybrids** (Nemotron-3-Nano-4B, Nemotron-3-Super-120B), and **multimodal** models (Muse Glimmer, Qwen3.8-27B). Compatible with hybrid attention architectures, attention sinks, sliding-window attention, and linear attention layers (including Gated DeltaNet).
 
 **With both weight and KV cache compression at 3-bit, GPT-OSS-120B fits its full 131K context window in 50 GB on a 64 GB MacBook — and KV cache compression actually makes generation *faster* on the 120B (8.7 vs 6.4 tok/s) because the smaller cache cuts memory bandwidth more than dequant costs.**
 
@@ -44,6 +44,9 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | Muse Glimmer (30B dense VLM) | [Affine 4-bit](https://huggingface.co/mlx-community/Muse-Glimmer-30B-4bit) | 4 | 4.3798 | 19.88 GiB | 26.1 tok/s · leaves embedding + vision tower at bf16 |
 | **Muse Glimmer (30B dense VLM)** | **TurboQuant, gs=64** | **4** | **4.3315** | **14.88 GiB** | **9.4 tok/s · better PPL than affine 4-bit in 25% less space** |
 | **Muse Glimmer (30B dense VLM)** | **TurboQuant, gs=64** | **3** | **5.0454** | **12.53 GiB** | **10.9 tok/s · smallest coherent build** |
+| Qwen3.8-27B (dense 27.8B hybrid-GDN VLM) | BF16 (original) | 16 | — | 55.6 GB | *Needs a 64 GB Mac just to load* |
+| **[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B)** | **TurboQuant, gs=64** | **4** | **—** | **15.15 GiB** | **11.4 tok/s · Opencode agentic pass · vision pass** |
+| **Qwen3.8-27B** | **TurboQuant, gs=64** | **3** | **—** | **12.88 GiB** | **9.2 tok/s · Opencode agentic pass · fits a 24 GB Mac** |
 
 ## Key Results — KV Cache Compression
 
@@ -1461,6 +1464,113 @@ did not.
 
 ---
 
+### Qwen3.8-27B (dense 27.8B hybrid Gated-DeltaNet VLM)
+
+[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) reports
+`model_type: qwen3_5` despite the name — a **dense 27.8B multimodal** model whose
+64 decoder layers are **48 Gated-DeltaNet (linear attention) + 16 full
+attention**, one full layer in every four. Hidden 5120, intermediate 17408,
+**vocabulary 248,320**, plus a 27-block vision tower. mlx-lm 0.31.3 and mlx-vlm
+0.6.3 already carry the architecture, so nothing needed porting; conversion
+takes about 18 seconds.
+
+| build | size | peak (1.3K prompt) | decode | Opencode agentic |
+|---|---|---|---|---|
+| **TurboQuant `tq4-g64`** | **15.15 GiB** | 22.85 GB | 11.4 tok/s | **pass** (6m12s) |
+| TurboQuant `tq3-g64` | 12.88 GiB | 20.60 GB | 9.2 tok/s | pass (6m32s) |
+
+Both fix a planted off-by-one end to end: run the given pytest command, read the
+file, make the minimal edit, re-run to green, explain with `file:line`. Vision
+works on both — shapes, colours, positions and grounded bounding boxes.
+
+**Take `tq4`.** It is *faster as well as better* than `tq3` for 2.3 GiB more, the
+same result the [speed flip](#the-speed-flip) predicts: the codebook path only
+earns its keep at 2-bit, and 3-bit's 10-indices-per-`uint32` packing costs more
+to unpack than 4-bit's clean 8.
+
+The hybrid stack makes KV very cheap — only 16 of 64 layers cache anything, so
+**64 KiB/token**, or 2.0 GiB at 32K context.
+
+```bash
+pip install "turboquant-mlx-full[vlm]"
+
+python -m turboquant_mlx.convert_vlm \
+  --hf-path Qwen/Qwen3.8-27B \
+  --mlx-path ./Qwen3.8-27B-tq4-g64 \
+  --bits 4 --group-size 64 --quantize-extras --extras-bits 8
+
+python -m turboquant_mlx.generate_vlm \
+  --model ./Qwen3.8-27B-tq4-g64 --prompt "..." --max-tokens 256
+```
+
+Measured on mlx-lm 0.31.3 with **both mlx-vlm 0.6.3 and 0.6.13** — identical
+peaks and identical vision results on each, so the `[vlm]` floor of 0.6.12
+reproduces these numbers.
+
+`--prefill-step-size` is the memory knob for long prompts, and it is a large
+one. mlx-vlm only chunks prefill *above* the step size, so a 1342-token prompt
+runs unchunked at the 2048 default:
+
+| `--prefill-step-size` | peak | prefill |
+|---|---|---|
+| default (2048 — unchunked here) | 21.28 GB | 162 tok/s |
+| **256** | **16.77 GB** | 77 tok/s |
+
+**−4.5 GB for 2.1× slower prefill.** 256 also keeps every TurboQuant layer on
+the fused Metal kernel, which materializes nothing. This is what makes the
+24 GB target work.
+
+#### `lm_head` stays off the polar path
+
+With a 248,320-token vocabulary `lm_head` is 248320×5120 = **1.271B
+parameters**, the largest matrix in the model. `PolarQuantizedLinear` has a
+fused Metal kernel only up to `_QMM_MAX_TOKENS` (256) tokens; past that it
+dequantizes the weight through full-size intermediates. Measured on exactly that
+shape at 3-bit/g64:
+
+| tokens | transient peak |
+|---|---|
+| 256 | +0.116 GiB |
+| **257** | **+13.141 GiB** |
+| 2048 | +13.953 GiB |
+
+The same shape as an 8-bit affine layer costs +1.895 GiB at 2048 tokens — that
+is the logits array itself, with no weight-dequant term at all. So `qwen3_5`
+joins `muse_glimmer` in `VLM_SKIP_PATTERNS`, and `lm_head` is left to the
+`--quantize-extras` affine path. End to end on a 1342-token prompt:
+
+| build | size | peak |
+|---|---|---|
+| `lm_head` affine | 15.15 GiB | **22.85 GB** |
+| `lm_head` polar | 14.52 GiB | **33.34 GB** |
+
+Polar buys 0.63 GB on disk and costs 10.5 GB at runtime — and that 33 GB peak is
+the difference between fitting a 36 GB Mac and not.
+
+This is easy to miss because mlx-vlm's chunked prefill *discards* the chunk
+forward's return value, so MLX never evaluates the matmul at all. But chunking
+only engages **above** `prefill_step_size` (default 2048); a prompt of 257–2048
+tokens takes the single-shot branch in `generate/ar.py`, which slices
+`logits[:, -1, :]` and therefore does evaluate `lm_head` across the whole
+sequence. That is an ordinary chat turn, not an edge case.
+
+#### Will it fit?
+
+`turboquant-plan --model <path>` at 16K context, per machine:
+
+| Mac | verdict |
+|---|---|
+| 16 GB | ❌ **Will not run.** Peak 18.44 GB against 15.46 GB usable — over by 2.98 GB. A dense model has no expert tier to stream, so the [16 GB recipe](#recipe-a-coding-agent-on-a-16-gb-mac-mini) does not apply |
+| 24 GB | ⚠️ Fits **after raising the Metal wired cap**, with `--prefill-step-size 256` — that knob measures 16.77 GB peak on a 1342-token prompt, against 21.28 GB at the default |
+| 36 GB | ✅ Resident, 12.34 GB headroom |
+| 64 GB | ✅ Resident, 39.40 GB headroom |
+
+> **Speed is the caveat.** At ~11 tok/s decode and ~110–160 tok/s prefill an
+> agentic turn takes about six minutes, against 33 s for Laguna-XS.2 at 3-bit.
+> It passes, but this is a model to serve for quality rather than latency.
+
+---
+
 ## How It Works
 
 TurboQuant is a two-stage, **calibration-free** quantization pipeline:
@@ -1494,7 +1604,8 @@ Options:
 |-------------|-----------|-----|--------|
 | LLaMA / Llama 3 | `llama` | No | Tested |
 | Qwen2 / Qwen2.5 | `qwen2` | No | Tested |
-| Qwen3.5 | `qwen3_5` | No | Tested |
+| Qwen3.5 / Qwen3.8 (text) | `qwen3_5` | No | Tested |
+| Qwen3.5-family VLM (hybrid Gated-DeltaNet + full attention, via **mlx-vlm**) | `qwen3_5` | No | Tested (Qwen3.8-27B, 27.8B dense: `tq4-g64` = 15.15 GiB, `tq3-g64` = 12.88 GiB; both pass an Opencode agentic task and the vision path). `lm_head` is kept off the polar path — see [Qwen3.8-27B](#qwen38-27b-dense-278b-hybrid-gated-deltanet-vlm) |
 | Mistral | `mistral` | No | Tested |
 | Qwen1.5-MoE | `qwen2_moe` | Yes | Tested |
 | GPT-OSS | `gpt_oss` | Yes | Tested |
@@ -1514,7 +1625,7 @@ Architectures that live in [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) rather
 than mlx-lm convert and run through dedicated entry points (v0.7.0+):
 
 ```bash
-pip install "turboquant-mlx-full[vlm]"   # adds mlx-vlm >= 0.6.3
+pip install "turboquant-mlx-full[vlm]"   # adds mlx-vlm >= 0.6.12
 
 # Convert (vision towers, routers, and known quant-sensitive blocks stay full precision)
 python -m turboquant_mlx.convert_vlm \

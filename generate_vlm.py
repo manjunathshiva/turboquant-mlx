@@ -23,6 +23,24 @@ from turboquant_mlx.generate import resolve_model_path
 from turboquant_mlx.integration.vlm import _require_mlx_vlm, load_turboquant_vlm
 
 
+def _positive_int(value: str) -> int:
+    """An int > 0, rejected at parse time rather than deep inside prefill.
+
+    mlx-vlm's chunked-prefill loop is
+    ``while inputs_embeds.shape[1] > 1: n = min(step, len - 1); embeds = embeds[:, n:]``.
+    At ``step=0`` that slices nothing off, the length never falls, and the loop
+    spins forever; a negative step slices from the wrong end. mlx-vlm guards
+    this in its diffusion path (``prefill_step_size must be a positive
+    integer``) but not in the autoregressive one, so guard it here.
+    """
+    ivalue = int(value)
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer, got {ivalue}"
+        )
+    return ivalue
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate text with a TurboQuant-compressed mlx-vlm model"
@@ -36,6 +54,15 @@ def main():
                         help="Sampling temperature (default: 0.0)")
     parser.add_argument("--image", type=str, default=None,
                         help="Optional image path/URL for multimodal prompts")
+    parser.add_argument("--prefill-step-size", type=_positive_int, default=None,
+                        help="Tokens per prefill chunk (mlx-vlm default 2048). "
+                             "This is the memory knob for long prompts: the "
+                             "transient prefill workspace scales with the "
+                             "chunk, and a chunk of 256 or less also keeps "
+                             "every TurboQuant layer on the fused Metal "
+                             "kernel, which materializes nothing. "
+                             "`turboquant-plan` recommends a value when the "
+                             "default would not fit.")
     parser.add_argument("--max-denoising-steps", type=int, default=None,
                         help="Cap diffusion denoising steps (model default 48)."
                              " Lower = faster, mild quality cost (try 24)")
@@ -89,6 +116,8 @@ def main():
     formatted = apply_chat_template(processor, config, args.prompt,
                                     num_images=num_images, **template_kwargs)
     gen_kwargs = {}
+    if args.prefill_step_size is not None:
+        gen_kwargs["prefill_step_size"] = args.prefill_step_size
     if args.max_denoising_steps is not None:
         gen_kwargs["max_denoising_steps"] = args.max_denoising_steps
     if args.max_canvas_length is not None:
