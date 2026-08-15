@@ -11,8 +11,7 @@ import os
 import mlx.core as mx
 import mlx.nn as nn
 
-from turboquant_mlx.core.codebook import get_codebook, dequantize_scalar
-from turboquant_mlx.core.packing import unpack_indices
+from turboquant_mlx.core.codebook import get_codebook
 from turboquant_mlx.core.rotation import rotate_input, rotate_weight
 from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
 from turboquant_mlx.core.qjl import qjl_quantize, qjl_correct
@@ -101,6 +100,17 @@ class PolarQuantizedLinear(nn.Module):
         # Apply online rotation if not fused into preceding norm
         if self._needs_rotation:
             x = rotate_input(x, self.signs)
+        # The fused Metal kernels cannot compile against bfloat16 activations.
+        # Nothing used to enforce that, because rotate_input multiplied by the
+        # float16 `signs` vector and MLX promoted bf16 -> float32 on the way
+        # out. With rotation="none" the raw bf16 reached the kernel and Metal
+        # failed to build the library. Promote to float32 here, which is
+        # exactly what the rotated path already hands the kernel for a bf16
+        # model. Deliberately narrow: after rotate_input the dtype is float32
+        # or float16, never bfloat16, so this is provably a no-op whenever
+        # rotation ran.
+        if x.dtype == mx.bfloat16:
+            x = x.astype(mx.float32)
 
         # Decode path (1 token): fused matrix-vector kernel.
         # Small batch: fused matrix-matrix kernel — faster AND allocates
@@ -185,7 +195,10 @@ class PolarQuantizedLinear(nn.Module):
         has_bias = "bias" in linear_layer
 
         # Stage 1: PolarQuant
-        result = polar_quantize_weight(weight, bits, group_size, seed)
+        # One flag drives both halves: the weights are rotated iff the layer
+        # will rotate its input. They can never disagree.
+        result = polar_quantize_weight(weight, bits, group_size, seed,
+                                       rotate=needs_rotation)
 
         # Create layer
         layer = cls(
@@ -198,18 +211,27 @@ class PolarQuantizedLinear(nn.Module):
         layer.codebook = result["codebook"]
         layer.signs = result["signs"]
 
-        # Stage 2: QJL residual correction
+        # Stage 2: QJL residual correction.
+        # The residual must be measured in the SAME domain the weights were
+        # packed in, because at inference qjl_correct() is applied to the very
+        # x the matmul saw — rotated iff needs_rotation. rotate_weight() cannot
+        # be used unconditionally: with rotation off the signs are all-ones,
+        # but it still applies the Hadamard, so the target would be rotated
+        # while w_deq is not, and the "correction" would be noise.
         if use_qjl:
-            # Compute residual in rotated space
-            w_rot = rotate_weight(
-                weight.astype(mx.float32),
-                result["signs"].astype(mx.float32),
+            w_target = (
+                rotate_weight(
+                    weight.astype(mx.float32),
+                    result["signs"].astype(mx.float32),
+                )
+                if needs_rotation
+                else weight.astype(mx.float32)
             )
             w_deq = polar_dequantize_weight(
                 result["packed_weight"], result["scales"], result["codebook"],
                 bits, group_size, input_dims,
             )
-            residual = w_rot - w_deq.astype(mx.float32)
+            residual = w_target - w_deq.astype(mx.float32)
             mx.eval(residual)
 
             qjl_result = qjl_quantize(residual, seed=qjl_seed)

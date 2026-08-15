@@ -631,6 +631,14 @@ class StreamingSwitchLinear(nn.Module):
         if self._needs_rotation:
             x = rotate_input(x, self.signs)
 
+        # Mirrors PolarQuantizedSwitchLinear: the fused Metal kernels cannot
+        # compile against bfloat16 activations, and that contract used to be
+        # met only as a side effect of rotate_input multiplying by the float16
+        # `signs`. With rotation="none" the raw bf16 would reach the kernel.
+        # No-op whenever rotation ran (its output is float32 or float16).
+        if x.dtype == mx.bfloat16:
+            x = x.astype(mx.float32)
+
         n_tokens = 1 if x.ndim <= 2 else math.prod(x.shape[:-2])
         k = indices.shape[-1] if indices.ndim >= 1 else 1
 

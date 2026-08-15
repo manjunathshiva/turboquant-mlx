@@ -36,10 +36,7 @@ from pathlib import Path
 
 import mlx.core as mx
 
-from turboquant_mlx.layers.polar_kv_cache import (
-    TurboQuantKVCache,
-    make_turboquant_cache,
-)
+from turboquant_mlx.layers.polar_kv_cache import make_turboquant_cache
 
 
 # ── Default config matrix ────────────────────────────────────────────────

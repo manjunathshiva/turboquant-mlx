@@ -28,10 +28,7 @@ from mlx_lm.models.cache import make_prompt_cache
 
 import turboquant_mlx.compat  # noqa: F401 — registers upstream patches on import
 from turboquant_mlx.generate import load_turboquant, resolve_model_path
-from turboquant_mlx.layers.polar_kv_cache import (
-    convert_cache_to_turboquant,
-    make_turboquant_cache,
-)
+from turboquant_mlx.layers.polar_kv_cache import convert_cache_to_turboquant
 
 
 def _is_turboquant_model(path) -> bool:
@@ -138,7 +135,7 @@ def main():
         print(f"\n[{name}]")
         print("-" * 72, flush=True)
         t0 = time.time()
-        text = generate(
+        generate(
             model,
             tokenizer,
             prompt=formatted,

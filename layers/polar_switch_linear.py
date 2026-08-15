@@ -17,7 +17,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from turboquant_mlx.core.codebook import get_codebook, get_trit_codebook
-from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
+from turboquant_mlx.core.polar_quantize import polar_quantize_weight
 from turboquant_mlx.core.rotation import rotate_input
 from turboquant_mlx.core.packing import TRITS_PER_U32
 
@@ -125,6 +125,18 @@ class PolarQuantizedSwitchLinear(nn.Module):
         if self._needs_rotation:
             x = rotate_input(x, self.signs)
 
+        # The fused Metal kernels cannot compile against bfloat16 activations.
+        # Nothing used to enforce that, because rotate_input multiplied by the
+        # float16 `signs` vector and MLX promoted bf16 -> float32 on the way
+        # out. With rotation="none" the raw bf16 reached the kernel and Metal
+        # failed to build the library. Promote to float32 here, which is
+        # exactly what the rotated path already hands the kernel for a bf16
+        # model. Deliberately narrow: after rotate_input the dtype is float32
+        # or float16, never bfloat16, so this is provably a no-op whenever
+        # rotation ran.
+        if x.dtype == mx.bfloat16:
+            x = x.astype(mx.float32)
+
         # Decode path: fused Metal kernel (no weight materialization)
         # Only reads the k selected experts, not all num_experts.
         # NOTE: when mlx-lm's SwitchMLP triggers do_sort, x.ndim drops to 3
@@ -198,7 +210,6 @@ class PolarQuantizedSwitchLinear(nn.Module):
             # Multi-input decode: k expert vectors (down_proj path)
             # x shape: (..., k, 1, input_dims) — one vector per expert
             # Use polar_multi_gather_qmv to avoid dequantizing all experts
-            orig_shape = x.shape
             x_2d = x.reshape(k, self.input_dims)  # (k, input_dims)
             idx_flat = indices.reshape(-1)  # (k,)
 
@@ -363,6 +374,9 @@ class PolarQuantizedSwitchLinear(nn.Module):
                 group_size=group_size,
                 seed=seed,
                 ternary=ternary,
+                # One flag drives both halves: experts are rotated iff the
+                # layer will rotate its input. They can never disagree.
+                rotate=needs_rotation,
             )
             packed_3d[e] = result["packed_weight"]
             scales_3d[e] = result["scales"]

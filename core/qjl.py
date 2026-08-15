@@ -84,7 +84,7 @@ def unpack_1bit(packed: mx.array, count: int) -> mx.array:
     Returns:
         (..., count) uint8 array of 0/1 values.
     """
-    *batch_shape, m = packed.shape
+    *batch_shape, _ = packed.shape
     packed_expanded = mx.expand_dims(packed, axis=-1)  # (..., M, 1)
     shifts = mx.arange(32, dtype=mx.uint32)  # (32,)
     bits = (packed_expanded >> shifts) & mx.array(1, dtype=mx.uint32)  # (..., M, 32)

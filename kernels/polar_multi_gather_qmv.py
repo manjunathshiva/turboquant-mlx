@@ -7,7 +7,6 @@ expert's activation is different after gate/up + SwiGLU.
 x layout: (k, input_dims) — k separate input vectors, one per expert.
 """
 
-import math
 
 import mlx.core as mx
 

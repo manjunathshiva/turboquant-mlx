@@ -1,6 +1,6 @@
 """Configuration for TurboQuant weight quantization."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -12,9 +12,24 @@ class TurboQuantConfig:
         bits: Base quantization bits (2, 3, or 4). Default 3.
         group_size: Number of weights sharing a scale factor. Default 64.
         use_qjl: Enable QJL 1-bit residual correction (adds ~1 bit overhead). Default False.
-        rotation: Rotation method - "hadamard", "blockwise_hadamard", or "none". Default "hadamard".
+        rotation: Rotation method - "hadamard", "blockwise_hadamard", or
+            "none". Default "hadamard".
+
+            "none" disables the randomized Hadamard entirely: weights are
+            quantized unrotated AND the layer skips ``rotate_input`` at
+            inference. Both halves are driven by this one field (converter:
+            ``quantize_model.py``; loader: ``generate.py``), so they cannot
+            drift apart. Expect worse quality — the rotation is what
+            Gaussianizes the weights for the Lloyd-Max codebook — but it is a
+            useful ablation for measuring what the rotation actually buys.
+
+            "blockwise_hadamard" is an accepted ALIAS for "hadamard", not a
+            separate mode. Blockwise is not a choice: ``rotate_weight`` picks
+            the largest Hadamard-compatible block that divides ``input_dims``
+            and blocks automatically when the full dimension is not
+            compatible. The alias is kept so older config.json files that
+            carry it still load.
         rotation_seed: Seed for random rotation signs (deterministic). Default 42.
-        fuse_rotations: Whether to fuse rotations into LayerNorm weights. Default False.
             Note: norm fusion is currently disabled by default because fusing a
             Hadamard rotation into a diagonal norm weight is not mathematically
             valid (H(diag(w) @ x) != diag(H@w) @ x). Online rotation is used
@@ -38,7 +53,6 @@ class TurboQuantConfig:
     use_qjl: bool = False
     rotation: str = "hadamard"
     rotation_seed: int = 42
-    fuse_rotations: bool = False
     attn_bits: Optional[int] = None
     mlp_bits: Optional[int] = None
     mlp_group_size: Optional[int] = None  # block-scale override for the MLP/expert tier
@@ -137,7 +151,6 @@ class TurboQuantConfig:
             "use_qjl": self.use_qjl,
             "rotation": self.rotation,
             "rotation_seed": self.rotation_seed,
-            "fuse_rotations": self.fuse_rotations,
             "attn_bits": self.attn_bits,
             "mlp_bits": self.mlp_bits,
             "mlp_group_size": self.mlp_group_size,
@@ -153,7 +166,6 @@ class TurboQuantConfig:
             use_qjl=d.get("use_qjl", False),
             rotation=d.get("rotation", "hadamard"),
             rotation_seed=d.get("rotation_seed", 42),
-            fuse_rotations=d.get("fuse_rotations", False),
             attn_bits=d.get("attn_bits", None),
             mlp_bits=d.get("mlp_bits", None),
             mlp_group_size=d.get("mlp_group_size", None),

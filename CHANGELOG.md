@@ -6,6 +6,145 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--rotation` was accepted, stored, printed — and ignored.** All three
+  values produced identical output. `polar_quantize_weight` had no rotation
+  parameter at all, so the randomized Hadamard was applied unconditionally;
+  `TurboQuantConfig.rotation` was validated and round-tripped through
+  `config.json` without ever reaching the quantizer. Measured on
+  Llama-3.2-1B under a fixed `PYTHONHASHSEED`, `--rotation hadamard`,
+  `none`, and `blockwise_hadamard` all produced `model.safetensors` with
+  SHA256 `99def7a6…`. This predates the `fuse_rotations` removal below —
+  verified by converting at the parent commit, which gives the same hash.
+
+  `rotation="none"` now genuinely disables the rotation, on **both** sides:
+  weights are quantized unrotated and the layer skips `rotate_input`. One
+  config field drives both (`quantize_model.py` on the convert side,
+  `generate.py::_prepare_polar_layers` on the load side), so they cannot
+  drift apart — which is exactly how `fuse_rotations` produced noise. The
+  streaming loader inherits `_needs_rotation` from the resident layer and
+  the VLM loader shares `_prepare_polar_layers`, so every load path agrees.
+
+  The default path is untouched: `--rotation hadamard` still hashes to
+  `99def7a6…`. Verified on real models beyond the dense case: **Laguna-S-2.1
+  tqTe** (256-expert MoE + ternary/trit, 526 quantized layers) and **Muse
+  Glimmer 30B tq4** (VLM, bfloat16 source) both load and generate normally,
+  covering `PolarQuantizedSwitchLinear`, the trit decode path, and the VLM
+  loader. A Qwen3-0.6B tq3 build produces output identical to `main`.
+
+  **Legacy guard.** Because the flag was ignored, a model converted *before*
+  this release with `--rotation none` records `"rotation": "none"` but has
+  ROTATED weights — trusting the config alone would skip the input rotation
+  and produce noise. The loader therefore checks the saved `signs`, which are
+  the ground truth: the genuinely unrotated path writes all-ones, the old
+  path always wrote randomized ±1. A negative entry anywhere means the
+  weights really were rotated, so rotation stays on. Verified by forging such
+  a model (rotated weights, config edited to `"none"`): it still generates
+  coherently.
+
+  As an ablation it confirms the rotation is load-bearing. Reconstruction
+  error on real Llama-3.2-1B weights at 3-bit/g64 is a **uniform 0.1828**
+  with rotation on — the same value for every layer, which is the
+  Gaussianization signature: after the Hadamard each group looks N(0,1), so
+  the Lloyd-Max codebook hits its designed error regardless of the layer's
+  native distribution. With rotation off it rises and scatters,
+  0.1862–0.1978 depending on the layer. End to end at 3-bit that compounds
+  into word salad; at 4-bit the same build is degraded but partly
+  grammatical. (A converter/loader mismatch would destroy both bit-widths
+  equally — that monotonic curve is what distinguishes real quality loss
+  from a wiring bug.)
+
+  `"blockwise_hadamard"` is now documented as an **alias** for `"hadamard"`,
+  not a separate mode. Blockwise was never a choice: `rotate_weight` picks
+  the largest Hadamard-compatible block dividing `input_dims` and blocks
+  automatically when the full dimension is not compatible. The alias is
+  still accepted so older `config.json` files keep loading.
+
+- **QJL measured its residual in the wrong domain when rotation was
+  disabled.** `from_linear` built the correction target with `rotate_weight`
+  unconditionally, but that applies the Hadamard even when the signs are
+  all-ones — so with `rotation="none"` the target was rotated while the
+  dequantized weights were not, making the residual `rotated - unrotated`.
+  At inference `qjl_correct` is applied to the same `x` the matmul saw, so
+  the "correction" was noise: measured relative error on a 3-bit layer went
+  from 0.1712 without QJL to **1.8200** with it, a 10.6x degradation.
+  The target now follows `needs_rotation`. Pinned by
+  `test_qjl_residual_matches_the_packed_domain`, whose invariant is simply
+  that QJL must never make a layer worse — in either rotation mode. Only
+  reachable via `--use-qjl` combined with `--rotation none`; the shipped
+  default leaves QJL off.
+
+- **The fused Metal kernels could not compile against bfloat16
+  activations.** Nothing enforced their documented `float16` input
+  contract; it was met only as a side effect of `rotate_input` multiplying
+  by the float16 `signs` vector, which promoted bf16 activations to
+  float32. With rotation disabled the raw bfloat16 reached the kernel and
+  Metal failed to build the library outright (`incompatible operand types
+  ('bfloat16_t' and 'half')`). Both quantized layers now promote bfloat16
+  to float32 explicitly — the same dtype the rotated path already hands the
+  kernel. The check is deliberately narrow (`== mx.bfloat16`): after
+  `rotate_input` the dtype is float32 or float16 and never bfloat16, so it
+  is provably a no-op whenever rotation ran. `StreamingSwitchLinear` carries
+  the same guard — it has its own `__call__` with its own rotation branch, so
+  fixing only the two resident layers would have left the streaming path
+  exposed. Streaming was verified end-to-end on Laguna-S-2.1 tqTe (141 expert
+  projections swapped, 2.74 GB resident vs 28.9 GB fully resident, 36.1 GB of
+  expert reads, coherent output).
+
+### Removed
+
+- **`--fuse-rotations` / `fuse_rotations`, which produced pure noise whenever
+  it was enabled.** The option claimed to fold a layer's Hadamard rotation
+  into the preceding RMSNorm weight, letting inference skip the online
+  rotation. That is not possible. A norm applies a *diagonal* weight
+  (`y = n * w`), and folding the rotation in would require pulling an
+  element-wise multiply through a Hadamard transform:
+
+      hadamard(signs * w) * n  ==  hadamard(signs * (n * w))     # false
+
+  A Hadamard mixes across dimensions, so the identity does not hold, and the
+  error is not a small approximation — measured cosine similarity between the
+  two sides is **+0.18 at dim=64, +0.04 at dim=128, and +0.004 at dim=4096**.
+  At model scale the "fused" result is orthogonal to the correct one. A
+  converted Llama-3.2-1B emitted textbook word salad (`"followed direct
+  Roberts cầuChildren packaged epidemi-k set done Liu visiting..."`) where the
+  same build with online rotation was coherent.
+
+  Two further defects sat on top of the broken identity, both of which would
+  have had to be fixed even if it had held: the dense path derived the
+  rotation seed per *projection* while `q/k/v` share one `input_layernorm`, so
+  only `q_proj`'s rotation was ever fused and `k_proj`/`v_proj` silently
+  inherited it; and the MoE path set `needs_rotation = False` without fusing
+  anything at all. Sharing the seed was tried and confirmed **not** to fix the
+  word salad, as the math predicts.
+
+  The escape hatch that let this survive was a unit test asserting only
+  `fused_weight.shape == (dim,)`. It is replaced by
+  `test_rotation_cannot_fuse_into_norm`, which pins the impossibility from
+  both sides: the Hadamard case must stay far from the truth, and the control
+  — a diagonal-only sign flip, which *does* commute with the norm weight —
+  must fuse exactly. A sign flip alone does not Gaussianize the weights, which
+  is the entire purpose of the rotation, so there is no salvageable middle
+  ground. Fusing a rotation correctly requires rotating the *residual stream*
+  (QuaRot-style: one shared orthogonal `Q` absorbed into the embeddings and
+  every output projection, with norm weights folded into the following linear
+  first) — a whole-model transform, not a per-layer one.
+
+  **No shipped model is affected and no output changes.** The CLI flag was
+  `store_true`, so every documented conversion already used online rotation,
+  and `convert_vlm` passed `fuse_rotations=False` explicitly. Verified by
+  converting Llama-3.2-1B before and after this change under a fixed
+  `PYTHONHASHSEED`: the resulting `model.safetensors` are byte-identical
+  (SHA256 `99def7a6…`). Only the now-meaningless `"fuse_rotations": false`
+  key disappears from the `quantization` block in `config.json`; older
+  `config.json` files carrying it still load unchanged.
+
+  `integration/rotation_configs.py` is kept — it encodes real per-architecture
+  structure (which projection reads which norm) and is the exact input a
+  correct residual-stream rotation would need — but it is now descriptive
+  only, with no runtime consumer.
+
 ## [0.22.0] - 2026-08-14
 
 `turboquant-plan` now models prefill the way it actually runs. Two

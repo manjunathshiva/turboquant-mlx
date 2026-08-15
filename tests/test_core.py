@@ -1,13 +1,12 @@
 """Comprehensive tests for TurboQuant-MLX core modules."""
 
-import math
 import mlx.core as mx
 import mlx.nn as nn
 
 
 def test_codebook_centroids():
     """Verify codebook centroids are symmetric and ordered."""
-    from turboquant_mlx.core.codebook import get_codebook, CENTROIDS
+    from turboquant_mlx.core.codebook import get_codebook
 
     for bits in [2, 3, 4]:
         centroids, boundaries = get_codebook(bits, dtype=mx.float32)
@@ -237,24 +236,185 @@ def test_quality_vs_affine():
     print("test_quality_vs_affine: PASSED")
 
 
-def test_rotation_fusion():
-    """Test rotation fusion into norm weights."""
-    from turboquant_mlx.core.rotation import generate_random_signs, fuse_rotation_into_norm, rotate_input
+def test_rotation_cannot_fuse_into_norm():
+    """A Hadamard rotation CANNOT be folded into a preceding norm weight.
+
+    This pins the reason `fuse_rotations` was removed. An RMSNorm applies a
+    diagonal weight, `y = n * w`. A quantized layer whose weights live in
+    rotated space needs `R @ y` where `R = H @ diag(signs)`. Folding R into
+    the norm would require `hadamard(signs * w) * n == hadamard(signs * (n * w))`
+    — pulling an element-wise multiply through a Hadamard transform. H mixes
+    across dimensions, so that identity is false, and the error is not small:
+    the two are essentially orthogonal at model-scale dims.
+
+    The control half shows the boundary precisely: a *diagonal* rotation (sign
+    flip alone, no Hadamard) does commute with the norm weight and fuses
+    exactly. It is the Hadamard that makes fusion impossible — and a sign flip
+    alone does not Gaussianize the weights, which is the whole point of the
+    rotation. Any future attempt must rotate the residual stream (QuaRot-style,
+    one shared Q absorbed into embeddings + output projections), not the norm.
+    """
+    import math
+    from turboquant_mlx.core.rotation import generate_random_signs
+
+    for dim in (128, 4096):
+        w = mx.random.normal((dim,)) * 0.5 + 1.0     # norm weight
+        n = mx.random.normal((dim,))                 # normalized activation
+        signs = generate_random_signs(dim, seed=42).astype(mx.float32)
+        scale = 1.0 / math.sqrt(dim)
+
+        # What the quantized layer actually needs: R @ (n * w)
+        truth = mx.hadamard_transform(
+            (signs * (n * w)).reshape(1, -1), scale=scale).reshape(-1)
+        # What any norm-fusion scheme can produce: n * <some fused vector>
+        fused = mx.hadamard_transform(
+            (signs * w).reshape(1, -1), scale=scale).reshape(-1)
+        got = n * fused
+
+        cos = float((got * truth).sum()
+                    / (mx.linalg.norm(got) * mx.linalg.norm(truth)))
+        assert abs(cos) < 0.5, (
+            f"dim={dim}: fusion unexpectedly close (cos={cos:.4f}). If this "
+            f"ever passes, the impossibility argument above needs revisiting."
+        )
+
+    # Control: a diagonal-only rotation DOES fuse, exactly.
+    dim = 4096
+    w = mx.random.normal((dim,)) * 0.5 + 1.0
+    n = mx.random.normal((dim,))
+    signs = generate_random_signs(dim, seed=42).astype(mx.float32)
+    assert float(mx.abs((n * (signs * w)) - (signs * (n * w))).max()) == 0.0
+
+    print("test_rotation_cannot_fuse_into_norm: PASSED")
+
+
+def test_rotation_none_skips_rotation_on_both_sides():
+    """rotation="none" must unrotate the WEIGHTS and the INPUT together.
+
+    This is the invariant `fuse_rotations` violated: weights quantized in
+    rotated space while the input arrives unrotated produces noise, and no
+    shape check catches it. Here we pin that the `rotate` flag really moves
+    which domain the packed weights live in.
+
+    `polar_dequantize_weight` returns the weight in whatever domain it was
+    packed in, so the two cases have different reconstruction targets:
+    rotate=True reconstructs `rotate_weight(w, signs)`, rotate=False
+    reconstructs `w` itself.
+    """
+    import numpy as np
+    from turboquant_mlx.core.polar_quantize import (
+        polar_quantize_weight, polar_dequantize_weight)
+    from turboquant_mlx.core.rotation import rotate_weight
+
+    dim = 256
+    w = mx.random.normal((128, dim))
+
+    rot = polar_quantize_weight(w, bits=4, group_size=64, seed=7, rotate=True)
+    off = polar_quantize_weight(w, bits=4, group_size=64, seed=7, rotate=False)
+
+    # rotate=False must leave the signs a no-op, so the stored vector cannot
+    # silently re-introduce a half-rotation anywhere downstream.
+    assert float(mx.abs(off["signs"] - 1.0).max()) == 0.0, "signs must be ones"
+
+    targets = {
+        "rotate=True": (rot, rotate_weight(w.astype(mx.float32),
+                                           rot["signs"].astype(mx.float32))),
+        "rotate=False": (off, w.astype(mx.float32)),
+    }
+    for name, (r, target) in targets.items():
+        recon = polar_dequantize_weight(
+            r["packed_weight"], r["scales"], r["codebook"],
+            r["bits"], r["group_size"], r["input_dims"],
+        ).astype(mx.float32)
+        rel = float(mx.linalg.norm(recon - target) / mx.linalg.norm(target))
+        assert rel < 0.10, f"{name}: round-trip error {rel:.4f} too high"
+
+    # The packed payloads must actually differ — otherwise `rotate` is a no-op
+    # and we are back to the silently-ignored flag this test exists to prevent.
+    assert not np.array_equal(
+        np.array(rot["packed_weight"]), np.array(off["packed_weight"])), \
+        "rotate=False produced identical packing — the flag is being ignored"
+
+    print("test_rotation_none_skips_rotation_on_both_sides: PASSED")
+
+
+def test_loader_legacy_rotation_none_guard():
+    """A pre-0.23 model with rotation="none" still has ROTATED weights.
+
+    `rotation` was silently ignored by every converter before that release, so
+    trusting the config alone would skip the input rotation on those models and
+    produce noise. The saved `signs` are the ground truth: the genuinely
+    unrotated path writes all-ones, the old path always wrote randomized +/-1.
+    """
+    import mlx.nn as nn
+    from turboquant_mlx.config import TurboQuantConfig
+    from turboquant_mlx.generate import _prepare_polar_layers
+    from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
 
     dim = 128
-    signs = generate_random_signs(dim, seed=42)
 
-    # Create a simple norm weight
-    norm_weight = mx.random.normal((dim,)) * 0.5 + 1.0
-    mx.eval(norm_weight)
+    class _Tiny(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(dim, dim, bias=False)
 
-    # Fuse rotation into norm
-    fused_weight = fuse_rotation_into_norm(norm_weight, signs)
-    mx.eval(fused_weight)
+    def build(signs, rotation="none"):
+        model = _Tiny()
+        weights = {"proj.codebook": mx.zeros((8,)), "proj.signs": signs}
+        cfg = TurboQuantConfig(bits=3, group_size=64, rotation=rotation)
+        _prepare_polar_layers(model, weights, cfg)
+        assert isinstance(model.proj, PolarQuantizedLinear)
+        return model.proj._needs_rotation
 
-    assert fused_weight.shape == (dim,), f"Fused weight shape mismatch"
+    # Legacy model: randomized signs mean the weights really were rotated.
+    legacy = mx.ones((dim,), dtype=mx.float16)
+    legacy[3] = -1.0
+    assert build(legacy) is True, "legacy rotation=none model must still rotate"
 
-    print("test_rotation_fusion: PASSED")
+    # Genuinely unrotated model: all-ones signs.
+    assert build(mx.ones((dim,), dtype=mx.float16)) is False
+
+    # rotation="hadamard" always rotates regardless of signs.
+    assert build(mx.ones((dim,), dtype=mx.float16), rotation="hadamard") is True
+
+    print("test_loader_legacy_rotation_none_guard: PASSED")
+
+
+def test_qjl_residual_matches_the_packed_domain():
+    """QJL must measure its residual in the domain the weights were packed in.
+
+    At inference `qjl_correct` is applied to the same x the matmul saw —
+    rotated iff needs_rotation. `rotate_weight` applies the Hadamard even when
+    the signs are all-ones, so computing the target with it unconditionally
+    makes the rotation="none" residual `rotated - unrotated`: not a correction
+    but noise. The invariant that catches it is simply that QJL must never
+    make a layer WORSE.
+    """
+    import mlx.nn as nn
+    from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
+
+    mx.random.seed(0)
+    lin = nn.Linear(256, 256, bias=False)
+    x = mx.random.normal((4, 256)).astype(mx.float16)
+    ref = x.astype(mx.float32) @ lin.weight.astype(mx.float32).T
+
+    for needs_rotation in (True, False):
+        errs = {}
+        for use_qjl in (False, True):
+            q = PolarQuantizedLinear.from_linear(
+                lin, bits=3, group_size=64, seed=7,
+                needs_rotation=needs_rotation, use_qjl=use_qjl,
+            )
+            y = q(x).astype(mx.float32)
+            errs[use_qjl] = float(
+                mx.linalg.norm(y - ref) / mx.linalg.norm(ref))
+        assert errs[True] < errs[False], (
+            f"needs_rotation={needs_rotation}: QJL made it worse "
+            f"({errs[False]:.4f} -> {errs[True]:.4f}) — the residual is being "
+            f"measured in the wrong domain"
+        )
+
+    print("test_qjl_residual_matches_the_packed_domain: PASSED")
 
 
 def test_metal_kernel_correctness():
@@ -472,7 +632,10 @@ def run_all():
     test_polar_quantize_weight()
     test_polar_linear_from_linear()
     test_quality_vs_affine()
-    test_rotation_fusion()
+    test_rotation_cannot_fuse_into_norm()
+    test_rotation_none_skips_rotation_on_both_sides()
+    test_loader_legacy_rotation_none_guard()
+    test_qjl_residual_matches_the_packed_domain()
     test_metal_kernel_correctness()
     test_qjl_packing_roundtrip()
     test_qjl_unbiasedness()

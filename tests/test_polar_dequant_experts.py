@@ -1,6 +1,5 @@
 """Tests for the fused expert-dequant kernel and the large-batch switch routing."""
 
-import math
 
 import mlx.core as mx
 import pytest

@@ -36,6 +36,7 @@ def polar_quantize_weight(
     group_size: int = 64,
     seed: int = 42,
     ternary: bool = False,
+    rotate: bool = True,
 ) -> dict:
     """Quantize a weight matrix using the PolarQuant pipeline.
 
@@ -50,6 +51,12 @@ def polar_quantize_weight(
             The 3-entry codebook is the self-describing marker the loader uses to
             select the trit decode path. ``bits`` is ignored for packing (kept 2
             for scale/group semantics).
+        rotate: Apply the randomized Hadamard rotation before grouping. This
+            MUST match the layer's ``needs_rotation``: the rotation is
+            orthonormal, so inference rotates the *input* to land in the same
+            space the weights were quantized in. Rotating one side and not the
+            other produces noise. Callers should pass the same flag to both
+            rather than deciding twice (see ``PolarQuantizedLinear.from_linear``).
 
     Returns:
         Dict with keys:
@@ -78,8 +85,13 @@ def polar_quantize_weight(
     # read as its own eval keeps the subsequent GPU kernels pure-compute (fast).
     mx.eval(weight)
 
-    # 1. Generate random signs for randomized Hadamard (shared across all rows)
-    signs = generate_random_signs(input_dims, seed=seed)
+    # 1. Generate random signs for randomized Hadamard (shared across all rows).
+    # With rotation off, store all-ones so the saved `signs` tensor stays
+    # shape-compatible and is a no-op if anything ever reads it.
+    if rotate:
+        signs = generate_random_signs(input_dims, seed=seed)
+    else:
+        signs = mx.ones((input_dims,), dtype=mx.float16)
     signs_f32 = signs.astype(mx.float32)
 
     if ternary:
@@ -103,8 +115,9 @@ def polar_quantize_weight(
         wb = weight[r0:r0 + rows_per_block].astype(mx.float32)
         rows = wb.shape[0]
 
-        # 2. Rotate weight rows (Gaussianize the distribution)
-        w_rot = rotate_weight(wb, signs_f32)
+        # 2. Rotate weight rows (Gaussianize the distribution). Skipped when
+        # the layer will not rotate its input either.
+        w_rot = rotate_weight(wb, signs_f32) if rotate else wb
 
         # 3. Group-wise normalization: reshape to (rows, n_groups, group_size).
         # Per-group scale uses RMS (= sigma for N(0, sigma^2) after rotation;

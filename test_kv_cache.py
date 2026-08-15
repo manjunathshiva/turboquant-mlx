@@ -28,7 +28,6 @@ import math
 import time
 
 import mlx.core as mx
-import mlx.nn as nn
 
 from turboquant_mlx.layers.polar_kv_cache import (
     TurboQuantKVCache,

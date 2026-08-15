@@ -125,7 +125,7 @@ def unpack_indices(packed: mx.array, bits: int, count: int) -> mx.array:
 
     elems_per_u32 = 32 // bits
     mask = mx.array((1 << bits) - 1, dtype=mx.uint32)
-    *batch_shape, m = packed.shape
+    *batch_shape, _ = packed.shape
 
     # Expand each uint32 into elems_per_u32 indices
     packed_expanded = mx.expand_dims(packed, axis=-1)  # (..., M, 1)

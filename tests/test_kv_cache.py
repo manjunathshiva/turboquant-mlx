@@ -1,6 +1,5 @@
 """Tests for TurboQuantKVCache mixed-precision K/V (v0.2 item #1)."""
 
-import math
 
 import mlx.core as mx
 import pytest

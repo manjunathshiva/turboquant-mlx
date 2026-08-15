@@ -166,7 +166,10 @@ class SafetensorsExpertReader:
         for fd in self._fds:
             try:
                 os.close(fd)
-            except Exception:
+            except OSError:
+                # Already closed, or the fd was never valid. close() runs
+                # from __del__ during interpreter teardown, where raising
+                # would only produce an ignored-exception warning.
                 pass
         self._fds = []
 
