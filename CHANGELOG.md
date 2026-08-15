@@ -6,6 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-15
+
+Qwen3.5-family VLM support (`model_type: qwen3_5`, e.g. Qwen3.8-27B), and the
+one thing that stopped those builds being usable.
+
+No architecture work was needed — mlx-lm 0.31.3 and mlx-vlm already carry
+`qwen3_5`. The substance is that a 248K-vocabulary `lm_head` must not go through
+the polar path, which costs 10.5 GB of runtime peak to save 0.63 GB on disk.
+
 ### Fixed
 
 - **`qwen3_5` VLMs keep `lm_head` off the polar path.** Qwen3.5-family
