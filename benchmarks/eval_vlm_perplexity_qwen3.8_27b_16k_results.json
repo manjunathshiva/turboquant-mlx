@@ -1,5 +1,10 @@
 {
-  "corpus": "wikitext-2-raw-v1 test",
+  "corpus": {
+    "dataset": "wikitext/wikitext-2-raw-v1:test",
+    "rows": 4358,
+    "hf_fingerprint": "7ccd6deaa4fc56e5",
+    "text_sha256": "c5b5caea5bd655cb221545a484f2f0f59d35092a17a66840d7b9513d0b99687d"
+  },
   "seq_len": 512,
   "chunks": 32,
   "note": "teacher-forced NLL over the whole corpus slice; tokenization asserted identical across models",
@@ -13,6 +18,7 @@
       "identity": {
         "spec": "./Qwen3.8-27B-tq4-g64",
         "kind": "local",
+        "path": "Qwen3.8-27B-tq4-g64",
         "safetensors_bytes": 16267476171,
         "n_shards": 4
       }
@@ -26,6 +32,7 @@
       "identity": {
         "spec": "./Qwen3.8-27B-tq4-g64-x4",
         "kind": "local",
+        "path": "Qwen3.8-27B-tq4-g64-x4",
         "safetensors_bytes": 14833737981,
         "n_shards": 3
       }

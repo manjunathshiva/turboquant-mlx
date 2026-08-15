@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -35,16 +36,34 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
-def resolved_identity(spec):
+def resolved_identity(spec, resolved_path=None):
     """A record of exactly which bytes were measured.
 
-    Repo ids and dataset defaults are mutable — `mlx-community/X-4bit` can be
-    re-uploaded and a published number would silently start describing
-    different weights. For a Hub repo this pins the commit sha; for a local
-    directory it records the path and the total size of its safetensors, which
-    is enough to notice a swap.
+    Repo ids are mutable — `mlx-community/X-4bit` can be re-uploaded and a
+    published number would silently start describing different weights.
+
+    The revision is read from the resolved snapshot directory, whose name IS
+    the commit sha, rather than asking the API what HEAD is now. That records
+    the revision actually loaded (no gap between load and lookup) and works
+    offline. The API is only a fallback for an unresolved spec.
+
+    Deliberately not a SHA-256 of every shard: these checkpoints are 13-16 GiB
+    each and three of them get scored per run, so digesting would add minutes
+    of pure I/O to every invocation. Shard count and total bytes catch a
+    swapped local build, and the revision pins a Hub one exactly.
     """
     from pathlib import Path as _P
+
+    if resolved_path is not None:
+        rp = _P(resolved_path)
+        # .../hub/models--org--name/snapshots/<sha>
+        if rp.parent.name == "snapshots" and len(rp.name) == 40:
+            return {"spec": str(spec), "kind": "hub", "revision": rp.name}
+        shards = sorted(rp.glob("*.safetensors"))
+        if shards:
+            return {"spec": str(spec), "kind": "local", "path": str(rp),
+                    "safetensors_bytes": sum(f.stat().st_size for f in shards),
+                    "n_shards": len(shards)}
 
     p = _P(spec)
     if p.is_dir():
@@ -59,7 +78,6 @@ def resolved_identity(spec):
                 "revision": HfApi().model_info(str(spec)).sha}
     except Exception as exc:  # offline, private, or not a repo id
         return {"spec": str(spec), "kind": "unresolved", "error": str(exc)[:120]}
-
 
 def load_any(path):
     """Load a TurboQuant or a stock mlx-vlm checkpoint, returning (model, kind)."""
@@ -89,6 +107,12 @@ def load_any(path):
 
 
 def corpus_ids(tokenizer, seq_len, n_chunks):
+    """(token ids, corpus fingerprint).
+
+    `load_dataset` resolves a mutable default revision, so the fingerprint is
+    recorded with the scores — two runs quoting the same PPL should be able to
+    show they read the same bytes.
+    """
     from datasets import load_dataset
 
     ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
@@ -98,7 +122,13 @@ def corpus_ids(tokenizer, seq_len, n_chunks):
     ids = tokenizer.encode(text[: need * 6])
     if len(ids) < need + 1:
         raise SystemExit(f"corpus too short: {len(ids)} tokens, need {need + 1}")
-    return ids[: need + 1]
+    fingerprint = {
+        "dataset": "wikitext/wikitext-2-raw-v1:test",
+        "rows": ds.num_rows,
+        "hf_fingerprint": getattr(ds, "_fingerprint", None),
+        "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+    return ids[: need + 1], fingerprint
 
 
 def perplexity(model, ids, seq_len, n_chunks, label):
@@ -138,7 +168,7 @@ def main():
         print(f"\n=== {spec} ===")
         model, kind, resolved = load_any(spec)
         tok = AutoTokenizer.from_pretrained(str(resolved))
-        ids = corpus_ids(tok, args.seq_len, args.chunks)
+        ids, corpus_fp = corpus_ids(tok, args.seq_len, args.chunks)
 
         if ref_ids is None:
             ref_ids = ids
@@ -154,7 +184,7 @@ def main():
         peak = mx.get_peak_memory() / 1024**3
         results.append({"model": spec, "kind": kind, "ppl": ppl,
                         "tokens": n, "peak_gib": peak,
-                        "identity": resolved_identity(spec)})
+                        "identity": resolved_identity(spec, resolved)})
         print(f"  peak {peak:.2f} GiB")
         del model
         import gc
@@ -173,7 +203,7 @@ def main():
               f"({'better' if d < 0 else 'worse'})")
     if args.json:
         Path(args.json).write_text(json.dumps({
-            "corpus": "wikitext-2-raw-v1 test",
+            "corpus": corpus_fp,
             "seq_len": args.seq_len,
             "chunks": args.chunks,
             "note": ("teacher-forced NLL over the whole corpus slice; "

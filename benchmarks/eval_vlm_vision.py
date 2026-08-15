@@ -38,16 +38,34 @@ PYTHON = sys.executable
 OUT = Path(tempfile.mkdtemp(prefix="tq_vision_"))
 
 
-def resolved_identity(spec):
+def resolved_identity(spec, resolved_path=None):
     """A record of exactly which bytes were measured.
 
-    Repo ids and dataset defaults are mutable — `mlx-community/X-4bit` can be
-    re-uploaded and a published number would silently start describing
-    different weights. For a Hub repo this pins the commit sha; for a local
-    directory it records the path and the total size of its safetensors, which
-    is enough to notice a swap.
+    Repo ids are mutable — `mlx-community/X-4bit` can be re-uploaded and a
+    published number would silently start describing different weights.
+
+    The revision is read from the resolved snapshot directory, whose name IS
+    the commit sha, rather than asking the API what HEAD is now. That records
+    the revision actually loaded (no gap between load and lookup) and works
+    offline. The API is only a fallback for an unresolved spec.
+
+    Deliberately not a SHA-256 of every shard: these checkpoints are 13-16 GiB
+    each and three of them get scored per run, so digesting would add minutes
+    of pure I/O to every invocation. Shard count and total bytes catch a
+    swapped local build, and the revision pins a Hub one exactly.
     """
     from pathlib import Path as _P
+
+    if resolved_path is not None:
+        rp = _P(resolved_path)
+        # .../hub/models--org--name/snapshots/<sha>
+        if rp.parent.name == "snapshots" and len(rp.name) == 40:
+            return {"spec": str(spec), "kind": "hub", "revision": rp.name}
+        shards = sorted(rp.glob("*.safetensors"))
+        if shards:
+            return {"spec": str(spec), "kind": "local", "path": str(rp),
+                    "safetensors_bytes": sum(f.stat().st_size for f in shards),
+                    "n_shards": len(shards)}
 
     p = _P(spec)
     if p.is_dir():
@@ -88,6 +106,41 @@ _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
 )
+_FONT_PATH = None
+
+
+def _font_path():
+    """The font file the images will be drawn with, resolved once.
+
+    Which font is used changes what the OCR case actually renders, so it is a
+    real input to the benchmark and gets recorded alongside the results.
+    """
+    global _FONT_PATH
+    if _FONT_PATH is not None:
+        return _FONT_PATH
+    explicit = os.environ.get("TQ_VISION_FONT")
+    for path in ((explicit,) if explicit else ()) + _FONT_CANDIDATES:
+        try:
+            ImageFont.truetype(path, 12)
+        except OSError:
+            continue
+        _FONT_PATH = path
+        return path
+    raise SystemExit(
+        "no scalable font found — the OCR and chart cases need one to render "
+        "legible text. Set TQ_VISION_FONT=/path/to/font.ttf, or install e.g. "
+        "fonts-dejavu. Looked in:\n  " + "\n  ".join(_FONT_CANDIDATES)
+    )
+
+
+def _sha256(path):
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _font(size):
@@ -103,21 +156,16 @@ def _font(size):
     few hundred KB for a benchmark most people never run. Point
     TQ_VISION_FONT at one instead.
     """
-    explicit = os.environ.get("TQ_VISION_FONT")
-    for path in ((explicit,) if explicit else ()) + _FONT_CANDIDATES:
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    raise SystemExit(
-        "no scalable font found — the OCR and chart cases need one to render "
-        "legible text. Set TQ_VISION_FONT=/path/to/font.ttf, or install e.g. "
-        "fonts-dejavu. Looked in:\n  " + "\n  ".join(_FONT_CANDIDATES)
-    )
+    return ImageFont.truetype(_font_path(), size)
 
 
 def build_images():
-    """Synthetic images with ground truth we drew, so scoring is objective."""
+    """Draw the cases and return a digest manifest.
+
+    The drawing code is fixed, but the font is not — a different face changes
+    what the OCR case renders, so the font and the resulting image bytes are
+    both hashed and published with the scores.
+    """
     OUT.mkdir(exist_ok=True)
 
     img = Image.new("RGB", (640, 320), "white")
@@ -149,6 +197,11 @@ def build_images():
     d.polygon([(120, 60), (60, 170), (180, 170)], fill="green")
     d.ellipse([460, 240, 580, 360], fill="orange")
     img.save(OUT / "spatial.png")
+
+    return {
+        "font": {"path": _font_path(), "sha256": _sha256(_font_path())},
+        "images": {f.name: _sha256(f) for f in sorted(OUT.glob("*.png"))},
+    }
 
 
 CASES = [
@@ -198,8 +251,11 @@ def peak_gib(text):
 
 
 def run(model, max_tokens=128):
-    build_images()
+    manifest = build_images()
     module, temp_flag = engine_for(model)
+    from turboquant_mlx.generate import resolve_model_path
+
+    resolved = resolve_model_path(str(model))
     print(f"model: {model}   (via {module})\n")
     cases, peaks = [], []
     for name, prompt, accept in CASES:
@@ -237,7 +293,8 @@ def run(model, max_tokens=128):
           + (f", peak {max(peaks):.2f} GiB" if peaks else ""))
     return {"model": str(model), "engine": module, "passed": n_pass,
             "total": len(CASES), "peak_gib": max(peaks) if peaks else None,
-            "identity": resolved_identity(model), "cases": cases}
+            "identity": resolved_identity(model, resolved),
+            "inputs": manifest, "cases": cases}
 
 
 def main():

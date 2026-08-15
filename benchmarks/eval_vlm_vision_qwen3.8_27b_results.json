@@ -8,8 +8,21 @@
     "identity": {
       "spec": "./Qwen3.8-27B-tq4-g64",
       "kind": "local",
+      "path": "Qwen3.8-27B-tq4-g64",
       "safetensors_bytes": 16267476171,
       "n_shards": 4
+    },
+    "inputs": {
+      "font": {
+        "path": "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "sha256": "d72db21f9242aedd6b917d8549ad5921766b24d5f8d0becfda2ff4c620b3c2e0"
+      },
+      "images": {
+        "chart.png": "7c0340187ab10aed548db4eee48c2971e5f9d37e6e5147568f9b06589250f5a4",
+        "count.png": "768b147eb76c1ed3d6ae7108612bb1c5e2f328560601b3de277ff15ec4c0d750",
+        "spatial.png": "97b46fd94fbf5e6bbdd417129a2175802979e42c69db30757d4c87b53e082c5d",
+        "text.png": "4542e0bcd7c1879136921faf2505fbbbce92ad7f6f2c720f38e50a92b50ad389"
+      }
     },
     "cases": [
       {
@@ -20,7 +33,7 @@
           "voltage 47",
           "voltage47"
         ],
-        "seconds": 10.7,
+        "seconds": 7.0,
         "peak_gib": 16.73
       },
       {
@@ -31,7 +44,7 @@
           "3",
           "three"
         ],
-        "seconds": 8.4,
+        "seconds": 6.8,
         "peak_gib": 18.48
       },
       {
@@ -41,7 +54,7 @@
         "accept": [
           "c"
         ],
-        "seconds": 8.5,
+        "seconds": 6.9,
         "peak_gib": 18.52
       },
       {
@@ -51,7 +64,7 @@
         "accept": [
           "triangle"
         ],
-        "seconds": 8.3,
+        "seconds": 6.8,
         "peak_gib": 18.48
       }
     ]
@@ -67,6 +80,18 @@
       "kind": "hub",
       "revision": "3e6447f082e89cc7f0bc6e5441afd38dfce760ff"
     },
+    "inputs": {
+      "font": {
+        "path": "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "sha256": "d72db21f9242aedd6b917d8549ad5921766b24d5f8d0becfda2ff4c620b3c2e0"
+      },
+      "images": {
+        "chart.png": "7c0340187ab10aed548db4eee48c2971e5f9d37e6e5147568f9b06589250f5a4",
+        "count.png": "768b147eb76c1ed3d6ae7108612bb1c5e2f328560601b3de277ff15ec4c0d750",
+        "spatial.png": "97b46fd94fbf5e6bbdd417129a2175802979e42c69db30757d4c87b53e082c5d",
+        "text.png": "4542e0bcd7c1879136921faf2505fbbbce92ad7f6f2c720f38e50a92b50ad389"
+      }
+    },
     "cases": [
       {
         "case": "text.png",
@@ -76,7 +101,7 @@
           "voltage 47",
           "voltage47"
         ],
-        "seconds": 6.0,
+        "seconds": 6.1,
         "peak_gib": 17.562881112098694
       },
       {
@@ -97,7 +122,7 @@
         "accept": [
           "c"
         ],
-        "seconds": 5.1,
+        "seconds": 5.2,
         "peak_gib": 17.66905188560486
       },
       {
@@ -107,7 +132,7 @@
         "accept": [
           "triangle"
         ],
-        "seconds": 5.1,
+        "seconds": 5.4,
         "peak_gib": 17.638318240642548
       }
     ]
