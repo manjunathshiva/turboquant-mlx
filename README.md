@@ -1503,6 +1503,23 @@ python -m turboquant_mlx.generate_vlm \
   --model ./Qwen3.8-27B-tq4-g64 --prompt "..." --max-tokens 256
 ```
 
+Measured on mlx-lm 0.31.3 with **both mlx-vlm 0.6.3 and 0.6.13** — identical
+peaks and identical vision results on each, so the `[vlm]` floor of 0.6.12
+reproduces these numbers.
+
+`--prefill-step-size` is the memory knob for long prompts, and it is a large
+one. mlx-vlm only chunks prefill *above* the step size, so a 1342-token prompt
+runs unchunked at the 2048 default:
+
+| `--prefill-step-size` | peak | prefill |
+|---|---|---|
+| default (2048 — unchunked here) | 21.28 GB | 162 tok/s |
+| **256** | **16.77 GB** | 77 tok/s |
+
+**−4.5 GB for 2.1× slower prefill.** 256 also keeps every TurboQuant layer on
+the fused Metal kernel, which materializes nothing. This is what makes the
+24 GB target work.
+
 #### `lm_head` stays off the polar path
 
 With a 248,320-token vocabulary `lm_head` is 248320×5120 = **1.271B
@@ -1539,12 +1556,14 @@ sequence. That is an ordinary chat turn, not an edge case.
 
 #### Will it fit?
 
+`turboquant-plan --model <path>` at 16K context, per machine:
+
 | Mac | verdict |
 |---|---|
-| 16 GB | **No.** `tq3` needs ~14.7 GiB against ~10.6 GiB usable, and a dense model has no expert tier to stream — the [16 GB recipe](#recipe-a-coding-agent-on-a-16-gb-mac-mini) does not apply |
-| 24 GB | `tq3-g64` with `--prefill-step-size 256` (~14.7 GiB at 8K, ~15.8 GiB at 32K) |
-| 36 GB | `tq4-g64`, comfortable at default settings |
-| 64 GB | `tq4-g64`, with room for long context |
+| 16 GB | ❌ **Will not run.** Peak 18.44 GB against 15.46 GB usable — over by 2.98 GB. A dense model has no expert tier to stream, so the [16 GB recipe](#recipe-a-coding-agent-on-a-16-gb-mac-mini) does not apply |
+| 24 GB | ⚠️ Fits **after raising the Metal wired cap**, with `--prefill-step-size 256` — that knob measures 16.77 GB peak on a 1342-token prompt, against 21.28 GB at the default |
+| 36 GB | ✅ Resident, 12.34 GB headroom |
+| 64 GB | ✅ Resident, 39.40 GB headroom |
 
 > **Speed is the caveat.** At ~11 tok/s decode and ~110–160 tok/s prefill an
 > agentic turn takes about six minutes, against 33 s for Laguna-XS.2 at 3-bit.
@@ -1606,7 +1625,7 @@ Architectures that live in [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) rather
 than mlx-lm convert and run through dedicated entry points (v0.7.0+):
 
 ```bash
-pip install "turboquant-mlx-full[vlm]"   # adds mlx-vlm >= 0.6.3
+pip install "turboquant-mlx-full[vlm]"   # adds mlx-vlm >= 0.6.12
 
 # Convert (vision towers, routers, and known quant-sensitive blocks stay full precision)
 python -m turboquant_mlx.convert_vlm \

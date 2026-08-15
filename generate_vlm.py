@@ -36,6 +36,15 @@ def main():
                         help="Sampling temperature (default: 0.0)")
     parser.add_argument("--image", type=str, default=None,
                         help="Optional image path/URL for multimodal prompts")
+    parser.add_argument("--prefill-step-size", type=int, default=None,
+                        help="Tokens per prefill chunk (mlx-vlm default 2048). "
+                             "This is the memory knob for long prompts: the "
+                             "transient prefill workspace scales with the "
+                             "chunk, and a chunk of 256 or less also keeps "
+                             "every TurboQuant layer on the fused Metal "
+                             "kernel, which materializes nothing. "
+                             "`turboquant-plan` recommends a value when the "
+                             "default would not fit.")
     parser.add_argument("--max-denoising-steps", type=int, default=None,
                         help="Cap diffusion denoising steps (model default 48)."
                              " Lower = faster, mild quality cost (try 24)")
@@ -89,6 +98,8 @@ def main():
     formatted = apply_chat_template(processor, config, args.prompt,
                                     num_images=num_images, **template_kwargs)
     gen_kwargs = {}
+    if args.prefill_step_size is not None:
+        gen_kwargs["prefill_step_size"] = args.prefill_step_size
     if args.max_denoising_steps is not None:
         gen_kwargs["max_denoising_steps"] = args.max_denoising_steps
     if args.max_canvas_length is not None:

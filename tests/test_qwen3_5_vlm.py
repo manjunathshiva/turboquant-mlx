@@ -30,9 +30,9 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 
+import turboquant_mlx.quantize_model as _qm
 from turboquant_mlx.integration.vlm import VLM_SKIP_PATTERNS
 from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear, _QMM_MAX_TOKENS
-from turboquant_mlx.quantize_model import _should_quantize
 
 
 def _predicate():
@@ -40,7 +40,11 @@ def _predicate():
     pytest.importorskip("mlx_vlm", reason="mlx-vlm not installed")
     from turboquant_mlx.integration.vlm import vlm_should_quantize
 
-    return vlm_should_quantize("qwen3_5", _should_quantize)
+    # Read the base predicate off the module rather than binding it at import.
+    # `convert_vlm` swaps `_qm._should_quantize` for the duration of a
+    # conversion, so a module-level `from ... import _should_quantize` would
+    # pin the pre-patch value and stop reflecting what the converter uses.
+    return vlm_should_quantize("qwen3_5", _qm._should_quantize)
 
 
 def test_lm_head_is_kept_off_the_polar_path():

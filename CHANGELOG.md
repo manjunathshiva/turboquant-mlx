@@ -27,11 +27,21 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`generate_vlm --prefill-step-size`.** The VLM generate path had no way to
+  set the prefill chunk size, so the planner could recommend a value that was
+  not runnable there (`turboquant-plan` suggests one whenever the default would
+  not fit). It is the main memory knob for long prompts: on Qwen3.8-27B with a
+  1342-token prompt, `--prefill-step-size 256` measures **16.77 GB peak against
+  21.28 GB** at the 2048 default, for 2.1x slower prefill. mlx-vlm only chunks
+  *above* the step size, so prompts shorter than it run unchunked.
+
 - **Qwen3.8-27B validated** (dense 27.8B hybrid Gated-DeltaNet VLM, 48 linear +
   16 full attention layers). `tq4-g64` = 15.15 GiB, `tq3-g64` = 12.88 GiB; both
   pass an Opencode agentic task and the vision path. `tq4` is both faster and
-  better than `tq3` here. No architecture work was needed — mlx-lm 0.31.3 and
-  mlx-vlm 0.6.3 already carry `qwen3_5`.
+  better than `tq3` here. No architecture work was needed — mlx-lm 0.31.3
+  already carries `qwen3_5`. Verified on **both mlx-vlm 0.6.3 and 0.6.13**
+  (identical peaks and identical vision results), so the `[vlm]` floor of
+  0.6.12 reproduces the measurements.
 
 ## [0.23.0] - 2026-08-15
 
