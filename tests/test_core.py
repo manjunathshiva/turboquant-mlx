@@ -380,6 +380,43 @@ def test_loader_legacy_rotation_none_guard():
     print("test_loader_legacy_rotation_none_guard: PASSED")
 
 
+def test_qjl_residual_matches_the_packed_domain():
+    """QJL must measure its residual in the domain the weights were packed in.
+
+    At inference `qjl_correct` is applied to the same x the matmul saw —
+    rotated iff needs_rotation. `rotate_weight` applies the Hadamard even when
+    the signs are all-ones, so computing the target with it unconditionally
+    makes the rotation="none" residual `rotated - unrotated`: not a correction
+    but noise. The invariant that catches it is simply that QJL must never
+    make a layer WORSE.
+    """
+    import mlx.nn as nn
+    from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
+
+    mx.random.seed(0)
+    lin = nn.Linear(256, 256, bias=False)
+    x = mx.random.normal((4, 256)).astype(mx.float16)
+    ref = x.astype(mx.float32) @ lin.weight.astype(mx.float32).T
+
+    for needs_rotation in (True, False):
+        errs = {}
+        for use_qjl in (False, True):
+            q = PolarQuantizedLinear.from_linear(
+                lin, bits=3, group_size=64, seed=7,
+                needs_rotation=needs_rotation, use_qjl=use_qjl,
+            )
+            y = q(x).astype(mx.float32)
+            errs[use_qjl] = float(
+                mx.linalg.norm(y - ref) / mx.linalg.norm(ref))
+        assert errs[True] < errs[False], (
+            f"needs_rotation={needs_rotation}: QJL made it worse "
+            f"({errs[False]:.4f} -> {errs[True]:.4f}) — the residual is being "
+            f"measured in the wrong domain"
+        )
+
+    print("test_qjl_residual_matches_the_packed_domain: PASSED")
+
+
 def test_metal_kernel_correctness():
     """Test fused Metal kernel matches software dequant exactly."""
     from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
@@ -598,6 +635,7 @@ def run_all():
     test_rotation_cannot_fuse_into_norm()
     test_rotation_none_skips_rotation_on_both_sides()
     test_loader_legacy_rotation_none_guard()
+    test_qjl_residual_matches_the_packed_domain()
     test_metal_kernel_correctness()
     test_qjl_packing_roundtrip()
     test_qjl_unbiasedness()

@@ -61,6 +61,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   automatically when the full dimension is not compatible. The alias is
   still accepted so older `config.json` files keep loading.
 
+- **QJL measured its residual in the wrong domain when rotation was
+  disabled.** `from_linear` built the correction target with `rotate_weight`
+  unconditionally, but that applies the Hadamard even when the signs are
+  all-ones — so with `rotation="none"` the target was rotated while the
+  dequantized weights were not, making the residual `rotated - unrotated`.
+  At inference `qjl_correct` is applied to the same `x` the matmul saw, so
+  the "correction" was noise: measured relative error on a 3-bit layer went
+  from 0.1712 without QJL to **1.8200** with it, a 10.6x degradation.
+  The target now follows `needs_rotation`. Pinned by
+  `test_qjl_residual_matches_the_packed_domain`, whose invariant is simply
+  that QJL must never make a layer worse — in either rotation mode. Only
+  reachable via `--use-qjl` combined with `--rotation none`; the shipped
+  default leaves QJL off.
+
 - **The fused Metal kernels could not compile against bfloat16
   activations.** Nothing enforced their documented `float16` input
   contract; it was met only as a side effect of `rotate_input` multiplying

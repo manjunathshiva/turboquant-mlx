@@ -211,18 +211,27 @@ class PolarQuantizedLinear(nn.Module):
         layer.codebook = result["codebook"]
         layer.signs = result["signs"]
 
-        # Stage 2: QJL residual correction
+        # Stage 2: QJL residual correction.
+        # The residual must be measured in the SAME domain the weights were
+        # packed in, because at inference qjl_correct() is applied to the very
+        # x the matmul saw — rotated iff needs_rotation. rotate_weight() cannot
+        # be used unconditionally: with rotation off the signs are all-ones,
+        # but it still applies the Hadamard, so the target would be rotated
+        # while w_deq is not, and the "correction" would be noise.
         if use_qjl:
-            # Compute residual in rotated space
-            w_rot = rotate_weight(
-                weight.astype(mx.float32),
-                result["signs"].astype(mx.float32),
+            w_target = (
+                rotate_weight(
+                    weight.astype(mx.float32),
+                    result["signs"].astype(mx.float32),
+                )
+                if needs_rotation
+                else weight.astype(mx.float32)
             )
             w_deq = polar_dequantize_weight(
                 result["packed_weight"], result["scales"], result["codebook"],
                 bits, group_size, input_dims,
             )
-            residual = w_rot - w_deq.astype(mx.float32)
+            residual = w_target - w_deq.astype(mx.float32)
             mx.eval(residual)
 
             qjl_result = qjl_quantize(residual, seed=qjl_seed)
