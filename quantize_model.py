@@ -14,7 +14,6 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from turboquant_mlx.config import TurboQuantConfig
-from turboquant_mlx.core.rotation import generate_random_signs
 from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
 from turboquant_mlx.layers.polar_switch_linear import PolarQuantizedSwitchLinear
 

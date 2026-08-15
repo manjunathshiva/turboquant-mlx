@@ -6,7 +6,7 @@ import mlx.nn as nn
 
 def test_codebook_centroids():
     """Verify codebook centroids are symmetric and ordered."""
-    from turboquant_mlx.core.codebook import get_codebook, CENTROIDS
+    from turboquant_mlx.core.codebook import get_codebook
 
     for bits in [2, 3, 4]:
         centroids, boundaries = get_codebook(bits, dtype=mx.float32)
