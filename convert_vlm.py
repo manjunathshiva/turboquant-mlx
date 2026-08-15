@@ -37,6 +37,16 @@ _AUX_FILES = (
     "tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
     "processor_config.json", "generation_config.json",
     "preprocessor_config.json", "special_tokens_map.json",
+    # BPE merge/vocab pair — `tokenizer.json` alone covers the fast tokenizer,
+    # but anything constructing the slow one needs these two.
+    "merges.txt", "vocab.json",
+    # Video-capable VLMs (Qwen3.5 family) keep a separate video preprocessor
+    # config; without it the processor loads for images and fails for video.
+    # Shipping it does not pull in a torchvision requirement for image use —
+    # verified end-to-end on Qwen3.8-27B with and without the file.
+    "video_preprocessor_config.json",
+    # The licence travels with the derived weights.
+    "LICENSE", "LICENSE.md", "NOTICE",
 )
 
 # --quantize-extras: affine quantization for the non-TurboQuant remainder.
