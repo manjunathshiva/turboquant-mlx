@@ -6,6 +6,59 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`--rotation` was accepted, stored, printed — and ignored.** All three
+  values produced identical output. `polar_quantize_weight` had no rotation
+  parameter at all, so the randomized Hadamard was applied unconditionally;
+  `TurboQuantConfig.rotation` was validated and round-tripped through
+  `config.json` without ever reaching the quantizer. Measured on
+  Llama-3.2-1B under a fixed `PYTHONHASHSEED`, `--rotation hadamard`,
+  `none`, and `blockwise_hadamard` all produced `model.safetensors` with
+  SHA256 `99def7a6…`. This predates the `fuse_rotations` removal below —
+  verified by converting at the parent commit, which gives the same hash.
+
+  `rotation="none"` now genuinely disables the rotation, on **both** sides:
+  weights are quantized unrotated and the layer skips `rotate_input`. One
+  config field drives both (`quantize_model.py` on the convert side,
+  `generate.py::_prepare_polar_layers` on the load side), so they cannot
+  drift apart — which is exactly how `fuse_rotations` produced noise. The
+  streaming loader inherits `_needs_rotation` from the resident layer and
+  the VLM loader shares `_prepare_polar_layers`, so every load path agrees.
+
+  The default path is untouched: `--rotation hadamard` still hashes to
+  `99def7a6…`.
+
+  As an ablation it confirms the rotation is load-bearing. Reconstruction
+  error on real Llama-3.2-1B weights at 3-bit/g64 is a **uniform 0.1828**
+  with rotation on — the same value for every layer, which is the
+  Gaussianization signature: after the Hadamard each group looks N(0,1), so
+  the Lloyd-Max codebook hits its designed error regardless of the layer's
+  native distribution. With rotation off it rises and scatters,
+  0.1862–0.1978 depending on the layer. End to end at 3-bit that compounds
+  into word salad; at 4-bit the same build is degraded but partly
+  grammatical. (A converter/loader mismatch would destroy both bit-widths
+  equally — that monotonic curve is what distinguishes real quality loss
+  from a wiring bug.)
+
+  `"blockwise_hadamard"` is now documented as an **alias** for `"hadamard"`,
+  not a separate mode. Blockwise was never a choice: `rotate_weight` picks
+  the largest Hadamard-compatible block dividing `input_dims` and blocks
+  automatically when the full dimension is not compatible. The alias is
+  still accepted so older `config.json` files keep loading.
+
+- **The fused Metal kernels could not compile against bfloat16
+  activations.** Nothing enforced their documented `float16` input
+  contract; it was met only as a side effect of `rotate_input` multiplying
+  by the float16 `signs` vector, which promoted bf16 activations to
+  float32. With rotation disabled the raw bfloat16 reached the kernel and
+  Metal failed to build the library outright (`incompatible operand types
+  ('bfloat16_t' and 'half')`). Both quantized layers now promote bfloat16
+  to float32 explicitly — the same dtype the rotated path already hands the
+  kernel. The check is deliberately narrow (`== mx.bfloat16`): after
+  `rotate_input` the dtype is float32 or float16 and never bfloat16, so it
+  is provably a no-op whenever rotation ran.
+
 ### Removed
 
 - **`--fuse-rotations` / `fuse_rotations`, which produced pure noise whenever

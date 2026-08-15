@@ -288,6 +288,56 @@ def test_rotation_cannot_fuse_into_norm():
     print("test_rotation_cannot_fuse_into_norm: PASSED")
 
 
+def test_rotation_none_skips_rotation_on_both_sides():
+    """rotation="none" must unrotate the WEIGHTS and the INPUT together.
+
+    This is the invariant `fuse_rotations` violated: weights quantized in
+    rotated space while the input arrives unrotated produces noise, and no
+    shape check catches it. Here we pin that the `rotate` flag really moves
+    which domain the packed weights live in.
+
+    `polar_dequantize_weight` returns the weight in whatever domain it was
+    packed in, so the two cases have different reconstruction targets:
+    rotate=True reconstructs `rotate_weight(w, signs)`, rotate=False
+    reconstructs `w` itself.
+    """
+    import numpy as np
+    from turboquant_mlx.core.polar_quantize import (
+        polar_quantize_weight, polar_dequantize_weight)
+    from turboquant_mlx.core.rotation import rotate_weight
+
+    dim = 256
+    w = mx.random.normal((128, dim))
+
+    rot = polar_quantize_weight(w, bits=4, group_size=64, seed=7, rotate=True)
+    off = polar_quantize_weight(w, bits=4, group_size=64, seed=7, rotate=False)
+
+    # rotate=False must leave the signs a no-op, so the stored vector cannot
+    # silently re-introduce a half-rotation anywhere downstream.
+    assert float(mx.abs(off["signs"] - 1.0).max()) == 0.0, "signs must be ones"
+
+    targets = {
+        "rotate=True": (rot, rotate_weight(w.astype(mx.float32),
+                                           rot["signs"].astype(mx.float32))),
+        "rotate=False": (off, w.astype(mx.float32)),
+    }
+    for name, (r, target) in targets.items():
+        recon = polar_dequantize_weight(
+            r["packed_weight"], r["scales"], r["codebook"],
+            r["bits"], r["group_size"], r["input_dims"],
+        ).astype(mx.float32)
+        rel = float(mx.linalg.norm(recon - target) / mx.linalg.norm(target))
+        assert rel < 0.10, f"{name}: round-trip error {rel:.4f} too high"
+
+    # The packed payloads must actually differ — otherwise `rotate` is a no-op
+    # and we are back to the silently-ignored flag this test exists to prevent.
+    assert not np.array_equal(
+        np.array(rot["packed_weight"]), np.array(off["packed_weight"])), \
+        "rotate=False produced identical packing — the flag is being ignored"
+
+    print("test_rotation_none_skips_rotation_on_both_sides: PASSED")
+
+
 def test_metal_kernel_correctness():
     """Test fused Metal kernel matches software dequant exactly."""
     from turboquant_mlx.core.polar_quantize import polar_quantize_weight, polar_dequantize_weight
@@ -504,6 +554,7 @@ def run_all():
     test_polar_linear_from_linear()
     test_quality_vs_affine()
     test_rotation_cannot_fuse_into_norm()
+    test_rotation_none_skips_rotation_on_both_sides()
     test_metal_kernel_correctness()
     test_qjl_packing_roundtrip()
     test_qjl_unbiasedness()

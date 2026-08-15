@@ -192,10 +192,13 @@ def turboquant_quantize(
                 del module, float_weight
                 continue
 
-            # Expert inputs are always rotated online: the rotation is a
-            # Hadamard, which cannot be folded into a preceding norm (see
-            # `rotation.py` and test_rotation_cannot_fuse_into_norm).
-            needs_rotation = True
+            # Rotation is all-or-nothing per model, driven by the config.
+            # It can never be "fused into the preceding norm" — a Hadamard
+            # does not commute with a diagonal (see rotation.py and
+            # test_rotation_cannot_fuse_into_norm). The same flag also
+            # decides whether the *weights* get rotated, so the two halves
+            # cannot drift apart.
+            needs_rotation = tq_config.rotation != "none"
 
             seed = _get_layer_seed(tq_config.rotation_seed, path)
             use_ternary = tq_config.ternary_experts
@@ -261,11 +264,12 @@ def turboquant_quantize(
             del module
             continue
 
-        # Inputs are always rotated online. Folding the rotation into the
-        # preceding norm is not possible: the norm applies a diagonal
-        # (elementwise) weight, and a Hadamard transform does not commute
-        # with a diagonal. See test_rotation_cannot_fuse_into_norm.
-        needs_rotation = True
+        # Rotation is all-or-nothing per model, driven by the config. It can
+        # never be folded into the preceding norm: the norm applies a diagonal
+        # weight and a Hadamard does not commute with a diagonal (see
+        # test_rotation_cannot_fuse_into_norm). The same flag also decides
+        # whether the *weights* get rotated, so they cannot drift apart.
+        needs_rotation = tq_config.rotation != "none"
 
         # Quantize the linear layer
         seed = _get_layer_seed(tq_config.rotation_seed, path)

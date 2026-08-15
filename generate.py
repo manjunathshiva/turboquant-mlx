@@ -60,6 +60,12 @@ def _prepare_polar_layers(model, weights, tq_config):
         if key.endswith(".codebook"):
             quantized_paths.add(key.rsplit(".codebook", 1)[0])
 
+    # Must mirror the converter (quantize_model.py): a model quantized with
+    # rotation="none" has UNROTATED weights, so rotating the input here would
+    # land it in the wrong space and produce noise. The value round-trips
+    # through the `quantization` block of config.json.
+    needs_rotation = tq_config.rotation != "none"
+
     updates = {}
     for path, module in model.named_modules():
         if path not in quantized_paths:
@@ -95,6 +101,7 @@ def _prepare_polar_layers(model, weights, tq_config):
                 # --mlp-group-size loads with the correct scale shape.
                 group_size=tq_config.group_size_for_path(path),
                 trit=is_trit,
+                needs_rotation=needs_rotation,
             )
             updates[path] = pq
         elif isinstance(module, nn.Linear):
@@ -106,6 +113,7 @@ def _prepare_polar_layers(model, weights, tq_config):
                 bits=layer_bits,
                 group_size=tq_config.group_size,
                 use_qjl=has_qjl,
+                needs_rotation=needs_rotation,
             )
             updates[path] = pq
 

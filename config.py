@@ -12,7 +12,23 @@ class TurboQuantConfig:
         bits: Base quantization bits (2, 3, or 4). Default 3.
         group_size: Number of weights sharing a scale factor. Default 64.
         use_qjl: Enable QJL 1-bit residual correction (adds ~1 bit overhead). Default False.
-        rotation: Rotation method - "hadamard", "blockwise_hadamard", or "none". Default "hadamard".
+        rotation: Rotation method - "hadamard", "blockwise_hadamard", or
+            "none". Default "hadamard".
+
+            "none" disables the randomized Hadamard entirely: weights are
+            quantized unrotated AND the layer skips ``rotate_input`` at
+            inference. Both halves are driven by this one field (converter:
+            ``quantize_model.py``; loader: ``generate.py``), so they cannot
+            drift apart. Expect worse quality — the rotation is what
+            Gaussianizes the weights for the Lloyd-Max codebook — but it is a
+            useful ablation for measuring what the rotation actually buys.
+
+            "blockwise_hadamard" is an accepted ALIAS for "hadamard", not a
+            separate mode. Blockwise is not a choice: ``rotate_weight`` picks
+            the largest Hadamard-compatible block that divides ``input_dims``
+            and blocks automatically when the full dimension is not
+            compatible. The alias is kept so older config.json files that
+            carry it still load.
         rotation_seed: Seed for random rotation signs (deterministic). Default 42.
             Note: norm fusion is currently disabled by default because fusing a
             Hadamard rotation into a diagonal norm weight is not mathematically
