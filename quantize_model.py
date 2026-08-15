@@ -14,13 +14,9 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from turboquant_mlx.config import TurboQuantConfig
-from turboquant_mlx.core.rotation import (
-    generate_random_signs,
-    fuse_rotation_into_norm,
-)
+from turboquant_mlx.core.rotation import generate_random_signs
 from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
 from turboquant_mlx.layers.polar_switch_linear import PolarQuantizedSwitchLinear
-from turboquant_mlx.integration.rotation_configs import get_rotation_config, should_fuse_rotation
 
 # Try importing SwitchLinear for MoE detection
 try:
@@ -147,16 +143,6 @@ def turboquant_quantize(
     afterward.
     """
     arch = _detect_architecture(config)
-    rotation_config = None
-
-    if tq_config.rotation != "none":
-        try:
-            rotation_config = get_rotation_config(arch)
-        except ValueError:
-            print(f"[WARNING] No rotation config for arch '{arch}', using online rotation for all layers")
-
-    # Track which norms have been fused (to avoid double-fusing)
-    fused_norms: set[str] = set()
 
     # Snapshot paths and module types ONLY — don't hold module references
     module_paths = []
@@ -207,12 +193,10 @@ def turboquant_quantize(
                 del module, float_weight
                 continue
 
-            # Determine rotation needs for expert layers
+            # Expert inputs are always rotated online: the rotation is a
+            # Hadamard, which cannot be folded into a preceding norm (see
+            # `rotation.py` and test_rotation_cannot_fuse_into_norm).
             needs_rotation = True
-            if rotation_config is not None and tq_config.fuse_rotations:
-                can_fuse, norm_name = should_fuse_rotation(path, rotation_config)
-                if can_fuse and norm_name:
-                    needs_rotation = False
 
             seed = _get_layer_seed(tq_config.rotation_seed, path)
             use_ternary = tq_config.ternary_experts
@@ -278,44 +262,11 @@ def turboquant_quantize(
             del module
             continue
 
-        # Determine if rotation can be fused
+        # Inputs are always rotated online. Folding the rotation into the
+        # preceding norm is not possible: the norm applies a diagonal
+        # (elementwise) weight, and a Hadamard transform does not commute
+        # with a diagonal. See test_rotation_cannot_fuse_into_norm.
         needs_rotation = True
-        if rotation_config is not None and tq_config.fuse_rotations:
-            can_fuse, norm_name = should_fuse_rotation(path, rotation_config)
-            if can_fuse and norm_name:
-                needs_rotation = False
-                # Build the norm path relative to this layer's block
-                parts = path.split(".")
-                block_parts = []
-                for p in parts:
-                    if p in ("self_attn", "mlp", "attention", "feed_forward", "linear_attn"):
-                        break
-                    block_parts.append(p)
-                norm_path = ".".join(block_parts + [norm_name])
-
-                if norm_path not in fused_norms:
-                    try:
-                        norm_module = _get_nested_attr(model, norm_path)
-                    except AttributeError:
-                        # `norm_path` is *guessed* — the layer path trimmed
-                        # back to its block plus the norm name — so it does
-                        # not resolve on every architecture. Only the lookup
-                        # is guarded: an AttributeError raised by the fusion
-                        # below is a real bug, not a missing norm.
-                        norm_module = None
-                    if norm_module is not None and hasattr(norm_module, "weight"):
-                        input_dims = module.weight.shape[-1]
-                        signs = generate_random_signs(
-                            input_dims,
-                            seed=_get_layer_seed(tq_config.rotation_seed, path),
-                        )
-                        fused_weight = fuse_rotation_into_norm(
-                            norm_module.weight.astype(mx.float32),
-                            signs.astype(mx.float32),
-                        ).astype(norm_module.weight.dtype)
-                        norm_module.weight = fused_weight
-                        fused_norms.add(norm_path)
-                    del norm_module
 
         # Quantize the linear layer
         seed = _get_layer_seed(tq_config.rotation_seed, path)

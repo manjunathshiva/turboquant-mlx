@@ -6,6 +6,59 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **`--fuse-rotations` / `fuse_rotations`, which produced pure noise whenever
+  it was enabled.** The option claimed to fold a layer's Hadamard rotation
+  into the preceding RMSNorm weight, letting inference skip the online
+  rotation. That is not possible. A norm applies a *diagonal* weight
+  (`y = n * w`), and folding the rotation in would require pulling an
+  element-wise multiply through a Hadamard transform:
+
+      hadamard(signs * w) * n  ==  hadamard(signs * (n * w))     # false
+
+  A Hadamard mixes across dimensions, so the identity does not hold, and the
+  error is not a small approximation — measured cosine similarity between the
+  two sides is **+0.18 at dim=64, +0.04 at dim=128, and +0.004 at dim=4096**.
+  At model scale the "fused" result is orthogonal to the correct one. A
+  converted Llama-3.2-1B emitted textbook word salad (`"followed direct
+  Roberts cầuChildren packaged epidemi-k set done Liu visiting..."`) where the
+  same build with online rotation was coherent.
+
+  Two further defects sat on top of the broken identity, both of which would
+  have had to be fixed even if it had held: the dense path derived the
+  rotation seed per *projection* while `q/k/v` share one `input_layernorm`, so
+  only `q_proj`'s rotation was ever fused and `k_proj`/`v_proj` silently
+  inherited it; and the MoE path set `needs_rotation = False` without fusing
+  anything at all. Sharing the seed was tried and confirmed **not** to fix the
+  word salad, as the math predicts.
+
+  The escape hatch that let this survive was a unit test asserting only
+  `fused_weight.shape == (dim,)`. It is replaced by
+  `test_rotation_cannot_fuse_into_norm`, which pins the impossibility from
+  both sides: the Hadamard case must stay far from the truth, and the control
+  — a diagonal-only sign flip, which *does* commute with the norm weight —
+  must fuse exactly. A sign flip alone does not Gaussianize the weights, which
+  is the entire purpose of the rotation, so there is no salvageable middle
+  ground. Fusing a rotation correctly requires rotating the *residual stream*
+  (QuaRot-style: one shared orthogonal `Q` absorbed into the embeddings and
+  every output projection, with norm weights folded into the following linear
+  first) — a whole-model transform, not a per-layer one.
+
+  **No shipped model is affected and no output changes.** The CLI flag was
+  `store_true`, so every documented conversion already used online rotation,
+  and `convert_vlm` passed `fuse_rotations=False` explicitly. Verified by
+  converting Llama-3.2-1B before and after this change under a fixed
+  `PYTHONHASHSEED`: the resulting `model.safetensors` are byte-identical
+  (SHA256 `99def7a6…`). Only the now-meaningless `"fuse_rotations": false`
+  key disappears from the `quantization` block in `config.json`; older
+  `config.json` files carrying it still load unchanged.
+
+  `integration/rotation_configs.py` is kept — it encodes real per-architecture
+  structure (which projection reads which norm) and is the exact input a
+  correct residual-stream rotation would need — but it is now descriptive
+  only, with no runtime consumer.
+
 ## [0.22.0] - 2026-08-14
 
 `turboquant-plan` now models prefill the way it actually runs. Two

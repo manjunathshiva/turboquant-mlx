@@ -236,24 +236,56 @@ def test_quality_vs_affine():
     print("test_quality_vs_affine: PASSED")
 
 
-def test_rotation_fusion():
-    """Test rotation fusion into norm weights."""
-    from turboquant_mlx.core.rotation import generate_random_signs, fuse_rotation_into_norm, rotate_input
+def test_rotation_cannot_fuse_into_norm():
+    """A Hadamard rotation CANNOT be folded into a preceding norm weight.
 
-    dim = 128
-    signs = generate_random_signs(dim, seed=42)
+    This pins the reason `fuse_rotations` was removed. An RMSNorm applies a
+    diagonal weight, `y = n * w`. A quantized layer whose weights live in
+    rotated space needs `R @ y` where `R = H @ diag(signs)`. Folding R into
+    the norm would require `hadamard(signs * w) * n == hadamard(signs * (n * w))`
+    — pulling an element-wise multiply through a Hadamard transform. H mixes
+    across dimensions, so that identity is false, and the error is not small:
+    the two are essentially orthogonal at model-scale dims.
 
-    # Create a simple norm weight
-    norm_weight = mx.random.normal((dim,)) * 0.5 + 1.0
-    mx.eval(norm_weight)
+    The control half shows the boundary precisely: a *diagonal* rotation (sign
+    flip alone, no Hadamard) does commute with the norm weight and fuses
+    exactly. It is the Hadamard that makes fusion impossible — and a sign flip
+    alone does not Gaussianize the weights, which is the whole point of the
+    rotation. Any future attempt must rotate the residual stream (QuaRot-style,
+    one shared Q absorbed into embeddings + output projections), not the norm.
+    """
+    import math
+    from turboquant_mlx.core.rotation import generate_random_signs
 
-    # Fuse rotation into norm
-    fused_weight = fuse_rotation_into_norm(norm_weight, signs)
-    mx.eval(fused_weight)
+    for dim in (128, 4096):
+        w = mx.random.normal((dim,)) * 0.5 + 1.0     # norm weight
+        n = mx.random.normal((dim,))                 # normalized activation
+        signs = generate_random_signs(dim, seed=42).astype(mx.float32)
+        scale = 1.0 / math.sqrt(dim)
 
-    assert fused_weight.shape == (dim,), f"Fused weight shape mismatch"
+        # What the quantized layer actually needs: R @ (n * w)
+        truth = mx.hadamard_transform(
+            (signs * (n * w)).reshape(1, -1), scale=scale).reshape(-1)
+        # What any norm-fusion scheme can produce: n * <some fused vector>
+        fused = mx.hadamard_transform(
+            (signs * w).reshape(1, -1), scale=scale).reshape(-1)
+        got = n * fused
 
-    print("test_rotation_fusion: PASSED")
+        cos = float((got * truth).sum()
+                    / (mx.linalg.norm(got) * mx.linalg.norm(truth)))
+        assert abs(cos) < 0.5, (
+            f"dim={dim}: fusion unexpectedly close (cos={cos:.4f}). If this "
+            f"ever passes, the impossibility argument above needs revisiting."
+        )
+
+    # Control: a diagonal-only rotation DOES fuse, exactly.
+    dim = 4096
+    w = mx.random.normal((dim,)) * 0.5 + 1.0
+    n = mx.random.normal((dim,))
+    signs = generate_random_signs(dim, seed=42).astype(mx.float32)
+    assert float(mx.abs((n * (signs * w)) - (signs * (n * w))).max()) == 0.0
+
+    print("test_rotation_cannot_fuse_into_norm: PASSED")
 
 
 def test_metal_kernel_correctness():
@@ -471,7 +503,7 @@ def run_all():
     test_polar_quantize_weight()
     test_polar_linear_from_linear()
     test_quality_vs_affine()
-    test_rotation_fusion()
+    test_rotation_cannot_fuse_into_norm()
     test_metal_kernel_correctness()
     test_qjl_packing_roundtrip()
     test_qjl_unbiasedness()

@@ -26,7 +26,6 @@ def convert(
     group_size: int = 64,
     rotation: str = "hadamard",
     rotation_seed: int = 42,
-    fuse_rotations: bool = True,
     use_qjl: bool = False,
     dtype: str = None,
     attn_bits: int = None,
@@ -44,7 +43,6 @@ def convert(
         group_size: Quantization group size.
         rotation: Rotation method ("hadamard", "blockwise_hadamard", "none").
         rotation_seed: Random seed for rotation signs.
-        fuse_rotations: Whether to fuse rotations into norm weights.
         use_qjl: Whether to enable QJL residual correction.
         dtype: Optional dtype override ("float16", "bfloat16", "float32").
         mlp_group_size: Optional finer group size for MoE expert tensors.
@@ -65,7 +63,6 @@ def convert(
         group_size=group_size,
         rotation=rotation,
         rotation_seed=rotation_seed,
-        fuse_rotations=fuse_rotations,
         use_qjl=use_qjl,
         attn_bits=attn_bits,
         mlp_bits=mlp_bits,
@@ -163,11 +160,6 @@ def configure_parser() -> argparse.ArgumentParser:
         help="Random seed for rotation signs (default: 42)",
     )
     parser.add_argument(
-        "--fuse-rotations",
-        action="store_true",
-        help="Fuse rotations into normalization weights (experimental, may degrade quality)",
-    )
-    parser.add_argument(
         "--use-qjl",
         action="store_true",
         help="Enable QJL 1-bit residual correction (adds ~1 bit overhead)",
@@ -239,7 +231,6 @@ def main():
             group_size=args.group_size,
             rotation=args.rotation,
             rotation_seed=args.rotation_seed,
-            fuse_rotations=args.fuse_rotations,
             use_qjl=args.use_qjl,
             attn_bits=args.attn_bits,
             mlp_bits=args.mlp_bits,
@@ -255,7 +246,6 @@ def main():
         group_size=args.group_size,
         rotation=args.rotation,
         rotation_seed=args.rotation_seed,
-        fuse_rotations=args.fuse_rotations,
         use_qjl=args.use_qjl,
         dtype=args.dtype,
         attn_bits=args.attn_bits,

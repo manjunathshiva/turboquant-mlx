@@ -14,7 +14,6 @@ class TurboQuantConfig:
         use_qjl: Enable QJL 1-bit residual correction (adds ~1 bit overhead). Default False.
         rotation: Rotation method - "hadamard", "blockwise_hadamard", or "none". Default "hadamard".
         rotation_seed: Seed for random rotation signs (deterministic). Default 42.
-        fuse_rotations: Whether to fuse rotations into LayerNorm weights. Default False.
             Note: norm fusion is currently disabled by default because fusing a
             Hadamard rotation into a diagonal norm weight is not mathematically
             valid (H(diag(w) @ x) != diag(H@w) @ x). Online rotation is used
@@ -38,7 +37,6 @@ class TurboQuantConfig:
     use_qjl: bool = False
     rotation: str = "hadamard"
     rotation_seed: int = 42
-    fuse_rotations: bool = False
     attn_bits: Optional[int] = None
     mlp_bits: Optional[int] = None
     mlp_group_size: Optional[int] = None  # block-scale override for the MLP/expert tier
@@ -137,7 +135,6 @@ class TurboQuantConfig:
             "use_qjl": self.use_qjl,
             "rotation": self.rotation,
             "rotation_seed": self.rotation_seed,
-            "fuse_rotations": self.fuse_rotations,
             "attn_bits": self.attn_bits,
             "mlp_bits": self.mlp_bits,
             "mlp_group_size": self.mlp_group_size,
@@ -153,7 +150,6 @@ class TurboQuantConfig:
             use_qjl=d.get("use_qjl", False),
             rotation=d.get("rotation", "hadamard"),
             rotation_seed=d.get("rotation_seed", 42),
-            fuse_rotations=d.get("fuse_rotations", False),
             attn_bits=d.get("attn_bits", None),
             mlp_bits=d.get("mlp_bits", None),
             mlp_group_size=d.get("mlp_group_size", None),

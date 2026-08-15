@@ -80,7 +80,6 @@ def convert_vlm(
         group_size=group_size,
         rotation=rotation,
         rotation_seed=rotation_seed,
-        fuse_rotations=False,  # online rotation everywhere (production default)
         use_qjl=False,
         attn_bits=attn_bits,
         mlp_bits=mlp_bits,

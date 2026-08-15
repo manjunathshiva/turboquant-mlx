@@ -112,7 +112,6 @@ def convert_streaming(
     group_size: int = 64,
     rotation: str = "hadamard",
     rotation_seed: int = 42,
-    fuse_rotations: bool = True,
     use_qjl: bool = False,
     attn_bits: int = None,
     mlp_bits: int = None,
@@ -136,7 +135,7 @@ def convert_streaming(
 
     tq_config = TurboQuantConfig(
         bits=bits, group_size=group_size, rotation=rotation,
-        rotation_seed=rotation_seed, fuse_rotations=fuse_rotations,
+        rotation_seed=rotation_seed,
         use_qjl=use_qjl, attn_bits=attn_bits, mlp_bits=mlp_bits,
         mlp_group_size=mlp_group_size, ternary_experts=ternary_experts,
         expert_down_bits=expert_down_bits,

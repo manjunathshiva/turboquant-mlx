@@ -1,16 +1,26 @@
-"""Per-architecture rotation fusion configurations.
+"""Per-architecture map of which projection reads which normalization layer.
 
-Defines which layers can have their Hadamard rotation fused into a
-preceding normalization (LayerNorm/RMSNorm) layer, and which require
-online rotation at inference time.
+DESCRIPTIVE ONLY — nothing in the quantizer consumes this today. Every layer
+uses online rotation.
 
-Fusion is possible when:
-- The layer's input comes directly from a normalization layer (element-wise scale)
-- There's no non-linearity between the norm and the projection
+It used to drive a "fuse the Hadamard into the preceding norm" optimization.
+That optimization was mathematically impossible and has been removed: a norm
+applies a *diagonal* (element-wise) weight, and a Hadamard transform does not
+commute with a diagonal, so `hadamard(signs * w) * n` is not
+`hadamard(signs * (n * w))`. Measured cosine similarity between the two at
+dim=4096 is +0.004 — noise. See `tests/test_core.py::
+test_rotation_cannot_fuse_into_norm`, which pins the impossibility.
 
-Online rotation is needed when:
-- The layer's input passes through a non-linearity (SiLU, GeLU, etc.)
-- The layer's input comes from attention (softmax + value multiply)
+The map is kept because it encodes real per-architecture structure (including
+the parent-qualified entries that disambiguate repeated leaf names) and is the
+exact input a correct *residual-stream* rotation would need: QuaRot-style, one
+shared orthogonal Q absorbed into the embeddings and every output projection,
+with norm weights folded into the following linear first. That is a
+whole-model transform, not a per-layer one.
+
+`fuse_norm_to_projs` reads "these projections consume this norm's output".
+`online_rotation_layers` reads "this projection's input passes through a
+non-linearity or attention", so no norm feeds it directly.
 """
 
 from dataclasses import dataclass, field
@@ -190,11 +200,9 @@ ROTATION_CONFIGS: dict[str, LayerRotationConfig] = {
     "deepseek_v3": DEEPSEEK_MLA_MOE_CONFIG,
     "deepseek_v32": DEEPSEEK_MLA_MOE_CONFIG,
     # DiffusionGemma (block-diffusion MoE, lives in mlx-vlm — see convert_vlm).
-    # Same pre-norm attn + SwitchGLU-style expert layout as MoE LLaMA; only
-    # consulted when fuse_rotations=True (production uses online rotation).
+    # Same pre-norm attn + SwitchGLU-style expert layout as MoE LLaMA.
     "diffusion_gemma": MOE_LLAMA_CONFIG,
-    # Muse Glimmer (dense VLM, mlx-vlm). Only consulted when
-    # fuse_rotations=True; production uses online rotation.
+    # Muse Glimmer (dense VLM, mlx-vlm).
     "muse_glimmer": MUSE_GLIMMER_CONFIG,
     "muse_glimmer_text": MUSE_GLIMMER_CONFIG,
 }
