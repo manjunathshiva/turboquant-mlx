@@ -45,8 +45,9 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | **Muse Glimmer (30B dense VLM)** | **TurboQuant, gs=64** | **4** | **4.3315** | **14.88 GiB** | **9.4 tok/s · better PPL than affine 4-bit in 25% less space** |
 | **Muse Glimmer (30B dense VLM)** | **TurboQuant, gs=64** | **3** | **5.0454** | **12.53 GiB** | **10.9 tok/s · smallest coherent build** |
 | Qwen3.8-27B (dense 27.8B hybrid-GDN VLM) | BF16 (original) | 16 | — | 55.6 GB | *Needs a 64 GB Mac just to load* |
-| **[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B)** | **TurboQuant, gs=64** | **4** | **—** | **15.15 GiB** | **11.4 tok/s · Opencode agentic pass · vision pass** |
-| **Qwen3.8-27B** | **TurboQuant, gs=64** | **3** | **—** | **12.88 GiB** | **9.2 tok/s · Opencode agentic pass · fits a 24 GB Mac** |
+| Qwen3.8-27B | [Affine 4-bit (mlx-community)](https://huggingface.co/mlx-community/Qwen3.8-27B-4bit) | 4 | 7.2685 | 14.95 GiB | **29.7 tok/s** — fastest 4-bit, but peaks 16.16 GiB: *won't fit 16 GB* |
+| **[Qwen3.8-27B](https://huggingface.co/manjunathshiva/Qwen3.8-27B-tq4-g64)** | **TurboQuant, gs=64** | **4** | **7.2496** | **15.15 GiB** | **11.3 tok/s · best PPL of the three · Opencode agentic pass · vision 4/4** |
+| **[Qwen3.8-27B (16 GB build)](https://huggingface.co/manjunathshiva/Qwen3.8-27B-tq3-mini-g64)** | **TurboQuant, gs=64** | **3** | **8.0052** | **11.55 GiB** | **12–13.6 tok/s (M4 Max) · verified on a real 16 GB Mac mini: 13.61 GiB peak, 3.7 tok/s, vision passes** |
 
 ## Key Results — KV Cache Compression
 
@@ -1474,19 +1475,55 @@ attention**, one full layer in every four. Hidden 5120, intermediate 17408,
 0.6.3 already carry the architecture, so nothing needed porting; conversion
 takes about 18 seconds.
 
+Two builds are published, and they target different machines.
+
 | build | size | peak (1.3K prompt) | decode | Opencode agentic |
 |---|---|---|---|---|
-| **TurboQuant `tq4-g64`** | **15.15 GiB** | 22.85 GB | 11.4 tok/s | **pass** (6m12s) |
-| TurboQuant `tq3-g64` | 12.88 GiB | 20.60 GB | 9.2 tok/s | pass (6m32s) |
+| **[`tq4-g64`](https://huggingface.co/manjunathshiva/Qwen3.8-27B-tq4-g64)** | **15.15 GiB** | 22.85 GB | 11.4 tok/s | **pass** (6m12s) |
+| [`tq3-mini-g64`](https://huggingface.co/manjunathshiva/Qwen3.8-27B-tq3-mini-g64) | 11.55 GiB | 13.30 GiB | 12.2 tok/s | pass (6m32s)¹ |
+| `tq3-g64`, 8-bit extras (unpublished) | 12.88 GiB | 20.60 GB | 9.2 tok/s | pass (6m32s) |
+
+¹ the agentic run was done on the 8-bit-extras `tq3`; the published `tq3-mini`
+differs only in the extras tier, at an identical 8.0052-vs-8.0551 perplexity.
 
 Both fix a planted off-by-one end to end: run the given pytest command, read the
 file, make the minimal edit, re-run to green, explain with `file:line`. Vision
 works on both — shapes, colours, positions and grounded bounding boxes.
 
-**Take `tq4`.** It is *faster as well as better* than `tq3` for 2.3 GiB more, the
-same result the [speed flip](#the-speed-flip) predicts: the codebook path only
-earns its keep at 2-bit, and 3-bit's 10-indices-per-`uint32` packing costs more
-to unpack than 4-bit's clean 8.
+**Take `tq4` if it fits; take `tq3-mini` if it does not.** At 4-bit, `tq4` is
+*faster as well as better* than the 8-bit-extras `tq3` for 2.3 GiB more — the
+same result the [speed flip](#the-speed-flip) predicts, since the codebook path
+only earns its keep at 2-bit and 3-bit's 10-indices-per-`uint32` packing costs
+more to unpack than 4-bit's clean 8.
+
+The exception is the 16 GB tier, where nothing else reaches.
+[`tq3-mini-g64`](https://huggingface.co/manjunathshiva/Qwen3.8-27B-tq3-mini-g64)
+is **verified on a real 16 GB M4 Mac mini** — not projected down from a bigger
+machine — at `iogpu.wired_limit_mb=14336` and `--prefill-step-size 256`:
+
+| prompt | peak, 16 GB mini | peak, 64 GB M4 Max\* | prefill | decode |
+|---|---|---|---|---|
+| 220 tok | **12.95 GiB** | 13.22 GiB | 20.7 tok/s | 3.9 tok/s |
+| 818 tok | **12.96 GiB** | 13.05 GiB | 19.0 tok/s | 3.9 tok/s |
+| 2,014 tok | **13.14 GiB** | 13.30 GiB | 21.0 tok/s | 3.6 tok/s |
+| 5,017 tok | **13.61 GiB** | 13.81 GiB | 20.6 tok/s | 3.7 tok/s |
+
+\* The M4 Max sweep realized 246 / 844 / 2,040 / 5,043 prompt tokens — a
+constant 26 more than the mini's, worth 1.62 MiB of KV at 64 KiB/token. Read the
+comparison as close, not as an exact A/B.
+
+Vision passes there too — OCR correct at 350×100 (12.44 GiB) and 700×200
+(12.68 GiB). Peaks reproduced identically across two independent sweeps, and
+they run **0.09–0.27 GiB *below*** the comparable prompts on the M4 Max — 55–170×
+more than that 26-token gap can account for — so the larger machine is the
+pessimistic estimate. Reproduce with
+[`benchmarks/bench_mini_qwen38.py`](benchmarks/bench_mini_qwen38.py); the full
+record is in
+[`bench_mini_qwen38_results.json`](benchmarks/bench_mini_qwen38_results.json).
+
+Neither 4-bit build reaches that tier: affine 4-bit peaks at **16.16 GiB**, more
+than a 16 GB machine has in total. Decode there is **3.7 tok/s** — fine for
+document Q&A, summarization and vision calls, too slow for interactive chat.
 
 The hybrid stack makes KV very cheap — only 16 of 64 layers cache anything, so
 **64 KiB/token**, or 2.0 GiB at 32K context.
@@ -1669,7 +1706,7 @@ Options:
 | LLaMA / Llama 3 | `llama` | No | Tested |
 | Qwen2 / Qwen2.5 | `qwen2` | No | Tested |
 | Qwen3.5 / Qwen3.8 (text) | `qwen3_5` | No | Tested |
-| Qwen3.5-family VLM (hybrid Gated-DeltaNet + full attention, via **mlx-vlm**) | `qwen3_5` | No | Tested (Qwen3.8-27B, 27.8B dense: `tq4-g64` = 15.15 GiB, `tq3-g64` = 12.88 GiB; both pass an Opencode agentic task and the vision path). `lm_head` is kept off the polar path — see [Qwen3.8-27B](#qwen38-27b-dense-278b-hybrid-gated-deltanet-vlm) |
+| Qwen3.5-family VLM (hybrid Gated-DeltaNet + full attention, via **mlx-vlm**) | `qwen3_5` | No | Tested (Qwen3.8-27B, 27.8B dense: `tq4-g64` = 15.15 GiB, `tq3-mini-g64` = 11.55 GiB **verified on a real 16 GB Mac mini**; both pass an Opencode agentic task and the vision path). `lm_head` is kept off the polar path — see [Qwen3.8-27B](#qwen38-27b-dense-278b-hybrid-gated-deltanet-vlm) |
 | Mistral | `mistral` | No | Tested |
 | Qwen1.5-MoE | `qwen2_moe` | Yes | Tested |
 | GPT-OSS | `gpt_oss` | Yes | Tested |
