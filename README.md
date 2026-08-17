@@ -1501,17 +1501,22 @@ The exception is the 16 GB tier, where nothing else reaches.
 is **verified on a real 16 GB M4 Mac mini** — not projected down from a bigger
 machine — at `iogpu.wired_limit_mb=14336` and `--prefill-step-size 256`:
 
-| prompt | peak, 16 GB mini | peak, 64 GB M4 Max | prefill | decode |
+| prompt | peak, 16 GB mini | peak, 64 GB M4 Max\* | prefill | decode |
 |---|---|---|---|---|
 | 220 tok | **12.95 GiB** | 13.22 GiB | 20.7 tok/s | 3.9 tok/s |
 | 818 tok | **12.96 GiB** | 13.05 GiB | 19.0 tok/s | 3.9 tok/s |
 | 2,014 tok | **13.14 GiB** | 13.30 GiB | 21.0 tok/s | 3.6 tok/s |
 | 5,017 tok | **13.61 GiB** | 13.81 GiB | 20.6 tok/s | 3.7 tok/s |
 
+\* The M4 Max sweep realized 246 / 844 / 2,040 / 5,043 prompt tokens — a
+constant 26 more than the mini's, worth 1.62 MiB of KV at 64 KiB/token. Read the
+comparison as close, not as an exact A/B.
+
 Vision passes there too — OCR correct at 350×100 (12.44 GiB) and 700×200
 (12.68 GiB). Peaks reproduced identically across two independent sweeps, and
-they run **0.09–0.27 GiB *below*** the same prompts on the M4 Max, so the larger
-machine is the pessimistic estimate. Reproduce with
+they run **0.09–0.27 GiB *below*** the comparable prompts on the M4 Max — 55–170×
+more than that 26-token gap can account for — so the larger machine is the
+pessimistic estimate. Reproduce with
 [`benchmarks/bench_mini_qwen38.py`](benchmarks/bench_mini_qwen38.py); the full
 record is in
 [`bench_mini_qwen38_results.json`](benchmarks/bench_mini_qwen38_results.json).

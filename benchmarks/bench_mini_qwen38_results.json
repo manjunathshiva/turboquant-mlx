@@ -12,6 +12,13 @@
     "2040": 13.3,
     "5043": 13.81
   },
+  "reference_prompt_tokens_64gb": {
+    "246": 246,
+    "844": 844,
+    "2040": 2040,
+    "5043": 5043
+  },
+  "reference_note": "reference_peaks_64gb is keyed by loop target. The 64 GB sweep realized 246/844/2040/5043 prompt tokens where this one realized 220/818/2014/5017 - a constant 26-token offset, 1.62 MiB of KV at 64 KiB/token. That is 55-170x smaller than the measured peak deltas, so the comparison holds, but the prompts are not byte-identical.",
   "text": [
     {
       "target": 246,

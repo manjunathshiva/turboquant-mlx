@@ -19,9 +19,15 @@ the full record (16 GB M4 Mac mini, macOS 26.5.2):
     vision   700x200  12.68 GiB  OCR correct
              350x100  12.44 GiB  OCR correct
 
-Two findings worth keeping. Peaks land **below** the same prompts on the 64 GB
-machine, so the big Mac is the pessimistic estimator — and peak reproduces to
-the hundredth of a GiB across independent sweeps while prefill moves ~7%, so
+Read the delta column as approximate, not as an A/B. The 64 GB reference sweep
+realized 246 / 844 / 2,040 / 5,043 prompt tokens where this one realizes 220 /
+818 / 2,014 / 5,017 — a constant 26-token offset, worth 1.62 MiB of KV at this
+model's 64 KiB/token. That is 55-170x smaller than the deltas below, so the
+finding holds, but these are not byte-identical prompts.
+
+Two findings worth keeping. Peaks land **below** the comparable prompts on the
+64 GB machine, so the big Mac is the pessimistic estimator — and peak reproduces
+to the hundredth of a GiB across independent sweeps while prefill moves ~7%, so
 quote peak and decode flat but give prefill a range.
 
 **An out-of-memory failure is still a perfectly good result** if you are
@@ -42,8 +48,8 @@ Quit Chrome and everything else first. Headroom at the longest prompt is about
 0.19 GiB — other apps are not background noise at that margin.
 
 Note on the cap: `turboquant-plan` suggests 13863, projecting the workspace at
-8K context. The measured 5K-prompt peak is 13.81 GiB, which is 0.27 GiB OVER a
-13863 MiB cap. Use 14336.
+8K context. That is 13.54 GiB, and both machines overrun it at 5K tokens — the
+mini's 13.61 GiB by 0.07, the 64 GB M4 Max's 13.81 GiB by 0.27. Use 14336.
 """
 
 import json
@@ -61,8 +67,20 @@ STEP = "256"                      # mandatory: keeps the fused kernel on
 CAP_GIB = 14336 / 1024            # what the docs tell you to set
 
 # Reference peaks from the 64 GB M4 Max, so the mini numbers have something to
-# sit against in the writeup.
+# sit against in the writeup. Keyed by loop target, NOT by realized prompt
+# tokens: that sweep landed on 246/844/2040/5043 tokens where this one lands on
+# 220/818/2014/5017, a constant 26-token offset. At 64 KiB/token that gap is
+# 1.62 MiB, so it cannot account for deltas measured in tenths of a GiB -- but
+# the comparison is approximate and the printed column says so.
 REFERENCE = {246: 13.22, 844: 13.05, 2040: 13.30, 5043: 13.81}
+REFERENCE_TOKENS = {246: 246, 844: 844, 2040: 2040, 5043: 5043}
+REFERENCE_NOTE = (
+    "reference_peaks_64gb is keyed by loop target. The 64 GB sweep realized "
+    "246/844/2040/5043 prompt tokens where this one realizes 220/818/2014/5017 "
+    "- a constant 26-token offset, 1.62 MiB of KV at 64 KiB/token. That is "
+    "55-170x smaller than the measured peak deltas, so the comparison holds, "
+    "but the prompts are not byte-identical."
+)
 MUSE_MINI_SURVIVED = 14.21        # highest peak a 16 GB mini is known to survive
 
 
@@ -93,13 +111,32 @@ def wired_cap_mib():
         return None
 
 
+def machine_str():
+    """e.g. 'Mac16,10, 16 GB' — platform.platform() alone omits the RAM."""
+    try:
+        model = subprocess.check_output(["sysctl", "-n", "hw.model"], text=True).strip()
+        gb = int(subprocess.check_output(
+            ["sysctl", "-n", "hw.memsize"], text=True).strip()) // 1024**3
+        return f"{model}, {gb} GB"
+    except Exception:
+        return platform.machine()
+
+
+def tq_version():
+    try:
+        import turboquant_mlx
+        return turboquant_mlx.__version__
+    except Exception:
+        return "unknown"
+
+
 def text_sweep():
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained(MODEL)
     unit = "Quantization maps each group of weights onto a small codebook. "
     rows = []
-    print(f"\n{'prompt':>8}{'peak GiB':>11}{'vs 64GB':>10}{'prefill':>10}{'decode':>9}")
+    print(f"\n{'prompt':>8}{'peak GiB':>11}{'vs 64GB*':>10}{'prefill':>10}{'decode':>9}")
     print("-" * 48)
     for target in (246, 844, 2040, 5043):
         n = 1
@@ -124,7 +161,11 @@ def text_sweep():
               f"{prate or float('nan'):>10.1f}{drate or float('nan'):>9.1f}")
         rows.append({"target": target, "ok": True, "prompt_tokens": ptok,
                      "peak_gib": pk, "prefill_tps": prate, "decode_tps": drate,
-                     "seconds": round(time.time() - t0, 1)})
+                     "seconds": round(time.time() - t0, 1),
+                     "reference_prompt_tokens": REFERENCE_TOKENS.get(target)})
+    print("\n* approximate: the 64 GB reference prompts realized "
+          f"{'/'.join(str(REFERENCE_TOKENS[t]) for t in sorted(REFERENCE_TOKENS))}"
+          " tokens, ~26 more than these (1.62 MiB of KV).")
     return rows
 
 
@@ -165,9 +206,14 @@ def vision_check():
             rows.append({"image": note, "ok": False, "stderr": blob[-1500:]})
             continue
         pk = peak_gib(blob)
-        ans = "VOLTAGE 47" if re.search(r"VOLTAGE\s*47", blob) else "(not read)"
+        # A run that completes but misreads the image is a failed vision case,
+        # not a passing one -- `ok` has to track the answer, or the JSON can
+        # publish `"ok": true` next to `"read": "(not read)"`. A crash is still
+        # distinguishable from a misread: only the crash branch carries stderr.
+        matched = bool(re.search(r"\bVOLTAGE\s*47\b", blob, re.IGNORECASE))
+        ans = "VOLTAGE 47" if matched else "(not read)"
         print(f"{note:>12}{pk or float('nan'):>11.2f}   {ans}")
-        rows.append({"image": note, "ok": True, "peak_gib": pk, "read": ans})
+        rows.append({"image": note, "ok": matched, "peak_gib": pk, "read": ans})
     return rows
 
 
@@ -192,15 +238,33 @@ def main():
     else:
         print("TEXT: did NOT complete — see the JSON. This is a real result, send it.")
 
-    payload = {"model": MODEL, "platform": platform.platform(),
+    # Write the artifact the README cites, not a private copy under the image
+    # directory: a reproduction that leaves the published record untouched is
+    # not a reproduction. Same schema for generated and checked-in results.
+    dest = Path(__file__).parent / "bench_mini_qwen38_results.json"
+    payload = {"model": MODEL,
+               "machine": machine_str(),
+               "platform": platform.platform(),
+               "turboquant_mlx": tq_version(),
                "wired_limit_mb": cap, "prefill_step_size": int(STEP),
                "reference_peaks_64gb": REFERENCE,
+               "reference_prompt_tokens_64gb": REFERENCE_TOKENS,
+               "reference_note": REFERENCE_NOTE,
                "text": text, "vision": vision}
-    dest = OUT / "mini_qwen38_results.json"
-    OUT.mkdir(exist_ok=True)
+    # `note` and `repeatability` are observations ACROSS runs. A single run
+    # cannot regenerate them, so carry them forward rather than silently
+    # dropping them on every overwrite.
+    try:
+        if dest.exists():
+            prior = json.loads(dest.read_text())
+            for key in ("note", "repeatability"):
+                if key in prior:
+                    payload[key] = prior[key]
+    except (OSError, ValueError) as exc:
+        print(f"(could not carry forward prior provenance: {exc})")
     dest.write_text(json.dumps(payload, indent=2))
     print(f"\nwrote {dest}")
-    return 0 if ok else 1
+    return 0 if (ok and all(r["ok"] for r in vision)) else 1
 
 
 if __name__ == "__main__":
