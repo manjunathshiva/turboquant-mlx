@@ -229,14 +229,29 @@ def main():
     vision = vision_check()
 
     peaks = [r["peak_gib"] for r in text if r.get("peak_gib")]
-    ok = all(r["ok"] for r in text)
+    # A row is marked ok when the subprocess merely exits 0, so `ok` alone is
+    # not evidence: if the output format moves and no number parses, every row
+    # is still ok while the run measured nothing. Demand the numbers. And check
+    # the lists are non-empty first -- `all([])` is True, so a vision_check()
+    # that bailed for want of a scalable font would otherwise report a pass
+    # having tested no vision at all.
+    text_complete = bool(text) and all(
+        r.get("ok") and all(
+            r.get(k) is not None
+            for k in ("prompt_tokens", "peak_gib", "prefill_tps", "decode_tps"))
+        for r in text)
+    vision_complete = bool(vision) and all(
+        r.get("ok") and r.get("peak_gib") is not None for r in vision)
     print("\n" + "=" * 48)
-    if ok and peaks:
+    if text_complete and peaks:
         print(f"TEXT: ran at every length. max peak {max(peaks):.2f} GiB "
               f"of {CAP_GIB:.2f} GiB cap ({CAP_GIB - max(peaks):+.2f} headroom)")
         print(f"      (Muse tq3 survived {MUSE_MINI_SURVIVED:.2f} GiB on this machine class)")
     else:
         print("TEXT: did NOT complete — see the JSON. This is a real result, send it.")
+    if not vision_complete:
+        print("VISION: no passing result" + ("" if vision else " (never ran)")
+              + " — a text-only sweep is not a full verification of this build.")
 
     # Write the artifact the README cites, not a private copy under the image
     # directory: a reproduction that leaves the published record untouched is
@@ -264,7 +279,7 @@ def main():
         print(f"(could not carry forward prior provenance: {exc})")
     dest.write_text(json.dumps(payload, indent=2))
     print(f"\nwrote {dest}")
-    return 0 if (ok and all(r["ok"] for r in vision)) else 1
+    return 0 if (text_complete and vision_complete) else 1
 
 
 if __name__ == "__main__":
