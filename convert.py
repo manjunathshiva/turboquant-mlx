@@ -33,6 +33,7 @@ def convert(
     mlp_group_size: int = None,
     ternary_experts: bool = False,
     expert_down_bits: int = None,
+    keep_mtp: bool = False,
 ):
     """Convert a HuggingFace model to TurboQuant-compressed MLX format.
 
@@ -113,6 +114,19 @@ def convert(
     # Save
     print(f"[INFO] Saving to {mlx_path}")
     save(mlx_path, hf_path, model, tokenizer, config)
+
+    # Must run AFTER save(). mlx-lm's qwen3_5 sanitize() drops every `mtp.*` key,
+    # and load() above already applied it, so the head is not in `model` and
+    # cannot be saved from it -- it has to be copied from the source shards.
+    if keep_mtp:
+        from turboquant_mlx.mtp import preserve_mtp
+
+        n, nbytes = preserve_mtp(hf_path, mlx_path)
+        if n:
+            print(f"[INFO] Preserved MTP head: {n} tensors, "
+                  f"{nbytes / 1024**2:.0f} MiB (source dtype, not quantized)")
+        else:
+            print("[INFO] --keep-mtp requested but the source has no MTP head")
 
     # Print summary
     from mlx.nn.utils import tree_flatten
@@ -214,6 +228,16 @@ def configure_parser() -> argparse.ArgumentParser:
              "Use for models too big to convert in memory (e.g. 200B+ on 64 GB). "
              "(--dtype override is not supported in this mode.)",
     )
+    parser.add_argument(
+        "--keep-mtp",
+        action="store_true",
+        help="Copy the source model's multi-token-prediction head into the "
+             "output, for self-speculative decoding. mlx-lm discards these "
+             "tensors in sanitize(), so without this flag the head is lost. "
+             "Opt-in because it adds the head at its source dtype (810 MiB on "
+             "Qwen3.8-27B) and nothing consumes it yet. No-op if the source has "
+             "no MTP head.",
+    )
     return parser
 
 
@@ -238,6 +262,17 @@ def main():
             ternary_experts=args.ternary_experts,
             expert_down_bits=args.expert_down_bits,
         )
+        # Applied here rather than threaded through convert_streaming: the head
+        # is copied from the source shards after the fact either way, so the
+        # streaming path needs no knowledge of it.
+        if args.keep_mtp:
+            from turboquant_mlx.mtp import preserve_mtp
+
+            n, nbytes = preserve_mtp(args.hf_path, args.mlx_path)
+            print(f"[INFO] Preserved MTP head: {n} tensors, "
+                  f"{nbytes / 1024**2:.0f} MiB (source dtype, not quantized)"
+                  if n else
+                  "[INFO] --keep-mtp requested but the source has no MTP head")
         return
     convert(
         hf_path=args.hf_path,
@@ -253,6 +288,7 @@ def main():
         mlp_group_size=args.mlp_group_size,
         ternary_experts=args.ternary_experts,
         expert_down_bits=args.expert_down_bits,
+        keep_mtp=args.keep_mtp,
     )
 
 
