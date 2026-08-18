@@ -11,7 +11,6 @@ it asserts we read the tensors even though the sanitiser would have removed them
 """
 
 import json
-from pathlib import Path
 
 import mlx.core as mx
 import pytest
