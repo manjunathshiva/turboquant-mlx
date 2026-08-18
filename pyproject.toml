@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "turboquant-mlx-full"
-version = "0.24.0"
+version = "0.25.0"
 description = "Extreme weight and KV cache compression for LLMs on Apple Silicon (MLX implementation of Google's TurboQuant)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,8 +53,17 @@ dependencies = [
 [project.optional-dependencies]
 eval = ["datasets", "transformers"]
 dev = ["pytest", "build", "twine"]
-# 0.6.12 is the first release carrying the Muse Glimmer model classes
-# (Blaizzy/mlx-vlm#1838). Below that, `[vlm]` cannot load muse_glimmer.
+# 0.6.12 is where the RMS norm was hoisted out of Muse Glimmer's embedding
+# (Blaizzy/mlx-vlm#1838): `TextModel` holds a paramless `embed_norm` and applies
+# it in `__call__`, so a plain `QuantizedEmbedding` already keeps the maths right
+# and `_patch_muse_glimmer_normed_embedding` is a no-op.
+#
+# NOT because muse_glimmer is absent below it — 0.6.11 carries the model classes
+# and loads fine (measured). `integration/vlm.py` patches the pre-hoist layout
+# and the on-disk key set is identical either way, so an existing <0.6.12
+# environment is not broken. The floor stays here because this is the layout that
+# needs no patch at all: the patch's own tests skip themselves on >= 0.6.12, so
+# the pre-hoist path is not what CI exercises.
 vlm = ["mlx-vlm>=0.6.12"]
 # Kimi K3 ships a tiktoken-based tokenizer that needs blobfile to load.
 kimi = ["tiktoken", "blobfile"]

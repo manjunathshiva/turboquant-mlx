@@ -29,7 +29,7 @@ def _require_mlx_vlm():
         from mlx_vlm import utils  # noqa: F401
     except ImportError as e:
         raise ImportError(
-            "mlx-vlm >= 0.6.3 is required for VLM/diffusion architectures. "
+            "mlx-vlm >= 0.6.12 is required for VLM/diffusion architectures. "
             'Install with: pip install "turboquant-mlx-full[vlm]"'
         ) from e
 

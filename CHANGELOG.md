@@ -6,6 +6,130 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-18
+
+A loader fix, and a negative result recorded with its evidence.
+
+Affine-quantized embeddings and `lm_head` were dropped on load without a word,
+so a VLM checkpoint opened through the *text* loader returned nonsense instead
+of refusing. Both loaders now recover those modules from the tensor shapes, and
+a missed one raises rather than loading garbage.
+
+The multi-token-prediction head that ships with Qwen3.5/3.8 can now be preserved
+and is fully implemented — and runs at 0.52x plain greedy, so nothing enables it.
+
+### Fixed
+
+- **Affine-quantized embeddings and `lm_head` were silently discarded on load.**
+  TurboQuant leaves the token embedding and `lm_head` to MLX's affine quantizer,
+  so they arrive as `weight`/`scales`/`biases` with no `.codebook`.
+  `_prepare_polar_layers` keys off `.codebook` and so never saw them: the freshly
+  built model still held a plain `nn.Embedding`/`nn.Linear` there, and
+  `load_weights(strict=False)` dropped their scales and biases without a word.
+
+  Nothing errored. The model returned nonsense — on Qwen3.8-27B,
+  `embed_tokens(ids)` came back `(1, T, 1280)` uint32 instead of `(1, T, 5120)`
+  floats. It bites when a VLM checkpoint is opened through the **text** loader
+  (`turboquant_mlx.generate`), which mlx-lm accepts because it knows `qwen3_5`
+  as a text architecture — which is exactly why it loaded and was wrong instead
+  of refusing. Muse Glimmer was luckier: mlx-lm has no `muse_glimmer` class at
+  all, so it failed loudly.
+
+  `_prepare_affine_extras` now converts those modules before the load, with both
+  parameters recovered exactly from the tensor shapes — the plain module's
+  `weight.shape[-1]` is the unpacked width, so `group_size = width /
+  scales.shape[-1]` and `bits = packed_words * 32 / width`.
+  `_assert_no_orphan_quant_params` then refuses to load at all if any `.scales`
+  still has nowhere to go. `strict=False` cannot simply be dropped instead,
+  because the checkpoint legitimately carries polar keys the base modules do not
+  declare, so a missed module has to be caught explicitly.
+
+- **The VLM loader no longer gates affine preparation on a config key.**
+  `load_turboquant_vlm` read `quantization.affine_extras` and skipped preparation
+  entirely when it was absent, which would have dropped every scale and bias in
+  silence. Nothing shipped could reach it — `convert_vlm` writes that key in the
+  same branch that quantizes, so the key and the tensors have always travelled
+  together (verified across all five local builds) — so this removes the coupling
+  rather than fixing a live failure. Both loaders now share the one shape-based
+  mechanism, which cannot be skipped by a missing key, and the VLM path gains the
+  orphan guard it never had. Verified to agree with the config it replaces on
+  Qwen3.8-27B `tq4` (gs64/8-bit) and `tq3-x4` (gs64/4-bit), 86 modules each.
+
+### Added
+
+- **`convert --keep-mtp` preserves the Qwen3.5/3.8 multi-token-prediction head**,
+  and `turboquant_mlx.mtp` implements self-speculative decoding on it. Both are
+  opt-in and **nothing enables them**: mlx-lm discards the head in `sanitize()`
+  and implements MTP nowhere, transformers declares
+  `_keys_to_ignore_on_load_unexpected = [r"^mtp.*"]`, so there was no reference
+  implementation to copy. The head is copied unquantized at its source dtype
+  (810 MiB on Qwen3.8-27B, ~1.9% of the bf16 model).
+
+  The decode loop is bit-identical to greedy and runs at **0.52x** its speed. The
+  cost is structural: the Gated-DeltaNet snapshot is taken before both verify
+  positions, so a rejection must discard both — trimming only the rejected one
+  desyncs the 16 KV layers from the 48 recurrent ones — and replay the one real
+  token. That puts the ceiling at `(1+p)/(2-p)`: 0.94x at the measured **45.7%**
+  acceptance, and it needs p >= 0.80 to reach 1.5x. Removing the replay needs an
+  invertible Gated-DeltaNet update or a cheap mid-sequence checkpoint; both are
+  research. Recorded rather than shipped.
+
+  Two facts the checkpoint does not determine, both settled by measurement:
+  `concat_order` is `embedding_first` (`hidden_first` scores exactly 0.00%, so
+  DeepSeek-V3's `[hidden ; embedding]` convention is wrong here), and every 1-D
+  tensor needs the +1 norm shift, not just the four suffixes mlx-lm names —
+  **69.49%** top-1 agreement against 3.73%, on 295 tokens of prose.
+
+  The head is stored under `tq_speculator.` rather than `mtp.`, which is
+  load-bearing: `sanitize()` keys its +1 norm shift off `any("mtp." in k)`, and a
+  converted checkpoint's norms are *already* shifted, so any key containing that
+  substring re-fires the predicate and shifts every norm a second time.
+
+- **`benchmarks/eval_vlm_perplexity.py`** — WikiText-2 perplexity for any mlx-vlm
+  checkpoint, TurboQuant or affine. `evaluate.py` cannot do this: it loads through
+  `mlx_lm.utils.load` and re-quantizes in-process, so it reaches neither a VLM nor
+  a checkpoint that arrived pre-quantized from the Hub. Teacher-forced, so no
+  sampler or seed is involved, and it *asserts* both models tokenize the corpus
+  identically rather than silently reporting incomparable numbers.
+
+- **`benchmarks/eval_vlm_vision.py`** — four drawn-to-order images (OCR, counting,
+  chart reading, spatial relations) with ground truth we set, so scoring is a
+  substring match rather than a judgement. Picks the engine from the checkpoint:
+  TurboQuant builds go through `generate_vlm`, everything else through
+  `mlx_vlm.generate`.
+
+### Documentation
+
+- **Qwen3.8-27B's 16 GB claim is now measured on a 16 GB M4 Mac mini** rather than
+  reasoned from peak-under-cap on a 64 GB M4 Max. macOS 26.5.2 at
+  `iogpu.wired_limit_mb=14336` and `--prefill-step-size 256`: peaks 12.95-13.61
+  GiB from 220 to 5,017 tokens, vision correct at two image sizes, 3.7 tok/s
+  decode. The peaks reproduced identically across two sweeps and land 0.09-0.27
+  GiB *below* the same prompts on the M4 Max, so the larger machine was the
+  pessimistic estimator. The README's summary table drops the unpublished
+  `tq3-g64` row for the shipped `tq3-mini-g64` (11.55 GiB) and adds
+  mlx-community's affine 4-bit for a like-for-like comparison; harness landed as
+  `benchmarks/bench_mini_qwen38.py`.
+
+- **The README recommends the affine 4-bit build for Qwen3.8-27B**, on the
+  numbers: 29.7 against 11.3 tok/s decode at a lower peak (16.16 against 17.80
+  GiB), for 0.3% perplexity (7.2685 against 7.2496 at 16K). TurboQuant's one
+  structural edge here is storage — the Hadamard rotation symmetrizes each group
+  so there is no zero-point to keep, 4.251 against 4.500 bits/weight. Two
+  cautions are recorded with it, because both would otherwise be misread: the
+  3/4-against-4/4 vision split is ONE string (a five-string probe put affine at
+  4/5, so it is not an OCR weakness), and agentic wall-clock is not a speed
+  metric — the faster-decoding build finished slower by spending more tool turns.
+
+- **Corrected the reason for the `[vlm]` floor of `mlx-vlm>=0.6.12`.** The
+  comment claimed 0.6.12 was the first release carrying the Muse Glimmer model
+  classes, and that `[vlm]` could not load `muse_glimmer` below it. Both halves
+  are wrong: 0.6.11 carries `mlx_vlm.models.muse_glimmer` and loads it fine.
+  What 0.6.12 actually shipped (Blaizzy/mlx-vlm#1838) is the *norm hoist* — the
+  RMS norm moved out of `NormedEmbedding` into `TextModel.embed_norm` — which is
+  why `_patch_muse_glimmer_normed_embedding` is a no-op there. The constraint is
+  unchanged; only its justification was wrong.
+
 ## [0.24.0] - 2026-08-15
 
 Qwen3.5-family VLM support (`model_type: qwen3_5`, e.g. Qwen3.8-27B), and the
