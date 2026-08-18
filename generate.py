@@ -76,10 +76,15 @@ def _prepare_affine_extras(model, weights):
     both parameters exactly: the plain module's ``weight.shape[-1]`` is the
     unpacked width, so ``group_size = width / scales.shape[-1]`` and
     ``bits = packed_words * 32 / width``.
+
+    Raises:
+        RuntimeError: if a module has some but not all of ``weight``/``scales``/
+            ``biases``. An affine module declares all three, so a partial set is
+            a malformed checkpoint rather than a tier to skip.
     """
     import mlx.nn as nn
 
-    specs = {}
+    specs, pending = {}, {}
     for key in weights:
         if not key.endswith(".scales"):
             continue
@@ -91,6 +96,19 @@ def _prepare_affine_extras(model, weights):
             continue
         if isinstance(module, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
             continue                      # already quantized
+        # An affine module declares all three tensors, so an incomplete set means
+        # a malformed checkpoint, not a tier we should skip. Both halves failed
+        # badly before: a missing `weight` raised a bare KeyError from the lookup
+        # below, and a missing `biases` was worse than that — `load_weights` does
+        # not replace omitted parameters, so the module kept its freshly
+        # initialized biases and returned plausible-looking garbage.
+        missing = [f"{path}.{n}" for n in ("weight", "scales", "biases")
+                   if f"{path}.{n}" not in weights]
+        if missing:
+            raise RuntimeError(
+                f"{path}: affine-quantized tensors are incomplete, missing "
+                f"{', '.join(missing)}. Re-convert this checkpoint."
+            )
         packed = weights[f"{path}.weight"]
         groups = weights[key].shape[-1]
         width = module.weight.shape[-1]
@@ -101,11 +119,17 @@ def _prepare_affine_extras(model, weights):
         if bits not in (2, 3, 4, 6, 8) or group_size not in (32, 64, 128):
             continue
         specs[path] = {"group_size": group_size, "bits": bits}
+        pending[path] = module
 
-    if not specs:
-        return specs
-
-    nn.quantize(model, class_predicate=lambda path, _m: specs.get(path, False))
+    # Deliberately not nn.quantize(class_predicate=...): a predicate returning a
+    # dict of per-module settings is only honoured from MLX 0.22 on, and this
+    # package declares mlx>=0.20, where the dict is merely truthy and every
+    # module silently lands on the call's group_size/bits (64/4 by default).
+    # mlx-lm pins mlx>=0.31.2 transitively, so that is a latent hazard rather
+    # than a live one — but calling to_quantized directly costs nothing, honours
+    # `specs` on every version, and keeps this independent of the declared floor.
+    for path, module in pending.items():
+        _set_nested_attr(model, path, module.to_quantized(**specs[path]))
     return specs
 
 

@@ -49,6 +49,14 @@ def convert(
         mlp_group_size: Optional finer group size for MoE expert tensors.
         ternary_experts: If True, quantize routed MoE experts to the ternary
             {-c,0,+c} codebook packed as base-3 trits (~1.6 bpw).
+        keep_mtp: If True, copy the source model's multi-token-prediction head
+            into the output. mlx-lm's ``sanitize()`` drops every ``mtp.*`` key,
+            so without this the head cannot survive conversion at all. The head
+            is copied **unquantized, at its source dtype** (810 MiB on
+            Qwen3.8-27B, ~1.9% of the bf16 model) — quantizing it is a separate
+            decision that wants its own quality gate. Off by default because
+            nothing in the decode path consumes it; see ``turboquant_mlx.mtp``.
+            No-op if the source has no head.
     """
     from mlx_lm.utils import load, save
 

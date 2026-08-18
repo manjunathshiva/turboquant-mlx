@@ -135,3 +135,51 @@ def test_orphan_guard_ignores_paths_with_no_module():
          "vision.absent.scales": mx.zeros((4, 1)),
          "vision.absent.biases": mx.zeros((4, 1))}
     _assert_no_orphan_quant_params(m, w, prepared={})   # must not raise
+
+
+def test_missing_biases_raises_instead_of_keeping_random_init():
+    """`load_weights` does not replace omitted parameters, so a dropped `biases`
+    would leave the freshly initialized ones in place and dequantize to garbage."""
+    m, w = Tiny(), _checkpoint()
+    del w["embed_tokens.biases"]
+    with pytest.raises(RuntimeError, match=r"incomplete.*embed_tokens\.biases"):
+        _prepare_affine_extras(m, w)
+
+
+def test_missing_weight_raises_a_named_error_not_a_bare_keyerror():
+    m, w = Tiny(), _checkpoint()
+    del w["lm_head.weight"]
+    with pytest.raises(RuntimeError, match=r"incomplete.*lm_head\.weight"):
+        _prepare_affine_extras(m, w)
+
+
+def test_settings_are_per_module_not_global():
+    """Pins the contract that each module keeps its own recovered settings.
+
+    Every checkpoint shipped so far records one `affine_extras` group_size/bits
+    for the whole tier, so mixed settings are not a case real weights exercise
+    today — this fixes the behaviour the shape-recovery promises, so that a
+    checkpoint which ever does mix them cannot regress silently.
+
+    It cannot distinguish the two implementations on a current install:
+    `nn.quantize(class_predicate=...)` ignores a per-module dict below MLX 0.22,
+    and mlx-lm pins mlx>=0.31.2 transitively. The assertion is on the contract,
+    not on the version bug that motivated it."""
+    ew, es, eb = _affine((VOCAB, DIM), group_size=64, bits=8)
+    hw, hs, hb = _affine((OUT, DIM), group_size=32, bits=4)
+    w = {"embed_tokens.weight": ew, "embed_tokens.scales": es,
+         "embed_tokens.biases": eb,
+         "lm_head.weight": hw, "lm_head.scales": hs, "lm_head.biases": hb}
+    m = Tiny()
+    specs = _prepare_affine_extras(m, w)
+
+    assert specs["embed_tokens"] == {"group_size": 64, "bits": 8}
+    assert specs["lm_head"] == {"group_size": 32, "bits": 4}
+    assert (m.embed_tokens.group_size, m.embed_tokens.bits) == (64, 8)
+    assert (m.lm_head.group_size, m.lm_head.bits) == (32, 4)
+
+    # And they still load and run, which a mismatched group_size would break.
+    m.load_weights(list(w.items()), strict=False)
+    out = m.lm_head(m.embed_tokens(mx.array([[1, 2, 3]])))
+    mx.eval(out)
+    assert out.shape == (1, 3, OUT)

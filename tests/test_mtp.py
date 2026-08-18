@@ -11,8 +11,10 @@ it asserts we read the tensors even though the sanitiser would have removed them
 """
 
 import json
+import re
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 import pytest
 from turboquant_mlx.mtp import (
     MTP_PREFIX,
@@ -189,6 +191,16 @@ def test_stored_keys_never_contain_mtp_dot(source, converted):
     for f in converted.glob("model*.safetensors"):
         every_key |= set(mx.load(str(f)))
     assert not any("mtp." in k for k in every_key)
+
+
+def test_the_leak_guard_raises_runtimeerror_not_assertionerror(converted):
+    """It must survive `python -O`, which strips asserts. A stored key carrying
+    "mtp." re-fires the norm shift on load, so this is silent corruption, not a
+    programming slip — the distinction that decides which one it has to be."""
+    with pytest.raises(RuntimeError, match="re-shift every norm weight"):
+        # `to_stored` only rewrites a leading "mtp.", so an embedded one survives
+        # renaming and is exactly what the guard exists to catch.
+        append_to_checkpoint(converted, {"model.mtp.fc.weight": mx.zeros((2, 2))})
 
 
 def test_stored_prefix_is_itself_safe():
@@ -373,3 +385,44 @@ def test_restore_rejects_a_mismatched_snapshot():
     snap = snapshot_recurrent(_hybrid_cache())
     with pytest.raises(ValueError):
         restore_recurrent(_hybrid_cache()[:32], snap)
+
+
+def _tiny_args():
+    qwen35 = pytest.importorskip("mlx_lm.models.qwen3_5")
+    return qwen35.TextModelArgs.from_dict(dict(
+        hidden_size=64, num_hidden_layers=4, intermediate_size=128,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+        vocab_size=128, rms_norm_eps=1e-6, full_attention_interval=4,
+    ))
+
+
+def _scalar_tensors(h):
+    return {"mtp.fc.weight": mx.zeros((h, 2 * h)),
+            "mtp.pre_fc_norm_embedding.weight": mx.zeros((h,)),
+            "mtp.pre_fc_norm_hidden.weight": mx.zeros((h,)),
+            "mtp.norm.weight": mx.zeros((h,))}
+
+
+def test_a_partially_loaded_head_is_refused_not_left_random():
+    """`load_weights(strict=False)` accepts an empty or partial layer and leaves
+    the DecoderLayer randomly initialized. That head still runs and still emits
+    fluent-looking drafts, so it reads as a poor acceptance rate rather than a
+    fault — the one failure mode that would never surface on its own."""
+    from turboquant_mlx.mtp import MTPHead
+
+    args = _tiny_args()
+    scalars = _scalar_tensors(args.hidden_size)
+
+    with pytest.raises(KeyError, match="randomly initialized"):
+        MTPHead(args).load(dict(scalars))          # no mtp.layers.0.* at all
+
+    head = MTPHead(args)
+    full = dict(scalars)
+    full.update({f"mtp.layers.0.{k}": v
+                 for k, v in tree_flatten(head.layer.parameters())})
+    head.load(full)                                 # complete: must not raise
+
+    victim = sorted(k for k in full if k.startswith("mtp.layers.0."))[0]
+    partial = {k: v for k, v in full.items() if k != victim}
+    with pytest.raises(KeyError, match=re.escape(victim)):
+        MTPHead(args).load(partial)

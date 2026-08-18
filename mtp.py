@@ -23,11 +23,20 @@ This module reads those tensors straight from the source shards, bypassing
 
 What is here, and what is not
 -----------------------------
-``preserve_mtp`` / ``load_mtp`` move the weights through conversion, and
-``MTPHead`` runs them. **There is no speculative-decode loop yet** — that needs
-snapshot/restore of the 48 Gated-DeltaNet recurrent states, because
-``ArraysCache.is_trimmable()`` is ``False`` and mlx-lm's
-``speculative_generate_step`` therefore refuses this model's cache outright.
+``preserve_mtp`` / ``load_mtp`` move the weights through conversion, ``MTPHead``
+runs them, and ``speculative_generate`` is a complete self-speculative loop.
+mlx-lm's own ``speculative_generate_step`` refuses this model outright, because
+``ArraysCache.is_trimmable()`` is ``False``; the loop here works around that by
+snapshotting and restoring the 48 Gated-DeltaNet recurrent states (a fixed
+~147 MiB, independent of sequence length) and replaying on a miss.
+
+**Nothing calls it, deliberately.** It is verified bit-identical to greedy
+decoding, but the measured draft acceptance is ~69% on ordinary prose, and one
+draft token verified two-at-a-time returns ``(1+p)/(2-p)`` — about 1.30x at best
+before overheads, against a 1.5x bar. So this ships as preserved weights plus a
+working reference implementation, not as a decoding path anyone gets by default.
+Beware measuring acceptance on repetitive text: the same head scored 93.7% on a
+paragraph repeated six times purely because the model was copying.
 
 The head stays at its **source dtype (bf16, 810 MiB)**, ~1.9% of the bf16 model.
 Quantizing it is a separate decision that wants its own quality gate, and
@@ -49,6 +58,7 @@ from pathlib import Path
 from typing import Dict, Tuple
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 
 #: Prefix these tensors carry in the **source** checkpoint.
 MTP_PREFIX = "mtp."
@@ -90,21 +100,28 @@ def from_stored(key: str) -> str:
 def _resolve_source(hf_path: str) -> Path:
     """Local directory for ``hf_path``, downloading only what MTP needs.
 
-    ``allow_patterns`` keeps this cheap when the source is not already cached:
-    the head lives in a single shard, so there is no reason to pull 52 GB to copy
-    810 MiB. An already-complete local cache short-circuits the download.
+    Two stages, on purpose. ``allow_patterns=["*.safetensors"]`` would match
+    every shard and pull the whole 52 GB source to copy 810 MiB out of it, so the
+    first stage fetches only the small files — which include the shard index —
+    and that names the single shard actually holding the head. An already-
+    complete local cache short-circuits both stages.
     """
     p = Path(hf_path)
     if p.is_dir():
         return p
     from mlx_lm.utils import _download
 
-    return Path(
-        _download(
-            hf_path,
-            allow_patterns=["*.json", "*.safetensors"],
-        )
-    )
+    meta = Path(_download(hf_path, allow_patterns=["*.json"]))
+    index = meta / "model.safetensors.index.json"
+    if not index.exists():
+        # Unsharded, or no index to narrow with: nothing to be clever about.
+        return Path(_download(hf_path, allow_patterns=["*.json", "*.safetensors"]))
+
+    weight_map = json.loads(index.read_text())["weight_map"]
+    shards = sorted({v for k, v in weight_map.items() if k.startswith(MTP_PREFIX)})
+    if not shards:
+        return meta          # no head in this checkpoint; fetch no weights at all
+    return Path(_download(hf_path, allow_patterns=["*.json", *shards]))
 
 
 def extract_mtp(hf_path: str) -> Dict[str, mx.array]:
@@ -140,8 +157,14 @@ def append_to_checkpoint(mlx_path: str | Path, tensors: Dict[str, mx.array]) -> 
     # Renamed on the way in, so no key in the checkpoint contains "mtp." — see
     # STORED_PREFIX for why that would otherwise double-shift every norm weight.
     stored = {to_stored(k): v for k, v in tensors.items()}
-    assert not any("mtp." in k for k in stored), \
-        "stored MTP keys must not contain 'mtp.' or sanitize() will re-shift norms"
+    # Not an assert: python -O strips those, and this guards a silent corruption
+    # of every norm weight in the model rather than a mere programming slip.
+    leaked = sorted(k for k in stored if MTP_PREFIX in k)
+    if leaked:
+        raise RuntimeError(
+            f"stored MTP keys must not contain {MTP_PREFIX!r} or sanitize() will "
+            f"re-shift every norm weight: {', '.join(leaked[:5])}"
+        )
 
     shard_path = dst / MTP_SHARD
     mx.save_safetensors(str(shard_path), stored, metadata={"format": "mlx"})
@@ -290,6 +313,20 @@ class MTPHead:
         _set(self.norm, "mtp.norm.weight")
         pre = "mtp.layers.0."
         layer_w = {k[len(pre):]: v for k, v in tensors.items() if k.startswith(pre)}
+
+        # strict=False on its own would accept an empty or partial layer_w and
+        # leave the DecoderLayer on its random initialization — the head would
+        # then draft fluent-looking nonsense and simply read as a low acceptance
+        # rate, never as an error. So check coverage explicitly first, and keep
+        # strict=False only to tolerate buffers the checkpoint does not carry.
+        expected = {k for k, _ in tree_flatten(self.layer.parameters())}
+        missing = sorted(expected - set(layer_w))
+        if missing:
+            raise KeyError(
+                f"MTP decoder layer is missing {len(missing)} of {len(expected)} "
+                f"tensors, e.g. {', '.join(pre + m for m in missing[:3])}. "
+                "The head would otherwise stay randomly initialized."
+            )
         self.layer.load_weights(list(layer_w.items()), strict=False)
 
     # -- forward -------------------------------------------------------------
@@ -444,11 +481,23 @@ def speculative_generate(ids, text, mtp, embed, head, *,
     """Greedy decode with MTP speculation. Yields ``(token, from_draft)``.
 
     ``text`` is the decoder stack, ``embed`` / ``head`` the embedding and output
-    projection, ``mtp`` a loaded :class:`MTPHead`. These are passed in rather than
-    pulled off a model object because ``load_turboquant`` currently mishandles
-    quantized embeddings on VLMs.
+    projection, ``mtp`` a loaded :class:`MTPHead`. They are passed in rather than
+    pulled off a model object so the loop stays usable against a bare decoder
+    stack, and so the gate scripts can drive it with their own reference
+    embedding and projection.
+
+    Single sequence only: ``ids`` must have batch size 1. The scalar ``.item()``
+    calls and the ``mx.array([[y]])`` re-feeds below collapse a batch to its
+    first row, so a batched call would return quietly wrong tokens rather than
+    fail — hence the explicit check.
     """
     from mlx_lm.models.cache import KVCache
+
+    if ids.ndim != 2 or ids.shape[0] != 1:
+        raise ValueError(
+            f"speculative_generate handles one sequence at a time; got ids with "
+            f"shape {tuple(ids.shape)}, expected (1, T)"
+        )
 
     cache = _make_cache(text, make_cache)
     mtp_cache = KVCache()
@@ -517,7 +566,17 @@ def speculative_generate(ids, text, mtp, embed, head, *,
 
 def greedy_generate(ids, text, embed, head, *, max_tokens: int = 64,
                     eos_ids=(), make_cache=None):
-    """Plain greedy decode on the same plumbing — reference for the equality gate."""
+    """Plain greedy decode on the same plumbing — reference for the equality gate.
+
+    Single sequence only, for the same reason as :func:`speculative_generate`;
+    the two must agree token for token, so they take the same restriction.
+    """
+    if ids.ndim != 2 or ids.shape[0] != 1:
+        raise ValueError(
+            f"greedy_generate handles one sequence at a time; got ids with "
+            f"shape {tuple(ids.shape)}, expected (1, T)"
+        )
+
     cache = _make_cache(text, make_cache)
     eos = {int(e) for e in eos_ids}
 
