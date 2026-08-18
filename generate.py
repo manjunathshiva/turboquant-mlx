@@ -42,6 +42,130 @@ def _set_nested_attr(model, path, value):
     setattr(parent, parts[-1], value)
 
 
+def _get_nested_module(model, path):
+    """Resolve a dot-separated path to a submodule, or None if it does not exist."""
+    node = model
+    for part in path.split("."):
+        if hasattr(node, part):
+            node = getattr(node, part)
+        elif part.isdigit():
+            try:
+                node = node[int(part)]
+            except (IndexError, KeyError, TypeError):
+                return None
+        else:
+            return None
+    return node
+
+
+def _prepare_affine_extras(model, weights):
+    """Quantize modules whose checkpoint weights are MLX-affine, not polar.
+
+    TurboQuant's "extras tier" — the token embedding and ``lm_head`` — is left to
+    MLX's affine quantizer rather than the polar codebook path, so those tensors
+    arrive as ``weight``/``scales``/``biases`` with no ``codebook``.
+    ``_prepare_polar_layers`` keys off ``.codebook`` and so never sees them, and
+    the freshly built model still holds a plain ``nn.Embedding`` / ``nn.Linear``
+    there. ``load_weights(strict=False)`` then DROPS their scales and biases
+    without complaint, leaving a module whose "weight" is a packed uint32 array.
+    Nothing errors; the model simply returns nonsense — on Qwen3.8-27B,
+    ``embed_tokens(ids)`` came back (1, T, 1280) uint32 instead of (1, T, 5120)
+    floats.
+
+    So convert those modules to their quantized counterparts first. Shapes fix
+    both parameters exactly: the plain module's ``weight.shape[-1]`` is the
+    unpacked width, so ``group_size = width / scales.shape[-1]`` and
+    ``bits = packed_words * 32 / width``.
+
+    Raises:
+        RuntimeError: if a module has some but not all of ``weight``/``scales``/
+            ``biases``. An affine module declares all three, so a partial set is
+            a malformed checkpoint rather than a tier to skip.
+    """
+    import mlx.nn as nn
+
+    specs, pending = {}, {}
+    for key in weights:
+        if not key.endswith(".scales"):
+            continue
+        path = key[: -len(".scales")]
+        if f"{path}.codebook" in weights:
+            continue                      # polar tier, handled elsewhere
+        module = _get_nested_module(model, path)
+        if module is None or not hasattr(module, "to_quantized"):
+            continue
+        if isinstance(module, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
+            continue                      # already quantized
+        # An affine module declares all three tensors, so an incomplete set means
+        # a malformed checkpoint, not a tier we should skip. Both halves failed
+        # badly before: a missing `weight` raised a bare KeyError from the lookup
+        # below, and a missing `biases` was worse than that — `load_weights` does
+        # not replace omitted parameters, so the module kept its freshly
+        # initialized biases and returned plausible-looking garbage.
+        missing = [f"{path}.{n}" for n in ("weight", "scales", "biases")
+                   if f"{path}.{n}" not in weights]
+        if missing:
+            raise RuntimeError(
+                f"{path}: affine-quantized tensors are incomplete, missing "
+                f"{', '.join(missing)}. Re-convert this checkpoint."
+            )
+        packed = weights[f"{path}.weight"]
+        groups = weights[key].shape[-1]
+        width = module.weight.shape[-1]
+        if groups == 0 or width % groups:
+            continue
+        group_size = width // groups
+        bits = (packed.shape[-1] * 32) // width
+        if bits not in (2, 3, 4, 6, 8) or group_size not in (32, 64, 128):
+            continue
+        specs[path] = {"group_size": group_size, "bits": bits}
+        pending[path] = module
+
+    # Deliberately not nn.quantize(class_predicate=...): a predicate returning a
+    # dict of per-module settings is only honoured from MLX 0.22 on, and this
+    # package declares mlx>=0.20, where the dict is merely truthy and every
+    # module silently lands on the call's group_size/bits (64/4 by default).
+    # mlx-lm pins mlx>=0.31.2 transitively, so that is a latent hazard rather
+    # than a live one — but calling to_quantized directly costs nothing, honours
+    # `specs` on every version, and keeps this independent of the declared floor.
+    for path, module in pending.items():
+        _set_nested_attr(model, path, module.to_quantized(**specs[path]))
+    return specs
+
+
+def _assert_no_orphan_quant_params(model, weights, prepared):
+    """Fail loudly if any quantized parameter had nowhere to land.
+
+    ``load_weights(strict=False)`` is necessary here — the checkpoint legitimately
+    carries polar tensors the base modules do not declare — but it also means a
+    missed module is silent. A dropped ``scales`` produces a model that runs and
+    emits garbage, which is far worse than a crash, so check explicitly.
+    """
+    import mlx.nn as nn
+
+    orphans = []
+    for key in weights:
+        if not key.endswith((".scales", ".biases")):
+            continue
+        path = key.rsplit(".", 1)[0]
+        if path in prepared or f"{path}.codebook" in weights:
+            continue
+        module = _get_nested_module(model, path)
+        if module is None:
+            continue
+        if isinstance(module, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
+            continue
+        if type(module).__name__.startswith("Polar"):
+            continue
+        orphans.append(f"{key} -> {type(module).__name__}")
+    if orphans:
+        raise RuntimeError(
+            "quantized parameters have no quantized module to load into, so "
+            "load_weights(strict=False) would discard them and the model would "
+            "return garbage:\n  " + "\n  ".join(sorted(orphans)[:12])
+        )
+
+
 def _prepare_polar_layers(model, weights, tq_config):
     """Replace nn.Linear and SwitchLinear with PolarQuantized versions.
 
@@ -226,6 +350,12 @@ def load_turboquant(model_path, lazy=False, fast=False):
 
     # Replace quantized layers with PolarQuantized versions
     _prepare_polar_layers(model, weights, tq_config)
+
+    # ...then the affine "extras" tier (embeddings, lm_head), which has no
+    # .codebook and so is invisible to the pass above.
+    prepared_affine = _prepare_affine_extras(model, weights)
+
+    _assert_no_orphan_quant_params(model, weights, prepared_affine)
 
     # Load weights into the model
     model.load_weights(list(weights.items()), strict=False)
