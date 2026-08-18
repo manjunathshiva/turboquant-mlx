@@ -183,3 +183,55 @@ def test_settings_are_per_module_not_global():
     out = m.lm_head(m.embed_tokens(mx.array([[1, 2, 3]])))
     mx.eval(out)
     assert out.shape == (1, 3, OUT)
+
+
+class _Block(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.qkv = nn.Linear(DIM, OUT, bias=False)
+
+
+class _Tower(nn.Module):
+    def __init__(self, n=2):
+        super().__init__()
+        self.blocks = [_Block() for _ in range(n)]
+
+
+class TinyVLM(nn.Module):
+    """Shaped like a real VLM: a text tower plus an indexed list of vision blocks."""
+
+    def __init__(self):
+        super().__init__()
+        self.language_model = Tiny()
+        self.vision_tower = _Tower()
+
+
+def test_modules_behind_a_list_index_are_prepared_and_installed():
+    """The vision tower reaches its modules through a list — `vision_tower.
+    blocks.0.qkv` — and preparation now installs each one with
+    `_set_nested_attr` rather than letting `nn.quantize` walk the tree. Setting a
+    replacement back through a list index is the part that has no equivalent in
+    the old path, so it gets its own test rather than riding on the flat case.
+    """
+    m = TinyVLM()
+    w = {}
+    for path in ("language_model.embed_tokens", "language_model.lm_head",
+                 "vision_tower.blocks.0.qkv", "vision_tower.blocks.1.qkv"):
+        shape = (VOCAB, DIM) if path.endswith("embed_tokens") else (OUT, DIM)
+        q, s, b = _affine(shape)
+        w[f"{path}.weight"], w[f"{path}.scales"], w[f"{path}.biases"] = q, s, b
+
+    specs = _prepare_affine_extras(m, w)
+    assert set(specs) == {"language_model.embed_tokens", "language_model.lm_head",
+                          "vision_tower.blocks.0.qkv", "vision_tower.blocks.1.qkv"}
+
+    # Installed on the real tree, not on a detached copy.
+    assert isinstance(m.vision_tower.blocks[0].qkv, nn.QuantizedLinear)
+    assert isinstance(m.vision_tower.blocks[1].qkv, nn.QuantizedLinear)
+    assert isinstance(m.language_model.embed_tokens, nn.QuantizedEmbedding)
+
+    _assert_no_orphan_quant_params(m, w, specs)     # must not raise
+    m.load_weights(list(w.items()), strict=False)
+    out = m.vision_tower.blocks[0].qkv(mx.zeros((1, 3, DIM), mx.bfloat16))
+    mx.eval(out)
+    assert out.shape == (1, 3, OUT)

@@ -16,7 +16,11 @@ from pathlib import Path
 import mlx.core as mx
 
 from turboquant_mlx.config import TurboQuantConfig
-from turboquant_mlx.generate import _prepare_polar_layers
+from turboquant_mlx.generate import (
+    _assert_no_orphan_quant_params,
+    _prepare_affine_extras,
+    _prepare_polar_layers,
+)
 
 
 def _require_mlx_vlm():
@@ -218,23 +222,18 @@ def load_turboquant_vlm(model_path, lazy=False):
     # so no weight sanitization is needed before loading.
     _prepare_polar_layers(model, weights, tq_config)
 
-    # Checkpoints converted with --quantize-extras also carry 8-bit affine
-    # modules (embeddings, dense MLP, vision tower). Affine layers have
-    # `.scales` but no `.codebook` in the saved weights.
-    affine = tq_dict.get("affine_extras")
-    if affine:
-        import mlx.nn as nn
-
-        nn.quantize(
-            model,
-            group_size=int(affine["group_size"]),
-            bits=int(affine["bits"]),
-            class_predicate=lambda p, m: (
-                hasattr(m, "to_quantized")
-                and f"{p}.scales" in weights
-                and f"{p}.codebook" not in weights
-            ),
-        )
+    # Checkpoints also carry affine-quantized modules — the embeddings, lm_head
+    # and, on a VLM, the entire vision tower. Those have `.scales` but no
+    # `.codebook`, so `_prepare_polar_layers` never sees them.
+    #
+    # Recovered from the tensor shapes rather than read from the config's
+    # `affine_extras` block. That block is not guaranteed to be present, and the
+    # old `if affine:` meant a checkpoint without it skipped affine preparation
+    # entirely: `load_weights(strict=False)` then dropped every scales and biases
+    # in silence and the modules returned packed uint32 instead of floats. Shapes
+    # are always there, so this cannot be skipped by a missing key.
+    prepared_affine = _prepare_affine_extras(model, weights)
+    _assert_no_orphan_quant_params(model, weights, prepared_affine)
 
     model.load_weights(list(weights.items()), strict=False)
 
