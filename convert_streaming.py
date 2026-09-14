@@ -118,6 +118,11 @@ def convert_streaming(
     mlp_group_size: int = None,
     ternary_experts: bool = False,
     expert_down_bits: int = None,
+    quantize_extras: bool = False,
+    extras_bits: int = 4,
+    extras_group_size: int = 64,
+    protect_expert_layers: list = None,
+    protect_bits: int = 3,
     max_file_size_gb: int = MAX_FILE_SIZE_GB,
 ):
     """Convert an HF model to TurboQuant MLX format with bounded peak memory.
@@ -139,6 +144,8 @@ def convert_streaming(
         use_qjl=use_qjl, attn_bits=attn_bits, mlp_bits=mlp_bits,
         mlp_group_size=mlp_group_size, ternary_experts=ternary_experts,
         expert_down_bits=expert_down_bits,
+        protect_expert_layers=protect_expert_layers,
+        protect_bits=protect_bits,
     )
 
     print(f"[INFO] Loading model from {hf_path} (lazy)")
@@ -168,8 +175,25 @@ def convert_streaming(
     model, config = turboquant_quantize(
         model, config, tq_config, on_quantized=on_quantized,
     )
+    # Pass 1b: the affine extras tier, streamed the same way. Off by default;
+    # required on any model that keeps a large lookup table, because pass 2
+    # below writes whatever is left at its source dtype. Qwen3.8-Flash-Next's
+    # sharded n-gram/PLE table is 51.2B params (95.4 GiB bf16) and would
+    # otherwise dominate the output — ~124 GiB against ~54 GiB with this on.
+    if quantize_extras:
+        from turboquant_mlx.quantize_model import quantize_affine_extras
+
+        n_extra = quantize_affine_extras(
+            model, config, bits=extras_bits, group_size=extras_group_size,
+            on_quantized=on_quantized,
+        )
+        print(f"[INFO] Quantized + streamed {n_extra} extra modules to "
+              f"{extras_bits}-bit affine g{extras_group_size} "
+              f"(embeddings; routers and the QSA indexer excluded)")
+
     # Pass 2: the remaining (non-quantized) params — norms (with fused rotations),
-    # embeddings, routers, any dimension-skipped layers. Small vs. the experts.
+    # routers, any dimension-skipped layers, and the embeddings too unless
+    # --quantize-extras claimed them above.
     for name, arr in tree_flatten(model.parameters()):
         writer.add(name, arr)
     n_shards = writer.finalize()

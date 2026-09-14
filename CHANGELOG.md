@@ -6,6 +6,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Qwen3.8-Flash-Next (`qwen4_exp`)** — 180B MoE, 512 routed experts at top-10
+  and 640 wide, hybrid Gated DeltaNet + Qwen Sparse Attention. Architecture
+  vendored from the open mlx-lm PR #1788 and aliased through `compat.py`, which
+  self-disables once mlx-lm ships the type natively.
+- **Vision for `qwen4_exp`** (`models/qwen4_exp_vision.py`): the tower is a
+  Qwen3-VL tower, so mlx-vlm's implementation is reused (333/333 tensors load
+  strict). Adds 3-D position building, interleaved MRoPE, and feature splicing.
+  mlx-vlm is imported lazily and only there.
+- **`--quantize-extras` / `--extras-bits` / `--extras-group-size`** on both text
+  converters: quantize the bf16 remainder the polar path never touches,
+  `nn.Embedding` above all. On Qwen3.8-Flash-Next the n-gram/PLE table is 51.2B
+  parameters — 28% of the model — so skipping it produces a ~124 GiB build
+  instead of ~52 GiB. Warns loudly when a tensor width is not divisible by the
+  group size instead of silently excluding it.
+- **`--protect-expert-layers` / `--protect-bits`** for the text and streaming
+  converters. Selected by module type plus layer index, not by expert-container
+  name, which differs per model.
+
+### Fixed
+- **Streaming affine-extras retained every source weight.** The loop held
+  `list(model.named_modules())`, keeping each original module alive for its
+  duration; on a model with a large embedding table that is the entire table in
+  memory. Three 180B conversions were killed 71-90% through that phase.
+- **`bits_for_path` missed a singular `shared_expert`** (Qwen3 and Kimi spell it
+  plural), dropping an always-on expert into the sub-2-bit tier.
+- **The Qwen Sparse Attention block indexer is now kept at full precision.** It
+  top-k selects which KV blocks a query may read — a discrete choice, like a
+  router — and it is 0.04 GiB.
+- **`SafetensorsExpertReader.close()`** also catches `AttributeError`: at
+  interpreter teardown `os` may already be `None`, which printed an ignored
+  exception on every streaming exit.
+
 ## [0.25.0] - 2026-08-18
 
 A loader fix, and a negative result recorded with its evidence.

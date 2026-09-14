@@ -64,6 +64,16 @@ class TurboQuantConfig:
     # up/gate IQ2_XXS, down Q2_K) rely on exactly this asymmetry. None
     # disables. Applies only to MoE SwitchLinear experts, never dense MLPs.
     expert_down_bits: Optional[int] = None
+    # Layer protection: the routed experts of these layer indices use a
+    # ``protect_bits`` Gaussian codebook instead of the expert tier (ternary or
+    # ``mlp_bits``). Protection changes bit width only, never the expert group
+    # size, so the loader needs no matching rule -- per-layer bits and trit-ness
+    # are self-describing via each saved codebook's length. Selected by module
+    # TYPE (routed-expert SwitchLinear) plus the ``.layers.N.`` index, never by
+    # matching expert-container names, which differ per model (``experts`` vs
+    # ``switch_mlp``) and have silently missed before.
+    protect_expert_layers: Optional[tuple] = None
+    protect_bits: int = 3
 
     def __post_init__(self):
         if self.bits not in (2, 3, 4):
@@ -86,6 +96,20 @@ class TurboQuantConfig:
         if self.expert_down_bits is not None and self.expert_down_bits not in (2, 3, 4):
             raise ValueError(
                 f"expert_down_bits must be 2, 3, or 4, got {self.expert_down_bits}")
+        if self.protect_bits not in (2, 3, 4):
+            raise ValueError(f"protect_bits must be 2, 3, or 4, got {self.protect_bits}")
+        if self.protect_expert_layers is not None:
+            try:
+                layers = sorted({int(i) for i in self.protect_expert_layers})
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "protect_expert_layers must be an iterable of layer indices, "
+                    f"got {self.protect_expert_layers!r}")
+            if any(i < 0 for i in layers):
+                raise ValueError(
+                    f"protect_expert_layers must be non-negative, got {layers}")
+            # Normalized: sorted, de-duplicated, and None when empty.
+            self.protect_expert_layers = tuple(layers) or None
 
     def bits_for_path(self, path: str) -> int:
         """Resolve the bit-width for a layer based on its dotted path.
@@ -100,6 +124,13 @@ class TurboQuantConfig:
         tier: unlike a routed expert (1 of 896, top-16), these run on every
         token, so dropping them to a sub-2-bit expert tier costs quality on
         the whole stream for a rounding-error size saving.
+
+        The shared-expert test is a **prefix** match, not equality, because the
+        attribute is named inconsistently upstream: Qwen3/Kimi use
+        ``shared_experts`` (plural) but Qwen4-Exp (Qwen3.8-Flash-Next) uses
+        ``shared_expert`` (singular). An equality test silently dropped the
+        singular form into the expert tier — the same failure mode as the
+        nemotron_h ``mixer.*`` miss and Laguna's ``switch_mlp``-only byte count.
         """
         parts = path.split(".")
         for p in parts:
@@ -107,7 +138,7 @@ class TurboQuantConfig:
                 return self.attn_bits if self.attn_bits is not None else self.bits
             if p in ("mlp", "feed_forward"):
                 if any(
-                    q == "shared_experts" or q.startswith("routed_expert_")
+                    q.startswith("shared_expert") or q.startswith("routed_expert_")
                     for q in parts
                 ):
                     return self.bits
@@ -144,7 +175,7 @@ class TurboQuantConfig:
         return eff_attn != eff_mlp
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "mode": "turboquant",
             "bits": self.bits,
             "group_size": self.group_size,
@@ -157,6 +188,13 @@ class TurboQuantConfig:
             "ternary_experts": self.ternary_experts,
             "expert_down_bits": self.expert_down_bits,
         }
+        # Emitted only when protection is on, so configs of builds without it are
+        # unchanged. Key names match what convert_vlm.py already writes, so VLM
+        # builds that shipped with protection load through from_dict unchanged.
+        if self.protect_expert_layers:
+            d["protected_expert_layers"] = list(self.protect_expert_layers)
+            d["protect_bits"] = self.protect_bits
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "TurboQuantConfig":
@@ -171,6 +209,8 @@ class TurboQuantConfig:
             mlp_group_size=d.get("mlp_group_size", None),
             ternary_experts=d.get("ternary_experts", False),
             expert_down_bits=d.get("expert_down_bits", None),
+            protect_expert_layers=d.get("protected_expert_layers", None),
+            protect_bits=d.get("protect_bits", 3),
         )
 
     @property

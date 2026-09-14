@@ -19,6 +19,39 @@ from turboquant_mlx.config import TurboQuantConfig
 from turboquant_mlx.quantize_model import turboquant_quantize
 
 
+def _parse_layer_list(text: str) -> list:
+    """Parse a layer list for --protect-expert-layers: '0-5,42-47' or '0,1,47'.
+
+    Ranges are inclusive. Raises argparse.ArgumentTypeError on malformed input
+    so the CLI reports a clean usage error instead of a traceback.
+    """
+    import argparse
+
+    layers = set()
+    for part in str(text).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                lo, hi = (int(x) for x in part.split("-", 1))
+                if lo > hi or lo < 0:
+                    raise ValueError
+                layers.update(range(lo, hi + 1))
+            else:
+                v = int(part)
+                if v < 0:
+                    raise ValueError
+                layers.add(v)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"bad layer spec {part!r}: use indices and inclusive ranges, "
+                f"e.g. '0-5,42-47'")
+    if not layers:
+        raise argparse.ArgumentTypeError("empty layer list")
+    return sorted(layers)
+
+
 def convert(
     hf_path: str,
     mlx_path: str = "mlx_model",
@@ -34,6 +67,11 @@ def convert(
     ternary_experts: bool = False,
     expert_down_bits: int = None,
     keep_mtp: bool = False,
+    quantize_extras: bool = False,
+    extras_bits: int = 4,
+    extras_group_size: int = 64,
+    protect_expert_layers: list = None,
+    protect_bits: int = 3,
 ):
     """Convert a HuggingFace model to TurboQuant-compressed MLX format.
 
@@ -57,6 +95,21 @@ def convert(
             decision that wants its own quality gate. Off by default because
             nothing in the decode path consumes it; see ``turboquant_mlx.mtp``.
             No-op if the source has no head.
+        quantize_extras: If True, quantize the bf16 remainder the polar path
+            never touches -- ``nn.Embedding`` above all -- to MLX affine at
+            ``extras_bits``/``extras_group_size``. Off by default because on a
+            dense model the remainder is a token embedding and an ``lm_head``.
+            It is **not** optional on models that keep a large lookup table:
+            Qwen3.8-Flash-Next's sharded n-gram/PLE table is 51.2B params
+            (95.4 GiB bf16, 28% of the model), so without this a ternary-expert
+            build is ~124 GiB instead of ~54 GiB. Routers and the QSA block
+            indexer stay full precision either way.
+        extras_bits: Bit-width for the affine extras tier.
+        extras_group_size: Group size for the affine extras tier.
+        protect_expert_layers: Layer indices whose routed experts use a
+            ``protect_bits`` Gaussian codebook instead of the expert tier
+            (ternary or mlp_bits). See TurboQuantConfig.protect_expert_layers.
+        protect_bits: Codebook width for protected expert layers.
     """
     from mlx_lm.utils import load, save
 
@@ -78,6 +131,8 @@ def convert(
         mlp_group_size=mlp_group_size,
         ternary_experts=ternary_experts,
         expert_down_bits=expert_down_bits,
+        protect_expert_layers=protect_expert_layers,
+        protect_bits=protect_bits,
     )
 
     # Load model
@@ -118,6 +173,16 @@ def convert(
     t1 = time.time()
 
     print(f"[INFO] Quantization completed in {t1 - t0:.1f}s")
+
+    if quantize_extras:
+        from turboquant_mlx.quantize_model import quantize_affine_extras
+
+        n_extra = quantize_affine_extras(
+            model, config, bits=extras_bits, group_size=extras_group_size
+        )
+        print(f"[INFO] Quantized {n_extra} extra modules to {extras_bits}-bit "
+              f"affine g{extras_group_size} (embeddings and any layer the polar "
+              f"path skipped; routers and the QSA indexer excluded)")
 
     # Save
     print(f"[INFO] Saving to {mlx_path}")
@@ -237,6 +302,42 @@ def configure_parser() -> argparse.ArgumentParser:
              "(--dtype override is not supported in this mode.)",
     )
     parser.add_argument(
+        "--protect-expert-layers",
+        type=_parse_layer_list, default=None,
+        help="Layer indices whose routed experts use a --protect-bits Gaussian "
+             "codebook instead of the expert tier (ternary or --mlp-bits). "
+             "Comma list with inclusive ranges, e.g. '0-5,42-47'. Changes bit "
+             "width only, never the expert group size, so the loader needs no "
+             "matching rule. Warns if a listed layer matches nothing.",
+    )
+    parser.add_argument(
+        "--protect-bits",
+        type=int, default=3, choices=[2, 3, 4],
+        help="Codebook width for --protect-expert-layers (default 3).",
+    )
+    parser.add_argument(
+        "--quantize-extras",
+        action="store_true",
+        help="Also quantize the bf16 remainder the polar path never touches -- "
+             "nn.Embedding above all -- to MLX affine. Off by default because on "
+             "a dense model that remainder is just a token embedding and an "
+             "lm_head. REQUIRED on models with a large lookup table: "
+             "Qwen3.8-Flash-Next's sharded n-gram/PLE table is 51.2B params "
+             "(95.4 GiB bf16, 28%% of the model), so without this a "
+             "ternary-expert build is ~124 GiB instead of ~54 GiB. Routers and "
+             "the QSA block indexer stay full precision either way.",
+    )
+    parser.add_argument(
+        "--extras-bits",
+        type=int, default=4, choices=[2, 3, 4, 8],
+        help="Bit-width for --quantize-extras (default 4).",
+    )
+    parser.add_argument(
+        "--extras-group-size",
+        type=int, default=64, choices=[32, 64, 128],
+        help="Group size for --quantize-extras (default 64).",
+    )
+    parser.add_argument(
         "--keep-mtp",
         action="store_true",
         help="Copy the source model's multi-token-prediction head into the "
@@ -269,6 +370,11 @@ def main():
             mlp_group_size=args.mlp_group_size,
             ternary_experts=args.ternary_experts,
             expert_down_bits=args.expert_down_bits,
+            quantize_extras=args.quantize_extras,
+            extras_bits=args.extras_bits,
+            extras_group_size=args.extras_group_size,
+            protect_expert_layers=args.protect_expert_layers,
+            protect_bits=args.protect_bits,
         )
         # Applied here rather than threaded through convert_streaming: the head
         # is copied from the source shards after the fact either way, so the
@@ -297,6 +403,11 @@ def main():
         ternary_experts=args.ternary_experts,
         expert_down_bits=args.expert_down_bits,
         keep_mtp=args.keep_mtp,
+        quantize_extras=args.quantize_extras,
+        extras_bits=args.extras_bits,
+        extras_group_size=args.extras_group_size,
+        protect_expert_layers=args.protect_expert_layers,
+        protect_bits=args.protect_bits,
     )
 
 

@@ -166,10 +166,12 @@ class SafetensorsExpertReader:
         for fd in self._fds:
             try:
                 os.close(fd)
-            except OSError:
-                # Already closed, or the fd was never valid. close() runs
-                # from __del__ during interpreter teardown, where raising
-                # would only produce an ignored-exception warning.
+            except (OSError, AttributeError):
+                # OSError: already closed, or the fd was never valid.
+                # AttributeError: close() runs from __del__ during interpreter
+                # teardown, when module globals like ``os`` may already be None
+                # -- ``os.close`` then raises AttributeError, not OSError, and
+                # surfaced as an ignored-exception warning on every exit.
                 pass
         self._fds = []
 
