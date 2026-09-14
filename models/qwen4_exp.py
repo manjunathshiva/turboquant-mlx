@@ -13,11 +13,16 @@ change. Delete it at that point.
 Verified against mlx-lm 0.31.3: every symbol it imports exists there, so
 vendoring needs no mlx-lm bump.
 
-**One deliberate deviation from upstream:** `__call__` takes an optional
-``rope_cs`` -- a precomputed (cos, sin) for the current step's token positions --
-threaded down to ``Attention``. It defaults to None, so the text path is
-bit-identical to upstream; the vision path uses it to supply 3-D MRoPE positions
-for image tokens. Re-apply this when #1788 merges.
+**Two deliberate deviations from upstream** (re-apply both when #1788 merges):
+
+* `__call__` takes an optional ``rope_cs`` -- a precomputed (cos, sin) for the
+  current step's token positions -- threaded down to ``Attention``. It defaults
+  to None, so the text path is bit-identical to upstream; the vision path uses it
+  to supply 3-D MRoPE positions for image tokens.
+* ``Attention`` calls ``scaled_dot_product_attention`` through the
+  ``mlx_lm.models.base`` module instead of a ``from ... import`` copy, so
+  TurboQuant's fused-KV patch of that function is seen regardless of import
+  order. Numerically identical.
 
 What is new versus ``qwen3_next``:
 
@@ -37,9 +42,10 @@ What is new versus ``qwen3_next``:
   ``moe_intermediate_size`` of 640, and a **singular** ``shared_expert`` (Qwen3
   and Kimi spell it plural); see ``config.bits_for_path``.
 
-**Text-only.** Upstream's ``sanitize`` drops ``model.visual.*`` and the
-multi-token-prediction head, so a build from this module has no vision tower.
-Deliberate for the first pass; porting the tower is separate work.
+**Text model only.** Upstream's ``sanitize`` drops ``model.visual.*`` and the
+multi-token-prediction head, so this module builds no vision tower. The tower
+lives in ``models/qwen4_exp_vision.py``, which feeds image features in through
+``input_embeddings`` and MRoPE positions through ``rope_cs``.
 """
 
 from __future__ import annotations
@@ -52,11 +58,11 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+import mlx_lm.models.base as _base_mod
 from mlx_lm.models.base import (
     BaseModelArgs,
     create_attention_mask,
     create_ssm_mask,
-    scaled_dot_product_attention,
 )
 from mlx_lm.models.cache import (
     ArraysCache,
@@ -445,7 +451,7 @@ class Attention(nn.Module):
                 neg = mx.finfo(mask.dtype).min
                 mask = mask + mx.where(sparse, mx.array(0, mask.dtype), neg)
 
-        out = scaled_dot_product_attention(
+        out = _base_mod.scaled_dot_product_attention(
             q, k, v, cache=cache, scale=self.scale, mask=mask
         )
         out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)

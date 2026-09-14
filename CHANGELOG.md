@@ -46,6 +46,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[vlm]` extra is missing. The first `mlx_vlm` import now goes through
   `_require_mlx_vlm()`, which raises the one-line install instruction instead of
   a bare `ModuleNotFoundError`.
+- **`--kv-bits` no longer silently turns Qwen Sparse Attention dense.**
+  `convert_cache_to_turboquant` replaced every `KVCache` *subclass* too, and
+  `qwen4_exp`'s attention cache is one: it carries the sparse-attention indexer
+  keys, which were dropped, so decode attended to every token. No error, just a
+  different model. KVCache subclasses are now left at full precision with a
+  one-time warning; plain `KVCache` layers convert exactly as before.
+- **`qwen4_exp` attention now sees the fused-KV patch regardless of import
+  order.** It called a `from mlx_lm.models.base import` copy of
+  `scaled_dot_product_attention`, which the `--kv-fused` patch does not reach
+  when the model is imported after the patch is installed (CodeQL
+  `py/import-of-mutable-attribute`).
 
 ## [0.25.0] - 2026-08-18
 

@@ -720,6 +720,11 @@ def make_turboquant_cache(
     ]
 
 
+# KVCache subclasses already warned about, so `serve` (which converts once per
+# request) prints the warning once per process rather than on every request.
+_WARNED_KV_SUBCLASSES: set[str] = set()
+
+
 def convert_cache_to_turboquant(
     prompt_cache,
     tq_bits: int | None = None,
@@ -735,13 +740,21 @@ def convert_cache_to_turboquant(
     Only converts standard KVCache instances. Other cache types
     (RotatingKVCache, ArraysCache, etc.) are left unchanged so this
     works with hybrid-attention models like GPT-OSS and Qwen3.5.
+
+    A KVCache *subclass* is left unchanged too, with a warning: it carries
+    state TurboQuantKVCache has no slot for. qwen4_exp's ``_AttnCache`` holds
+    the sparse-attention indexer keys; replacing it dropped them, and decode
+    silently fell back to dense attention.
     """
     from mlx_lm.models.cache import KVCache
 
-    new_cache = []
+    new_cache, skipped = [], {}
     for c in prompt_cache:
-        if not isinstance(c, KVCache):
-            # Leave RotatingKVCache, ArraysCache, etc. as-is
+        if type(c) is not KVCache:
+            # Leave RotatingKVCache, ArraysCache, KVCache subclasses, etc. as-is
+            if isinstance(c, KVCache):
+                name = type(c).__name__
+                skipped[name] = skipped.get(name, 0) + 1
             new_cache.append(c)
             continue
 
@@ -755,4 +768,13 @@ def convert_cache_to_turboquant(
             values = c.values[..., : c.offset, :]
             tq.update_and_fetch(keys, values)
         new_cache.append(tq)
+
+    for name, n in skipped.items():
+        if name not in _WARNED_KV_SUBCLASSES:
+            _WARNED_KV_SUBCLASSES.add(name)
+            print(f"[WARNING] TurboQuant KV: {n} `{name}` layer(s) left at full "
+                  "precision -- a KVCache subclass carries state "
+                  "TurboQuantKVCache cannot hold (e.g. a sparse-attention "
+                  "indexer). Only plain KVCache layers are quantized; if the "
+                  "model has none, KV quantization has no effect.")
     return new_cache

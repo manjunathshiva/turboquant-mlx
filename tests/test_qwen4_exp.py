@@ -292,3 +292,83 @@ def test_resident_and_streaming_extras_agree_on_what_they_claim():
 
     assert n_a == n_b
     assert cfg_a["quantization"] == cfg_b["quantization"]
+
+
+# ----------------------------------------------------------------- KV quantization
+
+
+def _tiny_model():
+    import mlx.core as mx
+    from mlx.utils import tree_map
+
+    qwen4_exp, args = _tiny_args()
+    model = qwen4_exp.Model(args)
+    model.update(tree_map(lambda p: p.astype(mx.float32), model.parameters()))
+    return qwen4_exp, model
+
+
+def test_kv_quantization_keeps_the_qsa_indexer_cache(capsys):
+    """`--kv-bits` must not turn QSA sparse attention into dense attention.
+
+    `_AttnCache` subclasses KVCache and carries the indexer's raw keys. Swapping
+    it for a plain TurboQuantKVCache dropped them: each decode step then saw only
+    its own key, fell under `indexer_budget`, and attended densely -- no error,
+    just a different model (max logit drift 0.22 on this toy). Such layers are
+    now left as they are, with a warning.
+    """
+    import mlx.core as mx
+    from mlx_lm.models.cache import make_prompt_cache
+
+    from turboquant_mlx.layers import polar_kv_cache as pkc
+
+    _, model = _tiny_model()
+    inputs = mx.array([list(range(2, 24))])
+
+    getattr(pkc, "_WARNED_KV_SUBCLASSES", set()).discard("_AttnCache")
+    cache = pkc.convert_cache_to_turboquant(
+        make_prompt_cache(model), k_bits=8, v_bits=8, group_size=32)
+    assert ([type(c).__name__ for c in cache]
+            == [type(c).__name__ for c in make_prompt_cache(model)])
+    assert "_AttnCache" in capsys.readouterr().out
+
+    # prefill 12 (under nothing), then decode 10 past indexer_budget=8
+    steps = [model(inputs[:, :12], cache=cache)]
+    steps += [model(inputs[:, i : i + 1], cache=cache) for i in range(12, 22)]
+    assert mx.allclose(model(inputs), mx.concatenate(steps, axis=1), atol=1e-4)
+
+
+def test_kv_quantization_still_converts_plain_kvcache_and_warns_once(capsys):
+    """Only exact KVCache converts; `serve` converts per request, warn once."""
+    from mlx_lm.models.cache import KVCache
+
+    from turboquant_mlx.layers import polar_kv_cache as pkc
+
+    qwen4_exp, _ = _tiny_args()
+    getattr(pkc, "_WARNED_KV_SUBCLASSES", set()).discard("_AttnCache")
+    for _ in range(3):
+        out = pkc.convert_cache_to_turboquant(
+            [KVCache(), qwen4_exp._AttnCache()], tq_bits=4)
+        assert isinstance(out[0], pkc.TurboQuantKVCache)
+        assert type(out[1]) is qwen4_exp._AttnCache
+    assert capsys.readouterr().out.count("_AttnCache") == 1
+
+
+def test_attention_resolves_sdpa_through_the_base_module(monkeypatch):
+    """The fused-KV patch replaces `mlx_lm.models.base.scaled_dot_product_attention`.
+
+    A `from base import` copy misses that whenever this module is imported
+    after the patch is installed (CodeQL py/import-of-mutable-attribute).
+    """
+    import mlx.core as mx
+    import mlx_lm.models.base as base
+
+    _, model = _tiny_model()
+    orig, calls = base.scaled_dot_product_attention, []
+
+    def spy(*a, **k):
+        calls.append(1)
+        return orig(*a, **k)
+
+    monkeypatch.setattr(base, "scaled_dot_product_attention", spy)
+    model(mx.array([list(range(2, 12))]))
+    assert calls
