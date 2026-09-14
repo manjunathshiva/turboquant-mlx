@@ -19,7 +19,7 @@ positions for its pooled key blocks; only token positions become 3-D. Whether th
 reference implementation gives blocks 3-D coordinates is unverified.
 """
 
-from typing import Optional, Sequence
+from typing import Sequence
 
 import mlx.core as mx
 
