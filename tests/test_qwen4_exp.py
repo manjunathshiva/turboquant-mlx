@@ -177,6 +177,10 @@ def _extras_toy():
             self.shard_1 = nn.Embedding(1000, 160)
             self.embed_tokens = nn.Embedding(500, 2560)
             self.gate = nn.Linear(2560, 512, bias=False)
+            # Narrow projection: the polar path rejects it on purpose
+            # (output_dims < 32). Qwen3.8-Flash-Next has 96 of these --
+            # hyper-connection block_inject_weight, shape (4, 640).
+            self.block_inject_weight = nn.Linear(640, 4, bias=False)
 
     return Toy()
 
@@ -223,6 +227,25 @@ def test_default_group_size_silently_misses_the_ngram_table():
     assert n == 1
     assert kinds["shard_0"] == "Embedding"
     assert kinds["embed_tokens"] == "QuantizedEmbedding"
+
+
+def test_extras_does_not_requantize_linears_the_polar_path_rejects():
+    """`_should_quantize` skips scalar/score projections narrower than 32 because
+    quantization noise there costs quality for ~0 bytes. The extras tier must not
+    quietly undo that -- but it must still claim embeddings, which
+    `_should_quantize` also rejects and which are this tier's entire purpose.
+    """
+    from turboquant_mlx.quantize_model import quantize_affine_extras
+
+    model, cfg = _extras_toy(), {}
+    quantize_affine_extras(model, cfg, bits=4, group_size=32)
+    kinds = {p: type(m).__name__ for p, m in model.named_modules()}
+
+    assert kinds["block_inject_weight"] == "Linear", \
+        "a 4-wide projection was re-quantized by the extras tier"
+    assert kinds["shard_0"] == "QuantizedEmbedding"      # embeddings still claimed
+    assert kinds["embed_tokens"] == "QuantizedEmbedding"
+    assert kinds["gate"] == "Linear"                     # router still exact
 
 
 def test_streaming_extras_frees_each_module_after_handing_it_over():

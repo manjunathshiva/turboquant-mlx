@@ -131,6 +131,12 @@ def mrope_cos_sin(text_config: dict, hidden: mx.array, position_ids: mx.array):
 def splice_image_features(embeddings: mx.array, ids: mx.array, features: mx.array,
                           image_token_id: int) -> mx.array:
     """Replace the embedding rows at image placeholders with tower features."""
+    if embeddings.shape[0] != 1:
+        # mask.sum() counts placeholders across the whole batch while the scatter
+        # below indexes row 0 only, so a batch would pass the count check and
+        # silently keep zeroed placeholder rows for every other sequence.
+        raise ValueError(
+            f"splice_image_features supports batch size 1, got {embeddings.shape[0]}")
     mask = ids == image_token_id
     n_slots = int(mask.sum().item())
     if n_slots != features.shape[0]:

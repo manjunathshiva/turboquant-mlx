@@ -101,6 +101,15 @@ def test_splice_refuses_a_placeholder_count_mismatch():
         splice_image_features(mx.ones((1, 3, 8)), ids, mx.zeros((5, 8)), IMG)
 
 
+def test_splice_rejects_batches_larger_than_one():
+    """The scatter indexes row 0 only, while the placeholder count is taken over
+    the whole batch — so a batch of 2 could pass the count check and silently
+    leave every other row's placeholders zeroed."""
+    ids = mx.array([[1, IMG, 2], [1, IMG, 2]])
+    with pytest.raises(ValueError, match="batch size 1"):
+        splice_image_features(mx.ones((2, 3, 8)), ids, mx.zeros((2, 8)), IMG)
+
+
 def test_mrope_cos_sin_shape():
     pytest.importorskip("mlx_vlm")
     from turboquant_mlx.models.qwen4_exp_vision import mrope_cos_sin

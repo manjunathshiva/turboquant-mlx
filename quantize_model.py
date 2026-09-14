@@ -98,6 +98,14 @@ def quantize_affine_extras(model, config, bits: int, group_size: int,
             return False                       # already polar-quantized
         if _is_router(path):
             return False                       # discrete selection: keep exact
+        if isinstance(module, nn.Linear) and not _should_quantize(path, module):
+            # The polar path rejects some linears on purpose -- scalar/score
+            # projections narrower than 32 (Kimi K3's AttnRes *_res_proj, shape
+            # (1, hidden)), where quantization noise costs quality for ~0 bytes.
+            # Without this, --quantize-extras quietly re-quantizes exactly those.
+            # Embeddings are NOT covered: _should_quantize rejects every
+            # nn.Embedding, and catching them is this tier's whole purpose.
+            return False
         if extra_exclude is not None and extra_exclude(path):
             return False
         w = getattr(module, "weight", None)
