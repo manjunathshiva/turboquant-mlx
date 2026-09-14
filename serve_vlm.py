@@ -135,6 +135,14 @@ def install_turboquant_loader() -> None:
     Idempotent. Non-TurboQuant models keep taking mlx-vlm's own loader, so one
     server can still serve an ordinary mlx-vlm model.
     """
+    # Routed through _require_mlx_vlm rather than imported bare: without the
+    # [vlm] extra this is the first mlx_vlm import the server reaches, and a
+    # bare one ends `turboquant-serve-vlm --help` in a ModuleNotFoundError
+    # traceback instead of the one line that fixes it.
+    from turboquant_mlx.integration.vlm import _require_mlx_vlm
+
+    _require_mlx_vlm()
+
     import mlx_vlm.server.generation as generation
 
     if getattr(generation.load, "_turboquant_wrapper", False):

@@ -24,6 +24,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`--protect-expert-layers` / `--protect-bits`** for the text and streaming
   converters. Selected by module type plus layer index, not by expert-container
   name, which differs per model.
+- **`turboquant_mlx.benchmarks` is now shipped in the wheel**, so the reproduce
+  commands in the README and the model cards
+  (`python -m turboquant_mlx.benchmarks.eval_vlm_perplexity ...`) work from a
+  `pip install` and not only from a git checkout.
 
 ### Fixed
 - **Streaming affine-extras retained every source weight.** The loop held
@@ -38,6 +42,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`SafetensorsExpertReader.close()`** also catches `AttributeError`: at
   interpreter teardown `os` may already be `None`, which printed an ignored
   exception on every streaming exit.
+- **`turboquant-serve-vlm --help` no longer ends in a traceback** when the
+  `[vlm]` extra is missing. The first `mlx_vlm` import now goes through
+  `_require_mlx_vlm()`, which raises the one-line install instruction instead of
+  a bare `ModuleNotFoundError`.
 
 ## [0.25.0] - 2026-08-18
 

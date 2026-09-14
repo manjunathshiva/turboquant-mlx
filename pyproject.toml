@@ -93,6 +93,11 @@ packages = [
     "turboquant_mlx.integration",
     "turboquant_mlx.models",
     "turboquant_mlx.stream",
+    # Shipped so the README's and the model cards' reproduce commands
+    # (`python -m turboquant_mlx.benchmarks.eval_vlm_perplexity ...`) work from
+    # a pip install and not only from a git checkout. Pure scripts -- the
+    # results JSONs beside them are records, and nothing reads one at runtime.
+    "turboquant_mlx.benchmarks",
 ]
 include-package-data = true
 
