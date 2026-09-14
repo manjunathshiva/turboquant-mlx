@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-14
+
+Qwen3.8-Flash-Next, and three silent bugs found on the way.
+
+Flash-Next is a 180B MoE with 512 routed experts, and 28% of its parameters sit
+in an n-gram/PLE embedding table the polar path never touched. The new
+affine-extras tier quantizes that remainder, so a build that was ~124 GiB fits
+in ~52 GiB and runs resident on a 64 GB Mac. The vision tower loads through
+mlx-vlm's Qwen3-VL implementation, with interleaved MRoPE.
+
+None of the three bugs raised an error. The streaming converter kept every source
+weight of the extras pass alive and was killed three times on the 180B model.
+The extras pass re-quantized 96 small gating matrices the main path
+deliberately keeps at full precision. And `--kv-bits` dropped the sparse-attention
+indexer cache, so decode quietly attended to every token.
+
 ### Added
 - **Qwen3.8-Flash-Next (`qwen4_exp`)** — 180B MoE, 512 routed experts at top-10
   and 640 wide, hybrid Gated DeltaNet + Qwen Sparse Attention. Architecture
