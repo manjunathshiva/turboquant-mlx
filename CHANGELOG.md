@@ -6,6 +6,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+- **The README covers Qwen3.8-Flash-Next**: supported-models list, results table
+  (with the two other builds in its size class), install note, a model section,
+  and the architectures table.
+- **`qwen4_exp_vision._MXShim` docstring**: mlx-vlm 0.7.0 no longer needs the
+  `mx.repeat` workaround (tower features are bit-identical without it). It stays
+  while the `[vlm]` extra still allows 0.6.x.
+
 ## [0.26.0] - 2026-09-14
 
 Qwen3.8-Flash-Next, and three silent bugs found on the way.
