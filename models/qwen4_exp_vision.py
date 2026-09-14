@@ -28,7 +28,8 @@ class _MXShim:
     """mlx-vlm 0.6.14 calls ``mx.repeat(x, grid_thw[i, 0])`` with an ``mx.array``
     repeat count; mlx >= 0.32 requires a Python int. Patching this one call is
     cheaper than upgrading mlx-vlm, which carries the shipped Muse /
-    Qwen3.8-27B serving path. Remove once mlx-vlm ships the int conversion.
+    Qwen3.8-27B serving path. mlx-vlm 0.7.0 no longer needs it (tower features are
+    bit-identical without it); remove once the ``[vlm]`` extra requires >= 0.7.0.
     """
 
     def __getattr__(self, name):
