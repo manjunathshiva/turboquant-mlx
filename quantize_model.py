@@ -57,6 +57,131 @@ def _should_quantize(path: str, module: nn.Module) -> bool:
     return True
 
 
+def quantize_affine_extras(model, config, bits: int, group_size: int,
+                           extra_exclude=None, on_quantized=None) -> int:
+    """Quantize the bf16 remainder that the polar path does not touch.
+
+    ``_should_quantize`` handles ``nn.Linear`` / ``SwitchLinear`` only, and skips
+    ``nn.Embedding`` outright. On most models that leftover is a rounding error
+    — a token embedding and an ``lm_head``, which is why this tier was named
+    "extras". On Qwen3.8-Flash-Next it is **51.2B params**: the sharded
+    n-gram/PLE table is 128 ``nn.Embedding`` shards, 28% of the model and
+    95.4 GiB in bf16. Left alone it puts a ternary-expert build at ~124 GiB and
+    off a 64 GB Mac entirely; at 4-bit affine the same build lands near 54 GiB.
+
+    What must NOT be swept up: the modules ``_should_quantize`` skipped *on
+    purpose*. The MoE router and Qwen Sparse Attention's block indexer both make
+    a discrete choice — which expert, which KV block — so error there changes
+    which computation runs rather than degrading it smoothly. ``_is_router``
+    already names them, and this pass reuses it so the two cannot drift apart.
+    Modules the polar pass DID claim are inert here: they are
+    ``PolarQuantized*`` by now and carry no ``to_quantized``.
+
+    The matching read path is ``generate._prepare_affine_extras``, which keys off
+    ``.scales`` present with no ``.codebook`` and recovers bits/group size from
+    the tensor shapes — so this writes no per-tensor metadata beyond the
+    ``affine_extras`` config block.
+
+    Args:
+        extra_exclude: optional ``(path) -> bool``; return True to keep a module
+            at full precision on top of the ``_is_router`` exclusions.
+        on_quantized: optional ``(path, module)`` sink. When given, each module
+            is quantized, handed over, then replaced by ``nn.Identity`` so its
+            weight can be freed -- the streaming converter's contract. Without
+            it the whole tier is quantized in one resident pass.
+
+    Returns:
+        The number of modules quantized.
+    """
+    def _eligible(path, module):
+        if not hasattr(module, "to_quantized"):
+            return False                       # already polar-quantized
+        if _is_router(path):
+            return False                       # discrete selection: keep exact
+        if isinstance(module, nn.Linear) and not _should_quantize(path, module):
+            # The polar path rejects some linears on purpose -- scalar/score
+            # projections narrower than 32 (Kimi K3's AttnRes *_res_proj, shape
+            # (1, hidden)), where quantization noise costs quality for ~0 bytes.
+            # Without this, --quantize-extras quietly re-quantizes exactly those.
+            # Embeddings are NOT covered: _should_quantize rejects every
+            # nn.Embedding, and catching them is this tier's whole purpose.
+            return False
+        if extra_exclude is not None and extra_exclude(path):
+            return False
+        w = getattr(module, "weight", None)
+        if w is not None and w.shape[-1] % group_size != 0:
+            # Record it: skipping here is silent, and on a big lookup table that
+            # silence is the difference between a 54 GiB build and a 124 GiB one.
+            # Qwen3.8-Flash-Next's n-gram shards are 160 wide -- fine at g32,
+            # excluded at the g64 default -- so this must never pass unremarked.
+            # Keyed by path: nn.quantize re-runs the predicate over the tree, so
+            # a list would double-count every skipped module.
+            skipped[path] = (w.shape[-1], w.size * w.dtype.size)
+            return False
+        return True
+
+    skipped = {}
+    count = 0
+    if on_quantized is None:
+        # Resident path: let MLX walk the tree in one pass.
+        def _predicate(path, module):
+            return _eligible(path, module)
+
+        targets = [p for p, m in model.named_modules() if _eligible(p, m)]
+        count = len(targets)
+        nn.quantize(model, group_size=group_size, bits=bits,
+                    class_predicate=_predicate)
+        mx.eval(model.parameters())
+    else:
+        # Streaming path: quantize ONE module, hand it to the writer, drop it.
+        # A bulk nn.quantize would materialize every eligible weight at once,
+        # and on Qwen3.8-Flash-Next that is the 95.4 GiB n-gram table -- which
+        # is the whole reason this tier exists. Per-module, the peak is one
+        # shard (0.75 GiB bf16 -> 0.19 GiB at 4-bit).
+        #
+        # Iterate over PATHS and fetch each module fresh. Iterating
+        # `list(model.named_modules())` held a reference to every ORIGINAL
+        # module for the whole loop, so each source weight -- materialized by
+        # to_quantized -- stayed alive after its module was swapped out. On
+        # Qwen3.8-Flash-Next that retained the full 95.4 GiB bf16 n-gram table
+        # on a 64 GB machine: three conversions died 71-90% through this phase.
+        # Pinned by tests/test_streaming_extras_memory.py.
+        paths = [p for p, m in model.named_modules() if _eligible(p, m)]
+        for path in paths:
+            module = _get_nested_attr(model, path)
+            q = module.to_quantized(group_size=group_size, bits=bits)
+            mx.eval(q.parameters())
+            on_quantized(path, q)
+            _set_nested_attr(model, path, nn.Identity())
+            del module, q
+            gc.collect()
+            mx.clear_cache()  # hand freed buffers back to the OS, not MLX's cache
+            count += 1
+
+    if skipped:
+        tot = sum(b for _, b in skipped.values())
+        print(f"[WARNING] {len(skipped)} module(s) left UNQUANTIZED at their "
+              f"source dtype because their width is not a multiple of "
+              f"group_size={group_size}: {tot / 1024**3:.2f} GiB.")
+        widths = sorted({w for w, _ in skipped.values()})
+        for cand in (128, 64, 32, 16):
+            if cand < group_size and all(w % cand == 0 for w in widths):
+                print(f"[WARNING]   every skipped width {widths} divides by "
+                      f"{cand} -- re-run with --extras-group-size {cand} to "
+                      f"include them.")
+                break
+        else:
+            print(f"[WARNING]   skipped widths: {widths}")
+        worst = sorted(skipped.items(), key=lambda kv: -kv[1][1])[:3]
+        for path, (w, b) in worst:
+            print(f"[WARNING]   {path} (width {w}, {b / 1024**3:.2f} GiB)")
+
+    config.setdefault("quantization", {})["affine_extras"] = {
+        "bits": bits, "group_size": group_size,
+    }
+    return count
+
+
 def _is_switch_linear(module: nn.Module) -> bool:
     """Check if a module is a SwitchLinear or QuantizedSwitchLinear (MoE expert weights)."""
     if not _HAS_SWITCH_LINEAR:
@@ -90,9 +215,29 @@ def _dequantize_switch_linear(module) -> mx.array:
 
 
 def _is_router(path: str) -> bool:
-    """Check if a path corresponds to a MoE router layer (keep higher precision)."""
-    last = path.split(".")[-1]
-    return last in ("gate", "router", "shared_expert_gate")
+    """Check for a discrete-selection layer, which stays at full precision.
+
+    Two kinds qualify, and they share one property: each makes a *discrete*
+    choice rather than a smooth projection, so weight error changes **which**
+    branch is taken instead of nudging the output. A router that picks the
+    wrong expert, or an indexer that picks the wrong KV block, is not a small
+    error — it is a different computation.
+
+    - **MoE routers** (``gate`` / ``router`` / ``shared_expert_gate``), which
+      select the experts.
+    - **Qwen Sparse Attention's block indexer** (``index_qk_proj``, living
+      under ``.indexer.``), which top-k selects the compressed KV blocks a
+      query may attend to.
+
+    Both are negligible in size: the entire QSA indexer across all 12
+    full-attention layers of Qwen3.8-Flash-Next is 19.7M params (0.04 GiB), so
+    protecting it costs nothing measurable against a ~50 GiB build.
+    """
+    parts = path.split(".")
+    last = parts[-1]
+    if last in ("gate", "router", "shared_expert_gate"):
+        return True
+    return "indexer" in parts or last == "index_qk_proj"
 
 
 def _get_nested_attr(model: nn.Module, path: str):
@@ -158,6 +303,13 @@ def turboquant_quantize(
 
     n_quantized = 0
     n_skipped = 0
+    # Layer protection (see TurboQuantConfig.protect_expert_layers). Matched by
+    # the `.layers.N.` index inside the routed-expert branch, which is already
+    # selected by module type -- no expert-container name matching.
+    import re as _re
+    _layer_idx_rx = _re.compile(r"(?:^|\.)layers\.(\d+)\.")
+    protected_layers = set(tq_config.protect_expert_layers or ())
+    matched_protected_layers = set()
     n_switch = 0
 
     for path in module_paths:
@@ -213,6 +365,17 @@ def turboquant_quantize(
                 # self-describing via the on-disk codebook length.
                 use_ternary = False
                 layer_bits = tq_config.expert_down_bits
+            if protected_layers:
+                m = _layer_idx_rx.search(path)
+                if m and int(m.group(1)) in protected_layers:
+                    # Protected layer: leave the ternary / mlp_bits tier for a
+                    # protect_bits Gaussian codebook. If --expert-down-bits also
+                    # applies to this down projection, keep the higher width.
+                    matched_protected_layers.add(int(m.group(1)))
+                    down_bits = (tq_config.expert_down_bits
+                                 if path.split(".")[-1] == "down_proj" else None)
+                    use_ternary = False
+                    layer_bits = max(tq_config.protect_bits, down_bits or 0)
             label = "ternary" if use_ternary else f"{layer_bits}b"
             print(f"[INFO] Quantizing SwitchLinear {path} ({num_experts} experts, {input_dims}d, {label} g{expert_group_size})")
 
@@ -239,6 +402,10 @@ def turboquant_quantize(
                 _set_nested_attr(model, path, pq_switch)
             del float_weight, module, bias_tensor, pq_switch
             gc.collect()
+            # Return freed buffers to the OS between expert layers. Without it
+            # MLX keeps them in its own cache (limit defaults to the whole
+            # Metal working set), which the OS still counts as in use.
+            mx.clear_cache()
             n_switch += 1
             n_quantized += 1
             continue
@@ -312,6 +479,17 @@ def turboquant_quantize(
     from turboquant_mlx.core.codebook import get_codebook
     centroids, _ = get_codebook(tq_config.bits)
     config.pop("quantization_config", None)
+    if protected_layers:
+        missing = sorted(protected_layers - matched_protected_layers)
+        if missing:
+            # Never silent: a protection list that matches nothing produces a
+            # build that looks protected in config.json and is not.
+            print(f"[WARNING] Layer protection requested for layer(s) {missing}, "
+                  f"but no routed-expert layer at those indices was quantized -- "
+                  f"they are NOT protected. Check the model's layer count.")
+        print(f"[INFO] Expert layer protection: layers "
+              f"{sorted(matched_protected_layers)} -> "
+              f"{tq_config.protect_bits}b codebook")
     config["quantization"] = tq_config.to_dict()
     config["quantization"]["codebook"] = centroids.tolist()
 

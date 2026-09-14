@@ -268,6 +268,9 @@ _patch_nemotron_h_pattern()
 _register_local_model("laguna")
 _register_local_model("kimi_k3")
 _register_local_model("sarvam_moe")
+# Qwen3.8-Flash-Next. Vendored from mlx-lm PR #1788 while that PR is open; this
+# call self-disables as soon as mlx-lm ships `qwen4_exp` natively.
+_register_local_model("qwen4_exp")
 _patch_compressed_tensors_mxfp4()
 _patch_kimi_k3_tokenizer_trust()
 _patch_glm47_tool_name_strip()
