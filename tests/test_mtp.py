@@ -584,5 +584,33 @@ def test_capture_restores_the_binding_even_when_the_forward_raises():
     with pytest.raises(ZeroDivisionError):
         with _CaptureStates(text):
             assert qwen35.gated_delta_update is not original
-            1 / 0
+            raise ZeroDivisionError("the forward failed mid-capture")
     assert qwen35.gated_delta_update is original
+
+
+@pytest.mark.parametrize("state_steps", [1, 2])
+def test_state_capture_kernel_is_right_for_batches_and_partial_steps(state_steps):
+    """Batch rows in the `states` output must be strided by its own step count,
+    not T. With B > 1 and state_steps < T, a T stride writes past the buffer and
+    leaves later rows wrong -- found in review of the code as vendored."""
+    from turboquant_mlx.kernels import gated_delta_states as G
+
+    mx.random.seed(7)
+    B, T, Hk, Hv, Dk, Dv = 3, 3, 2, 4, 32, 16
+    q, k = mx.random.normal((B, T, Hk, Dk)), mx.random.normal((B, T, Hk, Dk))
+    v = mx.random.normal((B, T, Hv, Dv))
+    a, b = mx.random.normal((B, T, Hv)), mx.random.normal((B, T, Hv))
+    A_log, dt_bias = mx.random.normal((Hv,)), mx.random.normal((Hv,))
+    state = mx.random.normal((B, Hv, Dv, Dk)) * 0.1
+
+    g, beta = G._compute_g_beta(A_log, a, b, dt_bias)
+    y_ref, s_ref, st_ref = G._gated_delta_with_states_ops(
+        q, k, v, g, beta, state, None, state_steps)
+    y, s, st = G.gated_delta_update_with_states(
+        q, k, v, a, b, A_log, dt_bias, state, state_steps=state_steps)
+    mx.eval(y, s, st)
+    assert st.shape == (B, state_steps, Hv, Dv, Dk)
+    assert mx.allclose(y, y_ref, atol=1e-5)
+    assert mx.allclose(s, s_ref, atol=1e-5)
+    for row in range(B):
+        assert mx.allclose(st[row], st_ref[row], atol=1e-5), f"batch row {row}"

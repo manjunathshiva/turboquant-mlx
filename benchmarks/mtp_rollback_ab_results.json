@@ -1,5 +1,5 @@
 {
- "model": "/Users/manjunm4/RandD/Qwen3.8-27B-tq4-mtp",
+ "model": "Qwen/Qwen3.8-27B converted with `python -m turboquant_mlx.convert --bits 4 --group-size 64 --quantize-extras --extras-bits 8 --keep-mtp` (turboquant-mlx 0.26.0 + this PR); M4 Max 64 GB",
  "max_tokens": 64,
  "snapshot_x": 0.548,
  "states_x": 0.577,

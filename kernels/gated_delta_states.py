@@ -4,8 +4,11 @@
 
 Vendored from mlx-vlm 0.7.0, ``mlx_vlm/models/qwen3_5/gated_delta.py``
 (``gated_delta_update_with_states`` and its Metal kernel), unchanged apart from
-imports. mlx-vlm is not a dependency of the text path, so the code is copied
-rather than imported.
+imports and one fix: the ``states`` output strides batch rows by ``StateT``, its
+own step count, where upstream used ``T``. With ``B > 1`` and ``state_steps < T``
+the upstream offset writes past the buffer (pinned by
+``test_state_capture_kernel_is_right_for_batches_and_partial_steps``). mlx-vlm is
+not a dependency of the text path, so the code is copied rather than imported.
 
 The stock kernel (``mlx_lm.models.gated_delta.gated_delta_update``) already
 computes the state after every position and keeps only the last. This variant
@@ -50,7 +53,7 @@ def _make_gated_delta_with_states_kernel(has_mask: bool = False):
 
         auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;
         y += b_idx * T * Hv * Dv + hv_idx * Dv;
-        states += ((b_idx * T * Hv + hv_idx) * Dv) * Dk;
+        states += ((b_idx * StateT * Hv + hv_idx) * Dv) * Dk;
 
         auto dk_idx = thread_position_in_threadgroup.x;
         auto dv_idx = thread_position_in_grid.y;
