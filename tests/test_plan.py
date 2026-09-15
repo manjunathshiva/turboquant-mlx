@@ -766,3 +766,28 @@ class TestAssumedMachineUnits:
         # and the un-raised default cap is well below the model, which is why
         # the wired bump is required rather than optional
         assert estimate_wss(m["ram_bytes"]) < 12e9
+
+
+class TestMacLoadCliff:
+    """Atomic Chat field data (1.1M device x model loads): Mac loads start
+    failing past 0.85 of unified memory. An advisory; the verdict is unchanged."""
+
+    def _model(self, tmp_path, gb):
+        n = int(gb * GB / 4)
+        return _write_model(tmp_path, Q35, {
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": ("U32", (n,)),
+        })
+
+    def test_a_fit_past_85pct_of_ram_warns_but_stays_resident(self, tmp_path):
+        """Flash-Next's shape: ~58 GB of weights on a 64 GB Mac with the cap raised."""
+        pl = build_plan(self._model(tmp_path, 58), wired_gb=63.35, ram_gb=64,
+                        context=4096)
+        assert pl["verdict"]["mode"] == "resident"
+        assert pl["projection"]["ram_share"] > 0.85
+        assert any("of system RAM" in w for w in pl["warnings"])
+
+    def test_a_comfortable_fit_does_not_warn(self, tmp_path):
+        pl = build_plan(self._model(tmp_path, 20), wired_gb=63.35, ram_gb=64,
+                        context=4096)
+        assert pl["projection"]["ram_share"] < 0.5
+        assert not any("of system RAM" in w for w in pl["warnings"])

@@ -67,6 +67,14 @@ _GIB = float(1 << 30)
 # workspace, which this projection already counts explicitly; reusing 2 GB here
 # would double-count and wrongly report "streaming" for models that run resident.
 _RESERVE_BYTES = 1.0 * _GB
+
+# Past this share of unified memory, Mac model loads start failing in the field.
+# Across 1.1M device x model loads, Atomic Chat measured ~85% success below 0.85
+# of memory, 69% at 0.85-1.0 and 56% at 1.0-1.25 (`MACOS_LOAD_CEILING` in their
+# web-app/src/lib/hardware-tier.ts). Those are llama.cpp loads at the default
+# wired cap, a different population from a TurboQuant load after a sysctl raise,
+# so here it is an advisory warning and never changes the verdict.
+_MAC_LOAD_CLIFF = 0.85
 _EXIT_OK, _EXIT_UNFIT, _EXIT_USAGE = 0, 1, 2
 
 
@@ -642,6 +650,10 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     if mode == "resident" and ceiling and peak > ceiling * 0.93:
         warnings.append("tight: under ~7% headroom — a longer context or a "
                         "background app can still push it over")
+    if mode == "resident" and ram and peak / ram > _MAC_LOAD_CLIFF:
+        warnings.append(f"peak is {peak / ram:.1%} of system RAM: past 85%, Mac "
+                        "loads fail far more often in field data (69% succeed at "
+                        "85-100%, 56% beyond); close other apps first")
 
     return {
         "schema": 1,
@@ -676,6 +688,7 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
             "peak_bytes": peak,
             "ceiling_bytes": ceiling,
             "headroom_bytes": (ceiling - peak) if ceiling else None,
+            "ram_share": (peak / ram) if ram else None,
         },
         "verdict": {"mode": mode, "runnable": ok, "needs_wired_bump": needs_bump},
         "flags": flags,
