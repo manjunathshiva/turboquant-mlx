@@ -581,10 +581,14 @@ def test_capture_restores_the_binding_even_when_the_forward_raises():
 
     text = _tiny_text_model().model
     original = qwen35.gated_delta_update
-    with pytest.raises(ZeroDivisionError):
+    raised = False
+    try:
         with _CaptureStates(text):
             assert qwen35.gated_delta_update is not original
             raise ZeroDivisionError("the forward failed mid-capture")
+    except ZeroDivisionError:
+        raised = True
+    assert raised
     assert qwen35.gated_delta_update is original
 
 
