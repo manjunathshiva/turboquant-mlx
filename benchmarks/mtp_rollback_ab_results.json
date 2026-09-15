@@ -1,0 +1,61 @@
+{
+ "model": "Qwen/Qwen3.8-27B converted with `python -m turboquant_mlx.convert --bits 4 --group-size 64 --quantize-extras --extras-bits 8 --keep-mtp` (turboquant-mlx 0.26.0 + this PR); M4 Max 64 GB",
+ "max_tokens": 64,
+ "snapshot_x": 0.548,
+ "states_x": 0.577,
+ "peak_gb": 18.13,
+ "rows": [
+  {
+   "prompt": 1,
+   "tokens": 64,
+   "greedy_tok_s": 9.72,
+   "snapshot_tok_s": 4.42,
+   "snapshot_identical": true,
+   "snapshot_accepted": 27,
+   "states_tok_s": 4.76,
+   "states_identical": true,
+   "states_accepted": 27,
+   "snapshot_x": 0.455,
+   "states_x": 0.49,
+   "per_round_acceptance": 0.75
+  },
+  {
+   "prompt": 2,
+   "tokens": 64,
+   "greedy_tok_s": 8.84,
+   "snapshot_tok_s": 4.78,
+   "snapshot_identical": true,
+   "snapshot_accepted": 28,
+   "states_tok_s": 5.08,
+   "states_identical": true,
+   "states_accepted": 28,
+   "snapshot_x": 0.541,
+   "states_x": 0.575,
+   "per_round_acceptance": 0.8
+  },
+  {
+   "prompt": 3,
+   "tokens": 64,
+   "greedy_tok_s": 7.01,
+   "snapshot_tok_s": 4.54,
+   "snapshot_identical": true,
+   "snapshot_accepted": 30,
+   "states_tok_s": 4.66,
+   "states_identical": true,
+   "states_accepted": 30,
+   "snapshot_x": 0.648,
+   "states_x": 0.665,
+   "per_round_acceptance": 0.909
+  }
+ ],
+ "cost_breakdown_ms": {
+  "target_fwd_S1": 111.8,
+  "target_fwd_S2": 325.4,
+  "lm_head_1pos": 4.2,
+  "lm_head_2pos": 10.7,
+  "mtp_head_step": 13.1,
+  "verify_S2_over_S1": 2.9,
+  "spec_round_over_greedy_step": 3.0
+ },
+ "note": "per_round_acceptance = accepted drafts / verify rounds (rounds = tokens - accepted - 1). The 0.25.0 gate divided by accepted + rounds, counting each hit twice, and reported 45.7%."
+}

@@ -6,6 +6,36 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`turboquant-plan` warns when a resident fit passes 85% of system RAM.**
+  Atomic Chat's field data (1.1M device x model loads) shows Mac loads start
+  failing past that share of unified memory: ~85% succeed below it, 69% at
+  85-100%, 56% beyond. Advisory only, since their loads are llama.cpp at the
+  default wired cap. The verdict is unchanged; the JSON output gains
+  `projection.ram_share`. Qwen3.8-Flash-Next at 16K context sits at 85.4%.
+- **MTP speculative decoding can undo a rejected draft without a snapshot or a
+  replay** (`speculative_generate(rollback_mode="auto" | "states" | "snapshot")`).
+  The verify captures the Gated-DeltaNet state after its first position, using a
+  kernel adapted from mlx-vlm 0.7.0 (MIT, `kernels/gated_delta_states.py`, see
+  NOTICE). A miss then trims the KV layers by one and restores that state and
+  the conv window; nothing is re-run. `auto` takes this path where the model
+  allows it, and `states` raises rather than silently falling back.
+
+  Measured on Qwen3.8-27B tq4 with the MTP head (3 prompts x 64 tokens, warm,
+  alternating order; `benchmarks/mtp_rollback_ab_results.json`): **bit-identical
+  to greedy on all prompts, and 0.577x greedy vs 0.548x for the snapshot path.**
+  A 5% gain, still slower than plain greedy, and opt-in as before.
+
+  That measurement corrects two things recorded in 0.25.0:
+  - **Acceptance was miscounted.** The gate divided accepted drafts by accepted
+    drafts plus rounds, counting every hit twice, and reported 45.7%. Per verify
+    round it is 75-91% on these prompts.
+  - **The replay was not the main cost.** A 2-token forward costs **2.9x** a
+    1-token forward on this build (325 vs 112 ms), so a speculative round costs
+    3.0x a greedy step. `PolarQuantizedLinear` takes the fused single-vector
+    `polar_qmv` kernel for exactly one token and `polar_qmm` from two up; making a
+    2-token verify cheap is the lever that remains.
+
 ### Documentation
 - **The README covers Qwen3.8-Flash-Next**: supported-models list, results table
   (with the two other builds in its size class), install note, a model section,

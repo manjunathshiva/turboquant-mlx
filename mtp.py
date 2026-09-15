@@ -431,6 +431,132 @@ def snapshot_bytes(snap: list) -> int:
                for a in (s if isinstance(s, list) else [s]) if a is not None)
 
 
+# ── Stage 3c: rollback without a snapshot ────────────────────────────────────
+#
+# The snapshot above predates BOTH verify positions, so a miss throws away the
+# target's work on `y` and replays it, which is what capped this loop at
+# (1+p)/(2-p). But the Gated-DeltaNet kernel computes the recurrent state after
+# every position anyway and discards all but the last. Keeping the one after the
+# first verify position (mlx-vlm's `gated_delta_update_with_states`, vendored in
+# kernels/gated_delta_states.py) turns a miss into bookkeeping:
+#
+#   KV layers        trim(1), dropping z'
+#   recurrent state  the state after y, captured during the verify
+#   conv window      the last K-1 inputs up to y: the window before the verify
+#                    shifted by one, plus y's own input, which is the
+#                    second-to-last entry of the window after it
+#
+# and h(y) already came out of the verify. Nothing is re-run.
+#
+# The capture swaps the module-level `gated_delta_update` binding that the
+# model's Gated-DeltaNet layers call, for the duration of one verify forward
+# only. The swap is process-wide while it lasts, so this loop must not run
+# concurrently with other decoding of the same model class.
+
+
+def _gdn_modules(text) -> list:
+    """The modules whose ``gated_delta_update`` binding the GDN layers call."""
+    import sys
+
+    mods = []
+    for layer in getattr(text, "layers", []):
+        attn = getattr(layer, "linear_attn", None)
+        if attn is None:
+            continue
+        mod = sys.modules.get(type(attn).__module__)
+        if mod is not None and mod not in mods:
+            mods.append(mod)
+    return mods
+
+
+def resolve_rollback(text, mode: str = "auto") -> str:
+    """Pick the rollback strategy: ``"states"``, ``"snapshot"``, or ``"auto"``.
+
+    ``auto`` resolves to ``states`` when the Gated-DeltaNet layers call a
+    module-level ``gated_delta_update`` that can be captured through, and to
+    ``snapshot`` otherwise. Asking for ``states`` where that is impossible
+    raises instead of quietly running the slower path.
+    """
+    if mode not in ("auto", "states", "snapshot"):
+        raise ValueError(
+            f"rollback mode must be 'auto', 'states' or 'snapshot', got {mode!r}")
+    if mode == "snapshot":
+        return mode
+    mods = _gdn_modules(text)
+    capturable = bool(mods) and all(
+        callable(getattr(m, "gated_delta_update", None)) for m in mods)
+    if mode == "states" and not capturable:
+        raise RuntimeError(
+            "rollback='states' needs Gated-DeltaNet layers that call a "
+            "module-level gated_delta_update; this model's do not. "
+            "Use rollback='snapshot'.")
+    return "states" if capturable else "snapshot"
+
+
+class _CaptureStates:
+    """During one forward, record the recurrent state after the first position
+    of every Gated-DeltaNet call, in call order (which is layer order)."""
+
+    def __init__(self, text):
+        self.modules = _gdn_modules(text)
+        self.states: list = []
+
+    def __enter__(self):
+        from turboquant_mlx.kernels.gated_delta_states import (
+            gated_delta_update_with_states,
+        )
+
+        self._saved = [(m, m.gated_delta_update) for m in self.modules]
+        states = self.states
+
+        def capture(q, k, v, a, b, A_log, dt_bias, state=None, mask=None,
+                    use_kernel=True):
+            y, final, steps = gated_delta_update_with_states(
+                q, k, v, a, b, A_log, dt_bias, state, mask,
+                use_kernel=use_kernel, state_steps=1)
+            states.append(steps)
+            return y, final
+
+        for m, _ in self._saved:
+            m.gated_delta_update = capture
+        return self
+
+    def __exit__(self, *exc):
+        for m, fn in self._saved:
+            m.gated_delta_update = fn
+        return False
+
+
+def recurrent_layers(cache) -> list:
+    """Indices of the non-trimmable (recurrent) layers in ``cache``."""
+    out = []
+    for i, c in enumerate(cache):
+        trimmable = getattr(c, "is_trimmable", None)
+        if not (callable(trimmable) and trimmable()):
+            out.append(i)
+    return out
+
+
+def rollback_to_first(cache, recurrent_idx, states, conv_before) -> None:
+    """Rewind a two-position verify to the cache state just after its first
+    position, from the states captured during that verify."""
+    if len(states) != len(recurrent_idx):
+        raise RuntimeError(
+            f"captured {len(states)} Gated-DeltaNet states for "
+            f"{len(recurrent_idx)} recurrent layers; the capture did not see "
+            "every layer, so the cache cannot be rewound")
+    trim_trimmable(cache, 1)
+    for i, st, before in zip(recurrent_idx, states, conv_before):
+        c = cache[i]
+        after = c[0]
+        if before is None or after.shape[1] < 2:
+            raise RuntimeError(
+                "cannot rebuild the conv window: it needs a pre-verify window "
+                "and a kernel size of at least 3")
+        c[1] = st[:, 0]
+        c[0] = mx.concatenate([before[:, 1:], after[:, -2:-1]], axis=1)
+
+
 # ── Stage 3b: the speculative decode loop ────────────────────────────────────
 #
 # k = 1. One MTP layer drafts exactly one token, so each iteration runs the
@@ -477,7 +603,8 @@ def _make_cache(text, make_cache=None):
 
 
 def speculative_generate(ids, text, mtp, embed, head, *,
-                         max_tokens: int = 64, eos_ids=(), make_cache=None):
+                         max_tokens: int = 64, eos_ids=(), make_cache=None,
+                         rollback_mode: str = "auto"):
     """Greedy decode with MTP speculation. Yields ``(token, from_draft)``.
 
     ``text`` is the decoder stack, ``embed`` / ``head`` the embedding and output
@@ -490,6 +617,11 @@ def speculative_generate(ids, text, mtp, embed, head, *,
     calls and the ``mx.array([[y]])`` re-feeds below collapse a batch to its
     first row, so a batched call would return quietly wrong tokens rather than
     fail — hence the explicit check.
+
+    ``rollback_mode`` picks how a rejected draft is undone (see :func:`resolve_rollback`):
+    ``"states"`` rewinds from the Gated-DeltaNet states captured during the verify,
+    with no replay; ``"snapshot"`` restores a pre-verify snapshot and replays one
+    token; ``"auto"`` (the default) takes ``states`` where the model allows it.
     """
     from mlx_lm.models.cache import KVCache
 
@@ -500,6 +632,8 @@ def speculative_generate(ids, text, mtp, embed, head, *,
         )
 
     cache = _make_cache(text, make_cache)
+    mode = resolve_rollback(text, rollback_mode)
+    recurrent_idx = recurrent_layers(cache)
     mtp_cache = KVCache()
     eos = {int(e) for e in eos_ids}
 
@@ -527,9 +661,18 @@ def speculative_generate(ids, text, mtp, embed, head, *,
         # the rejected one would leave the 16 KV layers a position ahead of the
         # 48 recurrent layers, which is exactly the kind of desync that shows up
         # as divergence rather than a crash. `y` is then replayed on its own.
-        snap = snapshot_recurrent(cache)
         pair = mx.array([[y, z_draft]])
-        h2 = text(pair, cache=cache, input_embeddings=embed(pair))
+        if mode == "states":
+            conv_before = [cache[i][0] for i in recurrent_idx]
+            with _CaptureStates(text) as cap:
+                h2 = text(pair, cache=cache, input_embeddings=embed(pair))
+            if len(cap.states) != len(recurrent_idx):
+                raise RuntimeError(
+                    f"state capture saw {len(cap.states)} of "
+                    f"{len(recurrent_idx)} Gated-DeltaNet layers")
+        else:
+            snap = snapshot_recurrent(cache)
+            h2 = text(pair, cache=cache, input_embeddings=embed(pair))
         logits2 = head(h2)
         z = int(mx.argmax(logits2[:, 0, :], axis=-1).item())
         mx.eval(h2)
@@ -551,16 +694,22 @@ def speculative_generate(ids, text, mtp, embed, head, *,
             mtp(h2[:, 0:1, :], mx.array([[z]]), embed, head, cache=mtp_cache)
             h_prev, y = h2[:, 1:2, :], y_next
         else:
-            # Undo the whole verify, then replay the one token that was real.
-            rollback(cache, snap, 2)
-            replay = mx.array([[y]])
-            h1 = text(replay, cache=cache, input_embeddings=embed(replay))
-            mx.eval(h1)
+            if mode == "states":
+                # Rewind to just after `y`; h(y) already came out of the verify.
+                rollback_to_first(cache, recurrent_idx, cap.states, conv_before)
+                h_prev = h2[:, 0:1, :]
+            else:
+                # Undo the whole verify, then replay the one token that was real.
+                rollback(cache, snap, 2)
+                replay = mx.array([[y]])
+                h1 = text(replay, cache=cache, input_embeddings=embed(replay))
+                mx.eval(h1)
+                h_prev = h1[:, -1:, :]
             yield z, False
             produced += 1
             if z in eos:
                 return
-            h_prev, y = h1[:, -1:, :], z
+            y = z
         mx.eval(h_prev)
 
 

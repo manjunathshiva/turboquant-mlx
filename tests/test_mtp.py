@@ -426,3 +426,195 @@ def test_a_partially_loaded_head_is_refused_not_left_random():
     partial = {k: v for k, v in full.items() if k != victim}
     with pytest.raises(KeyError, match=re.escape(victim)):
         MTPHead(args).load(partial)
+
+
+# ── Stage 3c: rollback from captured Gated-DeltaNet states ──────────────────
+
+def _tiny_text_model(seed: int = 0):
+    qwen35 = pytest.importorskip("mlx_lm.models.qwen3_5")
+    from mlx.utils import tree_map
+    mx.random.seed(seed)
+    model = qwen35.TextModel(_tiny_args())
+    model.update(tree_map(lambda p: p.astype(mx.float32), model.parameters()))
+    mx.eval(model.parameters())
+    return model
+
+
+def test_state_capture_kernel_matches_the_stock_update():
+    """The vendored kernel must be the stock update plus an extra output."""
+    from mlx_lm.models.gated_delta import gated_delta_update
+    from turboquant_mlx.kernels.gated_delta_states import gated_delta_update_with_states
+
+    mx.random.seed(3)
+    B, T, Hk, Hv, Dk, Dv = 1, 3, 2, 4, 32, 16
+    q, k = mx.random.normal((B, T, Hk, Dk)), mx.random.normal((B, T, Hk, Dk))
+    v = mx.random.normal((B, T, Hv, Dv))
+    a, b = mx.random.normal((B, T, Hv)), mx.random.normal((B, T, Hv))
+    A_log, dt_bias = mx.random.normal((Hv,)), mx.random.normal((Hv,))
+    state = mx.random.normal((B, Hv, Dv, Dk)) * 0.1
+
+    y0, s0 = gated_delta_update(q, k, v, a, b, A_log, dt_bias, state)
+    y1, s1, steps = gated_delta_update_with_states(
+        q, k, v, a, b, A_log, dt_bias, state, state_steps=2)
+    assert mx.allclose(y0, y1, atol=1e-5)
+    assert mx.allclose(s0, s1, atol=1e-5)
+    assert steps.shape == (B, 2, Hv, Dv, Dk)
+
+    _, after_first = gated_delta_update(
+        q[:, :1], k[:, :1], v[:, :1], a[:, :1], b[:, :1], A_log, dt_bias, state)
+    assert mx.allclose(steps[:, 0], after_first, atol=1e-5)
+
+
+def test_rollback_to_first_equals_running_only_the_first_token():
+    """Verify [y, z'] then rewind must leave the cache exactly as if only [y]
+    had been run -- recurrent state, conv window and KV offsets alike."""
+    from turboquant_mlx.mtp import _CaptureStates, recurrent_layers, rollback_to_first
+
+    model = _tiny_text_model()
+    text, embed = model.model, model.model.embed_tokens
+    prompt = mx.array([[5, 17, 42, 9, 77]])
+    y, z_wrong = 31, 64
+
+    def primed():
+        cache = model.make_cache()
+        text(prompt, cache=cache, input_embeddings=embed(prompt))
+        return cache
+
+    ref = primed()
+    one = mx.array([[y]])
+    h_ref = text(one, cache=ref, input_embeddings=embed(one))
+
+    cache = primed()
+    idx = recurrent_layers(cache)
+    before = [cache[i][0] for i in idx]
+    pair = mx.array([[y, z_wrong]])
+    with _CaptureStates(text) as cap:
+        h2 = text(pair, cache=cache, input_embeddings=embed(pair))
+    assert len(cap.states) == len(idx) > 0
+    rollback_to_first(cache, idx, cap.states, before)
+
+    assert mx.allclose(h2[:, 0], h_ref[:, 0], atol=1e-4)
+    for c_ref, c in zip(ref, cache):
+        if c.is_trimmable():
+            assert c.offset == c_ref.offset
+        else:
+            assert mx.allclose(c[0], c_ref[0], atol=1e-5)
+            assert mx.allclose(c[1], c_ref[1], atol=1e-4)
+
+    nxt = mx.array([[88]])
+    assert mx.allclose(text(nxt, cache=cache, input_embeddings=embed(nxt)),
+                       text(nxt, cache=ref, input_embeddings=embed(nxt)), atol=1e-4)
+
+
+class _OracleDraft:
+    """Stands in for the MTP head: drafts the true greedy token, except on every
+    third step, where it drafts a wrong one -- so both verify branches run.
+
+    Every confirmed token except the last is passed to the head exactly once, in
+    order, so the call count is also the index of the token to predict next.
+    """
+
+    def __init__(self, ref, vocab):
+        self.ref, self.vocab, self.seen = ref, vocab, 0
+
+    def __call__(self, h, toks, embed, head, cache=None):
+        if toks.shape[1] > 1:  # the priming call over the prompt
+            return mx.zeros((1, toks.shape[1], self.vocab))
+        self.seen += 1
+        truth = self.ref[self.seen] if self.seen < len(self.ref) else 0
+        tok = (truth + 1) % self.vocab if self.seen % 3 == 0 else truth
+        logits = mx.zeros((1, 1, self.vocab))
+        logits[..., tok] = 1.0
+        return logits
+
+
+@pytest.mark.parametrize("rollback", ["states", "snapshot"])
+def test_speculative_decoding_matches_greedy_through_hits_and_misses(rollback, monkeypatch):
+    from turboquant_mlx import mtp as M
+
+    model = _tiny_text_model()
+    text, embed, head = model.model, model.model.embed_tokens, model.lm_head
+    prompt = mx.array([[5, 17, 42, 9, 77, 3]])
+    ref = list(M.greedy_generate(prompt, text, embed, head, max_tokens=24,
+                                 make_cache=model.make_cache))
+
+    rewinds = {"n": 0}
+    real = M.rollback_to_first
+
+    def counting(*a, **k):
+        rewinds["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(M, "rollback_to_first", counting)
+    out = list(M.speculative_generate(
+        prompt, text, _OracleDraft(ref, _tiny_args().vocab_size), embed, head,
+        max_tokens=24, make_cache=model.make_cache, rollback_mode=rollback))
+
+    assert [t for t, _ in out] == ref
+    assert any(d for _, d in out), "no draft was ever accepted"
+    if rollback == "states":
+        assert rewinds["n"] > 0, "the states rewind never ran; misses fell through"
+    else:
+        assert rewinds["n"] == 0
+
+
+def test_auto_rollback_takes_states_and_never_fakes_it(monkeypatch):
+    qwen35 = pytest.importorskip("mlx_lm.models.qwen3_5")
+    from turboquant_mlx.mtp import resolve_rollback
+
+    text = _tiny_text_model().model
+    assert resolve_rollback(text, "auto") == "states"
+    assert resolve_rollback(text, "snapshot") == "snapshot"
+    with pytest.raises(ValueError):
+        resolve_rollback(text, "nope")
+
+    monkeypatch.delattr(qwen35, "gated_delta_update")
+    assert resolve_rollback(text, "auto") == "snapshot"
+    with pytest.raises(RuntimeError, match="rollback='snapshot'"):
+        resolve_rollback(text, "states")
+
+
+def test_capture_restores_the_binding_even_when_the_forward_raises():
+    """A leaked swap would silently route every later forward through capture."""
+    qwen35 = pytest.importorskip("mlx_lm.models.qwen3_5")
+    from turboquant_mlx.mtp import _CaptureStates
+
+    text = _tiny_text_model().model
+    original = qwen35.gated_delta_update
+    raised = False
+    try:
+        with _CaptureStates(text):
+            assert qwen35.gated_delta_update is not original
+            raise ZeroDivisionError("the forward failed mid-capture")
+    except ZeroDivisionError:
+        raised = True
+    assert raised
+    assert qwen35.gated_delta_update is original
+
+
+@pytest.mark.parametrize("state_steps", [1, 2])
+def test_state_capture_kernel_is_right_for_batches_and_partial_steps(state_steps):
+    """Batch rows in the `states` output must be strided by its own step count,
+    not T. With B > 1 and state_steps < T, a T stride writes past the buffer and
+    leaves later rows wrong -- found in review of the code as vendored."""
+    from turboquant_mlx.kernels import gated_delta_states as G
+
+    mx.random.seed(7)
+    B, T, Hk, Hv, Dk, Dv = 3, 3, 2, 4, 32, 16
+    q, k = mx.random.normal((B, T, Hk, Dk)), mx.random.normal((B, T, Hk, Dk))
+    v = mx.random.normal((B, T, Hv, Dv))
+    a, b = mx.random.normal((B, T, Hv)), mx.random.normal((B, T, Hv))
+    A_log, dt_bias = mx.random.normal((Hv,)), mx.random.normal((Hv,))
+    state = mx.random.normal((B, Hv, Dv, Dk)) * 0.1
+
+    g, beta = G._compute_g_beta(A_log, a, b, dt_bias)
+    y_ref, s_ref, st_ref = G._gated_delta_with_states_ops(
+        q, k, v, g, beta, state, None, state_steps)
+    y, s, st = G.gated_delta_update_with_states(
+        q, k, v, a, b, A_log, dt_bias, state, state_steps=state_steps)
+    mx.eval(y, s, st)
+    assert st.shape == (B, state_steps, Hv, Dv, Dk)
+    assert mx.allclose(y, y_ref, atol=1e-5)
+    assert mx.allclose(s, s_ref, atol=1e-5)
+    for row in range(B):
+        assert mx.allclose(st[row], st_ref[row], atol=1e-5), f"batch row {row}"
