@@ -305,7 +305,7 @@ def resolve_model_path(path_or_hf_repo):
     return Path(_download(str(path_or_hf_repo)))
 
 
-def load_turboquant(model_path, lazy=False, fast=False):
+def load_turboquant(model_path, lazy=False, fast=False, ngram_offload=False):
     """Load a TurboQuant-compressed model.
 
     Args:
@@ -313,6 +313,10 @@ def load_turboquant(model_path, lazy=False, fast=False):
             are downloaded on first use.
         lazy: If True, don't evaluate parameters immediately.
         fast: If True, disable QJL correction for faster inference.
+        ngram_offload: If True, serve n-gram embedding tables (Qwen3.8-Flash-Next)
+            from memory-mapped files on the CPU instead of GPU memory. Output is
+            bit-identical; see ``turboquant_mlx.ngram_offload``. No effect on models
+            without such a table.
 
     Returns:
         (model, tokenizer) tuple.
@@ -347,6 +351,16 @@ def load_turboquant(model_path, lazy=False, fast=False):
 
     if hasattr(model, "sanitize"):
         weights = model.sanitize(weights)
+
+    # Before any pass that turns tensors into modules: the table's tensors must not
+    # reach the affine pass or load_weights, or they would be loaded onto the GPU.
+    if ngram_offload:
+        from .ngram_offload import offload_ngram_tables
+
+        moved = offload_ngram_tables(model, weights, weight_files)
+        if moved:
+            print(f"[INFO] n-gram table served from disk: {moved / 2**30:.2f} GiB "
+                  "kept out of GPU memory")
 
     # Replace quantized layers with PolarQuantized versions
     _prepare_polar_layers(model, weights, tq_config)
@@ -458,6 +472,10 @@ def main():
         help="Fast mode: skip QJL correction for ~25%% faster decode (slightly lower quality)",
     )
     parser.add_argument(
+        "--ngram-offload", action="store_true",
+        help="Serve an n-gram embedding table (Qwen3.8-Flash-Next) from memory-mapped files on the CPU instead of GPU memory: ~17.9 GiB less resident on the 2-bit build, bit-identical output. Keep the model directory in place while the model is loaded. No effect on models without such a table.",
+    )
+    parser.add_argument(
         "--min-tokens", type=int, default=0,
         help="Mask EOS until at least this many tokens are generated. "
              "Useful for thinking-mode models (Nemotron 3, etc.) whose chat "
@@ -498,7 +516,8 @@ def main():
 
     mode = "fast (QJL disabled)" if args.fast else "accurate (QJL enabled)"
     print(f"[INFO] Loading TurboQuant model from {args.model} [{mode}]")
-    model, tokenizer = load_turboquant(args.model, fast=args.fast)
+    model, tokenizer = load_turboquant(args.model, fast=args.fast,
+                                       ngram_offload=args.ngram_offload)
 
     if args.stop:
         from .sampling import resolve_stop_token

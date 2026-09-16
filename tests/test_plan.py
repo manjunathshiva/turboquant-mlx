@@ -791,3 +791,95 @@ class TestMacLoadCliff:
                         context=4096)
         assert pl["projection"]["ram_share"] < 0.5
         assert not any("of system RAM" in w for w in pl["warnings"])
+
+
+class TestNgramOffload:
+    """--ngram-offload keeps Qwen3.8-Flash-Next's n-gram table in the page cache.
+
+    Shaped like the shipped 2-bit build: ~34 GB wired trunk plus a ~19 GB table.
+    Resident on 64 GB needs the wired bump without offload; with it, the trunk
+    alone fits the default cap.
+    """
+
+    def _model(self, tmp_path):
+        trunk = int(34 * GB / 4)
+        table = int(19 * GB / 4)
+        return _write_model(tmp_path, Q35, {
+            "model.layers.0.self_attn.q_proj.weight": ("U32", (trunk,)),
+            "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight": ("U32", (table,)),
+        })
+
+    def test_footprint_counts_the_table_as_resident_and_movable(self):
+        idx = {
+            "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight": ("U32", (10,)),
+            "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.scales": ("F16", (10,)),
+            "model.layers.1.ple.key_proj.weight": ("U32", (5,)),
+        }
+        fp = footprint(idx)
+        assert fp["ngram_bytes"] == 60
+        assert fp["resident_bytes"] == 80
+
+    def test_offload_takes_the_table_out_of_the_peak(self, tmp_path):
+        p = self._model(tmp_path)
+        off = build_plan(p, wired_gb=51.54, ram_gb=64, context=4096)
+        on = build_plan(p, wired_gb=51.54, ram_gb=64, context=4096, ngram_offload=True)
+        assert off["projection"]["peak_bytes"] - on["projection"]["peak_bytes"] == 19 * GB
+        assert on["projection"]["ngram_offloaded_bytes"] == 19 * GB
+        assert off["verdict"]["needs_wired_bump"]
+        assert on["verdict"]["mode"] == "resident" and not on["verdict"]["needs_wired_bump"]
+        assert "page cache, not wired" in render(on)
+
+    def test_the_flag_is_recommended_only_when_it_changes_the_fit(self, tmp_path):
+        p = self._model(tmp_path)
+        tight = build_plan(p, wired_gb=51.54, ram_gb=64, context=4096)
+        assert any(f.startswith("--ngram-offload") for f in tight["flags"])
+        roomy = build_plan(p, wired_gb=100, ram_gb=128, context=4096)
+        assert not any(f.startswith("--ngram-offload") for f in roomy["flags"])
+        on = build_plan(p, wired_gb=51.54, ram_gb=64, context=4096, ngram_offload=True)
+        assert not any(f.startswith("--ngram-offload") for f in on["flags"])
+
+    def test_models_without_a_table_are_unchanged(self, tmp_path):
+        p = _write_model(tmp_path, Q35, {
+            "model.layers.0.self_attn.q_proj.weight": ("U32", (int(5 * GB / 4),)),
+        })
+        a = build_plan(p, wired_gb=10.5, ram_gb=16)
+        b = build_plan(p, wired_gb=10.5, ram_gb=16, ngram_offload=True)
+        assert a["projection"]["peak_bytes"] == b["projection"]["peak_bytes"]
+        assert not any("ngram" in f for f in a["flags"])
+
+
+class TestWiredCapLeavesRoomForThePromptCache:
+    """A cap of peak + 0.5 GB runs the model, but serve's auto prompt-cache budget
+    is cap - live - 2 GiB, so every long follow-up re-prefilled (Flash-Next,
+    offload on, 48 GB-class cap: 61-235 s per turn instead of 0.27 s)."""
+
+    def _model(self, tmp_path, gb):
+        return _write_model(tmp_path, Q35, {
+            "model.layers.0.self_attn.q_proj.weight": ("U32", (int(gb * GB / 4),)),
+        })
+
+    def _cap_bytes(self, pl):
+        bump = [f for f in pl["flags"] if "iogpu.wired_limit_mb" in f]
+        assert bump
+        return int(bump[0].split("iogpu.wired_limit_mb=")[1].split()[0]) * 1024**2
+
+    def test_a_roomy_machine_gets_room_for_one_retained_context(self, tmp_path):
+        from turboquant_mlx.plan import _PROMPT_CACHE_RESERVE_BYTES
+        pl = build_plan(self._model(tmp_path, 38), wired_gb=38.65, ram_gb=48,
+                        context=16384)
+        assert pl["verdict"]["needs_wired_bump"]
+        pr = pl["projection"]
+        assert self._cap_bytes(pl) >= pr["peak_bytes"] + pr["kv_bytes"] + _PROMPT_CACHE_RESERVE_BYTES - 1024**2
+        assert not any("prompt cache" in w for w in pl["warnings"])
+
+    def test_a_tight_machine_gets_the_minimum_and_is_told_the_cost(self, tmp_path):
+        pl = build_plan(self._model(tmp_path, 12.6), wired_gb=10.5, ram_gb=16,
+                        context=8000, kv_bits=8)
+        assert pl["verdict"]["needs_wired_bump"]
+        assert self._cap_bytes(pl) <= pl["projection"]["peak_bytes"] + 0.5 * GB
+        assert any("prompt cache" in w for w in pl["warnings"])
+
+    def test_reserve_matches_the_server(self):
+        from turboquant_mlx.plan import _PROMPT_CACHE_RESERVE_BYTES
+        from turboquant_mlx.serve import _PROMPT_CACHE_RESERVE_BYTES as served
+        assert _PROMPT_CACHE_RESERVE_BYTES == served
