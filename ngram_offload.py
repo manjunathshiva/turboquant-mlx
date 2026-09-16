@@ -129,6 +129,16 @@ class _Shard:
             self.biases = _map(files, f"{prefix}.biases", index)
             self.scale_dtype = index[self.scale_key][1]["dtype"]
             self.bias_dtype = index[f"{prefix}.biases"][1]["dtype"]
+            weight_dtype = index[f"{prefix}.weight"][1]["dtype"]
+            if weight_dtype != "U32":
+                raise ValueError(f"{prefix}: quantized weight is {weight_dtype}, "
+                                 "expected packed U32")
+            floats = ("F32", "F16", "BF16")
+            if (self.scale_dtype not in floats or self.bias_dtype not in floats
+                    or self.scales.ndim != 2 or self.biases.ndim != 2):
+                raise ValueError(f"{prefix}: scales and biases must be 2-D floats, got "
+                                 f"{self.scale_dtype} {list(self.scales.shape)} and "
+                                 f"{self.bias_dtype} {list(self.biases.shape)}")
             groups = self.scales.shape[-1]
             if groups == 0 or dim % groups:
                 raise ValueError(f"{prefix}: {groups} groups do not divide width {dim}")
