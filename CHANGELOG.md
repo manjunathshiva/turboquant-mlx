@@ -7,6 +7,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **`--ngram-offload` serves Qwen3.8-Flash-Next's n-gram table from disk**
+  (`turboquant-generate`, `turboquant-serve`, `stream_generate`, and
+  `load_turboquant(..., ngram_offload=True)`). The table stays in the checkpoint's
+  safetensors files, memory-mapped, and each step's rows (16 per token) are
+  dequantized on the CPU. It needs no reconvert. On `tq4a-tq2e-g64`, MLX active
+  memory drops **52.01 → 34.13 GiB**, and logits over 1,024 WikiText-2 positions are
+  **bit-identical**. Serving on a 64 GB M4 Max: 0 swapouts inside requests,
+  against 621K-706K without the flag. Warm decode stays
+  within ~2% on a fresh machine, and a cold 16K prompt takes 70.1 s instead of 62.8
+  s while the table's rows are first read from SSD.
+
+  Getting bit-exact needed MLX's exact arithmetic: `nn.QuantizedEmbedding`
+  computes `q * scale + bias` as a fused float32 operation, then rounds into the
+  scales' dtype, and the CPU path reproduces both. (MLX's GPU and CPU casts
+  disagree only on float32 subnormals, which a dequantized row never contains.) The shipped 2-bit table never hits the rounding; 4- and
+  8-bit and float16 tables do, and are tested. 3- and 6-bit tables are refused.
+  Idea from ddalcu/mlx-serve (MIT), which memory-maps its table the same way.
+- **`turboquant-plan --ngram-offload`** projects with the table in the page cache,
+  shows the table as its own line, and recommends the flag when it would change the
+  fit.
+
+### Fixed
+- **`turboquant-plan`'s recommended wired cap left serve no room for a prompt
+  cache.** It asked for peak + 0.5 GB, but `turboquant-serve`'s auto prompt-cache
+  budget is cap − live memory − 2 GiB, so at that cap it evicted every retained
+  conversation and long follow-ups re-read their whole context (Flash-Next at a 48
+  GB-class cap: 61–235 s per repeat of a 16K prompt). It now asks for peak + one
+  context's KV + 2 GiB when the machine can give it, and otherwise gives the
+  minimum with a warning about what it costs. At the new recommendation for that
+  case (41,603 MB), repeats answer in 0.27 s again (cold 62.3 s).
+
 - **`turboquant-plan` warns when a resident fit passes 85% of system RAM.**
   Atomic Chat's field data (1.1M device x model loads) shows Mac loads start
   failing past that share of unified memory: ~85% succeed below it, 69% at

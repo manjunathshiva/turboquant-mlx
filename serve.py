@@ -342,6 +342,14 @@ def _extract_prompt_cache_max_args(argv):
     return val, remaining
 
 
+def _extract_ngram_offload_args(argv):
+    """Peel ``--ngram-offload`` off ``argv``. Returns ``(bool, remaining_argv)``."""
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--ngram-offload", dest="ngram_offload", action="store_true")
+    ns, remaining = parser.parse_known_args(argv)
+    return ns.ngram_offload, remaining
+
+
 def _extract_metal_cache_limit_args(argv):
     """Peel ``--metal-cache-limit-gb`` off ``argv``.
 
@@ -372,7 +380,8 @@ def _extract_metal_cache_limit_args(argv):
     return val, remaining
 
 
-def _patch_loader(stream_config=None, cache_limit_mode=None) -> None:
+def _patch_loader(stream_config=None, cache_limit_mode=None,
+                  ngram_offload=False) -> None:
     """Replace `mlx_lm.server.load` with a TurboQuant-aware wrapper.
 
     The server calls the bare name `load(...)` after `from .utils import
@@ -436,12 +445,14 @@ def _patch_loader(stream_config=None, cache_limit_mode=None) -> None:
             )
             # load_streaming returns (model, tok, cache); the cache stays alive
             # via the StreamingSwitchLinear modules that reference it.
-            model, tokenizer, _cache = load_streaming(model_path, **stream_config)
+            model, tokenizer, _cache = load_streaming(
+                model_path, ngram_offload=ngram_offload, **stream_config)
         else:
             sys.stderr.write(
                 f"[turboquant-serve] Loading TurboQuant model from {model_path}\n"
             )
-            model, tokenizer = load_turboquant(model_path, lazy=lazy)
+            model, tokenizer = load_turboquant(model_path, lazy=lazy,
+                                               ngram_offload=ngram_offload)
         if cache_limit_mode is not None:
             _apply_metal_cache_limit(cache_limit_mode)
         if return_config:
@@ -908,7 +919,8 @@ def main() -> None:
     tool_greedy_config, remaining = _extract_tool_syntax_greedy_args(remaining)
     cache_limit_mode, remaining = _extract_metal_cache_limit_args(remaining)
     prompt_cache_max_mode, remaining = _extract_prompt_cache_max_args(remaining)
-    _patch_loader(stream_config, cache_limit_mode)
+    ngram_offload, remaining = _extract_ngram_offload_args(remaining)
+    _patch_loader(stream_config, cache_limit_mode, ngram_offload)
     if prompt_cache_max_mode is not None:
         _patch_prompt_cache_bytes(prompt_cache_max_mode)
     if tool_greedy_config is not None:
@@ -947,6 +959,11 @@ def main() -> None:
             f"[turboquant-serve] Expert streaming: cache_budget={bud_s}, "
             f"max_active_experts={stream_config['max_active_experts']}, "
             f"page_cache={pc}{wired} (single-user; use --prompt-concurrency 1)\n"
+        )
+    if ngram_offload:
+        sys.stderr.write(
+            "[turboquant-serve] n-gram table served from disk (--ngram-offload): "
+            "keep the model directory in place while serving\n"
         )
     if prompt_cache_max_mode is not None:
         cap_s = ("auto (caps only when working-set headroom is tight)"

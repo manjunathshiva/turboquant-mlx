@@ -75,6 +75,11 @@ _RESERVE_BYTES = 1.0 * _GB
 # wired cap, a different population from a TurboQuant load after a sysctl raise,
 # so here it is an advisory warning and never changes the verdict.
 _MAC_LOAD_CLIFF = 0.85
+
+# turboquant-serve holds this much back from its auto prompt-cache budget
+# (serve.py _PROMPT_CACHE_RESERVE_BYTES); a wired cap below live memory plus
+# this leaves no retained conversation.
+_PROMPT_CACHE_RESERVE_BYTES = 2 * 1024**3
 _EXIT_OK, _EXIT_UNFIT, _EXIT_USAGE = 0, 1, 2
 
 
@@ -126,9 +131,16 @@ def read_remote_config(repo_id: str) -> dict:
         return json.load(f)
 
 
+def is_ngram_table_key(key: str) -> bool:
+    """A shard of an n-gram embedding table (Qwen3.8-Flash-Next), which
+    ``--ngram-offload`` serves from the page cache instead of GPU memory."""
+    return ".ngram_embedding.shard_" in key
+
+
 def footprint(index: dict) -> dict:
-    """Exact byte split: total / streamable experts / always-resident."""
-    total = expert = 0
+    """Exact byte split: total / streamable experts / always-resident, plus the
+    n-gram table bytes (part of resident) that ``--ngram-offload`` can move."""
+    total = expert = ngram = 0
     for name, (dtype, shape) in index.items():
         n = 1
         for d in shape:
@@ -140,8 +152,10 @@ def footprint(index: dict) -> dict:
         # drift again (they did: both missed laguna's `mlp.experts`)
         if is_streamed_expert_key(name):
             expert += b
+        elif is_ngram_table_key(name):
+            ngram += b
     return {"total_bytes": total, "expert_bytes": expert,
-            "resident_bytes": total - expert}
+            "resident_bytes": total - expert, "ngram_bytes": ngram}
 
 
 def _text_config(cfg: dict) -> dict:
@@ -528,7 +542,8 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
 
 def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None,
                step: int | None = None, wired_gb: float | None = None,
-               ram_gb: float | None = None, remote: bool = False) -> dict:
+               ram_gb: float | None = None, remote: bool = False,
+               ngram_offload: bool = False) -> dict:
     incomplete = False
     if remote:
         cfg = read_remote_config(model_path)
@@ -551,6 +566,12 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     kv_total, kv_pt, kv_note = kv_bytes(cfg, context, kv_bits)
     _, _, n_layers, _ = _attention_layers(cfg)
     kv_total = kv_total or 0
+
+    # With --ngram-offload the table stays in the page cache, which macOS can evict,
+    # so it neither counts against the Metal cap nor needs to be wired.
+    offloaded = fp["ngram_bytes"] if ngram_offload else 0
+    wired_weights = fp["total_bytes"] - offloaded
+    wired_resident = fp["resident_bytes"] - offloaded
 
     wss = mach["wss_bytes"]
     ram = mach["ram_bytes"]
@@ -575,7 +596,7 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         # tokens on the mini (~1.7 GB at 21K) before --metal-cache-limit-gb auto
         # capped it, and activations/fragmentation live here too. Same 2 GB the
         # auto-guards reserve.
-        return (fp["total_bytes"] + kv_total
+        return (wired_weights + kv_total
                 + prefill_workspace_bytes(cfg, context, s,
                                           cfg.get("quantization"), is_moe)
                 + _RESERVE_BYTES)
@@ -606,17 +627,33 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         mode, ok = "resident", True
     elif ceiling and peak <= ceiling:
         mode, ok, needs_bump = "resident", True, True
-    elif is_moe and ceiling and (fp["resident_bytes"] + 0.5 * _GB + kv_total
+    elif is_moe and ceiling and (wired_resident + 0.5 * _GB + kv_total
                                  + workspace + _RESERVE_BYTES) <= ceiling:
         mode, ok = "streaming", True
-        needs_bump = bool(wss and (fp["resident_bytes"] + 0.5 * _GB + kv_total
+        needs_bump = bool(wss and (wired_resident + 0.5 * _GB + kv_total
                                    + workspace + _RESERVE_BYTES) > wss)
     else:
         mode, ok = "no-fit", False
 
     # ---- recommended flags --------------------------------------------
     if needs_bump and ram:
-        want = min(peak + 0.5 * _GB, raisable)
+        # A cap of peak + 0.5 GB runs the model, but turboquant-serve's auto
+        # prompt-cache budget is (cap - live memory - 2 GiB), so at that cap it
+        # evicts every retained conversation and each long follow-up re-prefills
+        # from scratch. Measured: Flash-Next with --ngram-offload at a 48 GB-class
+        # cap of peak + 0.5 GB re-prefilled 16K on every turn (61-235 s instead
+        # of 0.27 s). Ask for room to keep one context's cache when the machine
+        # has it; otherwise give the minimum and say what it costs.
+        serve_want = peak + kv_total + _PROMPT_CACHE_RESERVE_BYTES
+        if raisable and serve_want <= raisable:
+            want = serve_want
+        else:
+            want = min(peak + 0.5 * _GB, raisable)
+            if kv_total:
+                warnings.append("the recommended wired cap has no room for "
+                                "turboquant-serve to keep a long prompt cache: "
+                                "expect every long follow-up to re-read its "
+                                "whole context")
         mb = int(want / (1024**2))
         flags.append(f"sudo sysctl -w iogpu.wired_limit_mb={mb}   "
                      f"(raises the {_gb(wss)} Metal cap — the binding limit "
@@ -629,15 +666,19 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         # this machine has right now, and a default must not assume the user
         # ran a sysctl they were never told to run. Getting that wrong is how
         # this line came to advertise 9.1 GB where the loader picked 5.89.
-        budget_bytes = auto_cache_budget(wss or 0, fp["resident_bytes"],
+        budget_bytes = auto_cache_budget(wss or 0, wired_resident,
                                          fp["expert_bytes"])
-        peak_bytes = projected_peak_bytes(budget_bytes, fp["resident_bytes"])
+        peak_bytes = projected_peak_bytes(budget_bytes, wired_resident)
         flags.append(f"--cache-budget-gb auto   (~{budget_bytes / _GB:.1f} GB "
                      f"here, peaking near {peak_bytes / _GB:.1f} GB)")
     if chosen != 2048:
         flags.append(f"--prefill-step-size {chosen}   (the default 2048 needs "
                      f"{_gb(prefill_workspace_bytes(cfg, context, 2048, cfg.get('quantization'), is_moe))} of "
                      f"transient workspace at this context)")
+    if fp["ngram_bytes"] and not ngram_offload and (needs_bump or mode != "resident"):
+        flags.append(f"--ngram-offload   (serves the {_gb(fp['ngram_bytes'])} n-gram "
+                     "table from disk instead of GPU memory, bit-identical output; "
+                     "re-run plan with it to see the new fit)")
     if kv_bits:
         flags.append(f"--kv-bits {kv_bits}")
     elif kv_total > 1.0 * _GB:
@@ -679,6 +720,8 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         "projection": {
             "context": context,
             "kv_bits": kv_bits,
+            "ngram_offload": bool(ngram_offload),
+            "ngram_offloaded_bytes": offloaded,
             "kv_bytes_per_token": kv_pt,
             "kv_bytes": kv_total,
             "kv_note": kv_note,
@@ -723,6 +766,9 @@ def render(p: dict) -> str:
         L.append(f"  {'  experts':<20} {_gb(m['expert_bytes'])}  (streamable)")
         L.append(f"  {'  resident':<20} {_gb(m['resident_bytes'])}  "
                  f"(attention, embeddings, routers)")
+    if m.get("ngram_bytes"):
+        L.append(f"  {'  n-gram table':<20} {_gb(m['ngram_bytes'])}  "
+                 f"(movable off the GPU with --ngram-offload)")
     L.append("")
     L.append("Machine" + ("  (assumed, not this one)" if mach["assumed"] else ""))
     L.append(f"  {'Metal working set':<20} {_gb(mach['wss_bytes'])}   "
@@ -730,7 +776,12 @@ def render(p: dict) -> str:
     L.append(f"  {'system RAM':<20} {_gb(mach['ram_bytes'])}")
     L.append("")
     L.append(f"Projection at {pr['context']:,} tokens of context")
-    L.append(f"  {'weights':<20} {_gb(m['total_bytes'])}")
+    if pr["ngram_offloaded_bytes"]:
+        L.append(f"  {'weights':<20} {_gb(m['total_bytes'] - pr['ngram_offloaded_bytes'])}"
+                 f"  (+ {_gb(pr['ngram_offloaded_bytes'])} n-gram table in the page "
+                 "cache, not wired)")
+    else:
+        L.append(f"  {'weights':<20} {_gb(m['total_bytes'])}")
     kvb = f"  ({pr['kv_bytes_per_token']/1024:.1f} KB/token, {pr['kv_note']})" \
         if pr["kv_bytes_per_token"] else f"  ({pr['kv_note']})"
     L.append(f"  {'KV cache':<20} {_gb(pr['kv_bytes'])}{kvb}")
@@ -917,6 +968,9 @@ def _common_args(ap):
     ap.add_argument("--ram-gb", type=float, default=None,
                     help="assume this much system RAM, as the machine is sold "
                          "(--ram-gb 16 = a 16 GB Mac = 17.18e9 bytes)")
+    ap.add_argument("--ngram-offload", action="store_true",
+                    help="project with the n-gram table served from disk "
+                         "(Qwen3.8-Flash-Next), as the loaders' --ngram-offload does")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
 
 
@@ -931,7 +985,8 @@ def main(argv=None) -> int:
         path, remote = _resolve(args.model)
         p = build_plan(path, context=args.context, kv_bits=args.kv_bits,
                        step=args.prefill_step_size, wired_gb=args.wired_gb,
-                       ram_gb=args.ram_gb, remote=remote)
+                       ram_gb=args.ram_gb, remote=remote,
+                       ngram_offload=args.ngram_offload)
     except FileNotFoundError as e:
         print(f"error: {e}", file=sys.stderr)
         return _EXIT_UNFIT
@@ -953,7 +1008,8 @@ def doctor_main(argv=None) -> int:
         path, remote = _resolve(args.model)
         p = build_plan(path, context=args.context, kv_bits=args.kv_bits,
                        step=args.prefill_step_size, wired_gb=args.wired_gb,
-                       ram_gb=args.ram_gb, remote=remote)
+                       ram_gb=args.ram_gb, remote=remote,
+                       ngram_offload=args.ngram_offload)
     except Exception as e:
         if args.json:
             print(json.dumps({"schema": 1, "checks": [

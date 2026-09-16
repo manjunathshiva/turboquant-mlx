@@ -177,6 +177,14 @@ def _streamed_expert_bytes(reader) -> int:
     return total
 
 
+def offloaded_ngram_bytes(model) -> int:
+    """Bytes of n-gram tables ``--ngram-offload`` left on disk (0 without it)."""
+    from turboquant_mlx.ngram_offload import HostShardedEmbedding
+
+    return sum(m.nbytes for _, m in model.named_modules()
+               if isinstance(m, HostShardedEmbedding))
+
+
 def _auto_cache_budget(model_bytes: int, expert_bytes: int,
                        wss_bytes: int) -> int:
     """Pure budget math (unit-testable without a model).
@@ -273,7 +281,8 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
                    pin_file: str | None = None, max_active_experts: int = 4,
                    use_page_cache: bool | None = None, use_hotlist: bool = True,
                    preload_pins: bool = True, wire_memory: bool = False,
-                   learn_experts: bool = True, usage_file: str | None = None):
+                   learn_experts: bool = True, usage_file: str | None = None,
+                   ngram_offload: bool = False):
     """Returns (model, tokenizer, cache).
 
     cache_budget_gb bounds total resident expert memory (LRU-evicted). Pass
@@ -311,15 +320,22 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     model fits comfortably in RAM (~2.4x faster decode), F_NOCACHE when it does
     not (avoids page-cache thrash on a memory-constrained machine). True/False
     force it.
+    ngram_offload serves an n-gram embedding table from memory-mapped files instead
+    of GPU memory (see ``turboquant_mlx.ngram_offload``); bit-identical output.
     """
     local_path = str(resolve_model_path(model_path))
     if use_page_cache is None:
         use_page_cache = _auto_page_cache(local_path)
-    model, tok = load_turboquant(local_path, lazy=True, fast=fast)
+    model, tok = load_turboquant(local_path, lazy=True, fast=fast,
+                                 ngram_offload=ngram_offload)
     reader = SafetensorsExpertReader(local_path, use_page_cache=use_page_cache)
 
     expert_bytes = _streamed_expert_bytes(reader)
-    resident_bytes = max(0, _model_file_bytes(local_path) - expert_bytes)
+    # An offloaded n-gram table is in the files but not in wired memory; count it
+    # as resident and the auto budget comes out ~18 GB smaller than plan.py
+    # (which subtracts it) says, which is the drift plan's comments warn about.
+    resident_bytes = max(0, _model_file_bytes(local_path) - expert_bytes
+                         - offloaded_ngram_bytes(model))
     auto = isinstance(cache_budget_gb, str) and cache_budget_gb.lower() == "auto"
     if isinstance(cache_budget_gb, str) and not auto:
         cache_budget_gb = float(cache_budget_gb)

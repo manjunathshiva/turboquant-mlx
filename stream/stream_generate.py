@@ -111,6 +111,8 @@ def main():
     p.add_argument("--no-page-cache", dest="use_page_cache", action="store_false",
                    help="Force F_NOCACHE (page cache off). Default: auto by model-size-vs-RAM.")
     p.add_argument("--fast", action="store_true", help="Disable QJL correction for faster decode.")
+    p.add_argument("--ngram-offload", action="store_true",
+                   help="Serve an n-gram embedding table (Qwen3.8-Flash-Next) from memory-mapped files on the CPU instead of GPU memory: ~17.9 GiB less resident on the 2-bit build, bit-identical output. Keep the model directory in place while the model is loaded. No effect on models without such a table.")
     p.add_argument("--no-chat-template", action="store_true")
     p.add_argument("--top-p", type=float, default=None,
                    help="Nucleus sampling threshold. Defaults to the model's "
@@ -143,7 +145,7 @@ def main():
         pin_file=args.pin_file, max_active_experts=args.max_active_experts,
         use_page_cache=args.use_page_cache, use_hotlist=args.use_hotlist,
         learn_experts=args.learn_experts, usage_file=args.usage_file,
-        wire_memory=args.wire_memory,
+        wire_memory=args.wire_memory, ngram_offload=args.ngram_offload,
     )
     print(f"[stream] loaded in {time.time() - t0:.1f}s | resident RSS={_rss_gb():.2f} GB")
 
