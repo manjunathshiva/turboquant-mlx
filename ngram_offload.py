@@ -115,8 +115,14 @@ _ROW_BLOCK = 16_384
 class _Shard:
     """One shard's tensors, memory-mapped, and how to turn rows into float32."""
 
-    def __init__(self, files, prefix: str, index: dict, dim: int):
+    def __init__(self, files, prefix: str, index: dict, dim: int,
+                 rows: int | None = None):
         self.weight = _map(files, f"{prefix}.weight", index)
+        # Check the shape here, at load: a table with the wrong row count would
+        # otherwise load cleanly and fail with an IndexError on the first token.
+        if self.weight.ndim != 2 or (rows is not None and self.weight.shape[0] != rows):
+            raise ValueError(f"{prefix}: weight has shape {list(self.weight.shape)}, "
+                             f"expected {rows if rows is not None else 'N'} rows")
         self.scale_key = f"{prefix}.scales"
         if self.scale_key in index:
             self.scales = _map(files, self.scale_key, index)
@@ -147,6 +153,11 @@ class _Shard:
             self.mask = np.uint32((1 << self.bits) - 1)
         else:
             self.scales = None
+            if self.weight.shape[-1] != dim:
+                raise ValueError(f"{prefix}: weight is {self.weight.shape[-1]} wide, "
+                                 f"the model's table is {dim}")
+            if index[f"{prefix}.weight"][1]["dtype"] == "U32":
+                raise ValueError(f"{prefix}: packed U32 weight without scales")
             self.weight_bf16 = index[f"{prefix}.weight"][1]["dtype"] == "BF16"
         self.dim = dim
         self.nbytes = sum(a.nbytes for a in (self.weight, self.scales, getattr(self, "biases", None))
@@ -230,7 +241,7 @@ def offload_ngram_tables(model, weights: dict, weight_files) -> int:
             continue
         table = module.ngram_embedding
         prefix = f"{name}.ngram_embedding"
-        shards = [_Shard(files, f"{prefix}.shard_{i}", index, table.dim)
+        shards = [_Shard(files, f"{prefix}.shard_{i}", index, table.dim, table.rows)
                   for i in range(table.n_shards)]
         for i in range(table.n_shards):
             for part in ("weight", "scales", "biases"):
