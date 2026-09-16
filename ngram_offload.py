@@ -91,10 +91,10 @@ def round_to_bf16(x: np.ndarray) -> np.ndarray:
 
     BF16 keeps 7 mantissa bits below the leading one, with float32's exponent range.
     Scaling by a power of two is exact, so rounding to a multiple of the value's own
-    step does the job. Float32 subnormals go to a signed zero, as MLX's cast does
-    on an M4 under macOS 26; the macOS 14 CI runners round them instead, so the
-    cast is not portable there. A dequantized row lands in that range only if its
-    scale and bias are themselves near 1e-38, which no quantized table has.
+    step does the job. Float32 subnormals go to a signed zero, as MLX's GPU cast
+    does (its CPU cast rounds them instead). A dequantized row lands in that range
+    only if its scale and bias are themselves near 1e-38, which no quantized table
+    has.
     """
     x32 = np.asarray(x, dtype=np.float32)
     x = x32.astype(np.float64)

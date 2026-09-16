@@ -30,21 +30,27 @@ def _index(path):
     return {k: (path, m, data_start) for k, m in header.items()}
 
 
-def test_bf16_rounding_matches_mlx_cast():
-    """Over the normal BF16 range, including exact zeros and infinities.
+@pytest.mark.parametrize("device", ["gpu", "cpu"])
+def test_bf16_rounding_matches_mlx_cast(device):
+    """Normal values (with exact ties and near-overflow), zeros and infinities.
 
-    Subnormals and values that overflow BF16 are left out on purpose: MLX's cast
-    handles them differently across GPU generations (M4 on macOS 26 zeroes float32
-    subnormals; the macOS 14 CI runners do not), and a dequantized n-gram row never
-    produces either, since scales are normal BF16 and the result is q*s+b.
+    Float32 subnormals are left out on purpose: MLX's GPU cast zeroes them and its
+    CPU cast rounds them, so no single answer is "MLX". A dequantized n-gram row
+    never contains one (it would need a scale and bias near 1e-38).
     """
+    if device == "gpu" and not mx.metal.is_available():
+        pytest.skip("no Metal device")
     rng = np.random.default_rng(1)
-    x = (rng.normal(size=50_000) * 10.0 ** rng.uniform(-37, 37, 50_000)).astype(np.float32)
-    x = np.concatenate([x, np.array([0.0, -0.0, np.inf, -np.inf], np.float32)])
-    with np.errstate(all="ignore"):
+    x = (rng.normal(size=50_000) * 10.0 ** rng.uniform(-37, 38, 50_000)).astype(np.float32)
+    ties = np.array([0x3F808000, 0x3F818000, 0x40008000, 0x7F7F8000, 0x7F7FFFFF],
+                    np.uint32).view(np.float32)
+    x = np.concatenate([x, ties, np.array([0.0, -0.0, np.inf, -np.inf], np.float32)])
+    x = x[((x.view(np.uint32) & 0x7F800000) != 0) | (x == 0)]
+    with mx.stream(getattr(mx, device)), np.errstate(all="ignore"):
         want = mx.array(x).astype(mx.bfloat16).astype(mx.float32)
         mx.eval(want)
-    assert np.array_equal(round_to_bf16(x).view(np.uint32), _bits(want))
+        got = round_to_bf16(x)
+    assert np.array_equal(got.view(np.uint32), _bits(want))
 
 
 def test_bf16_widening_is_bit_exact_including_specials():

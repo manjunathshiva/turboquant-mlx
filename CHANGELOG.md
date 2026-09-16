@@ -20,9 +20,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   Getting bit-exact needed MLX's exact arithmetic: `nn.QuantizedEmbedding`
   computes `q * scale + bias` as a fused float32 operation, then rounds into the
-  scales' dtype, and the CPU path reproduces both. (Only the cast of float32
-  subnormals was seen to vary by GPU generation, and a dequantized row never
-  contains one.) The shipped 2-bit table never hits the rounding; 4- and
+  scales' dtype, and the CPU path reproduces both. (MLX's GPU and CPU casts
+  disagree only on float32 subnormals, which a dequantized row never contains.) The shipped 2-bit table never hits the rounding; 4- and
   8-bit and float16 tables do, and are tested. 3- and 6-bit tables are refused.
   Idea from ddalcu/mlx-serve (MIT), which memory-maps its table the same way.
 - **`turboquant-plan --ngram-offload`** projects with the table in the page cache,
