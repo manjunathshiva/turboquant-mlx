@@ -91,18 +91,20 @@ def round_to_bf16(x: np.ndarray) -> np.ndarray:
 
     BF16 keeps 7 mantissa bits below the leading one, with float32's exponent range.
     Scaling by a power of two is exact, so rounding to a multiple of the value's own
-    step does the job. MLX's cast sends float32 subnormals to a signed zero rather
-    than rounding them, so this does too.
+    step does the job. Float32 subnormals go to a signed zero, as MLX's cast does
+    on an M4 under macOS 26; the macOS 14 CI runners round them instead, so the
+    cast is not portable there. A dequantized row lands in that range only if its
+    scale and bias are themselves near 1e-38, which no quantized table has.
     """
     x32 = np.asarray(x, dtype=np.float32)
     x = x32.astype(np.float64)
     _, k = np.frexp(x)
     step = np.ldexp(1.0, k - 8)
+    subnormal = (x32.view(np.uint32) & 0x7F800000) == 0
     with np.errstate(over="ignore", invalid="ignore"):
         r = np.round(x / step) * step
         r = np.where(np.isfinite(x), r, x)
-    subnormal = (x32.view(np.uint32) & 0x7F800000) == 0
-    return np.where(subnormal, np.copysign(0.0, x), r).astype(np.float32)
+        return np.where(subnormal, np.copysign(0.0, x), r).astype(np.float32)
 
 
 # Bounds the float64 temporaries of a long prefill (256K rows x 160 x 8 bytes would
@@ -125,13 +127,22 @@ class _Shard:
             if groups == 0 or dim % groups:
                 raise ValueError(f"{prefix}: {groups} groups do not divide width {dim}")
             self.group_size = dim // groups
-            self.bits = self.weight.shape[-1] * 32 // dim
-            if 32 % self.bits:
+            packed_bits = self.weight.shape[-1] * 32
+            if packed_bits % dim:
+                raise ValueError(f"{prefix}: {self.weight.shape[-1]} packed words "
+                                 f"do not hold a whole number of bits per value "
+                                 f"for width {dim}")
+            self.bits = packed_bits // dim
+            if self.bits not in (2, 4, 8):
                 # 3- and 6-bit values straddle word boundaries; not needed for any
                 # shipped table, so refuse rather than guess the bit order.
                 raise NotImplementedError(
                     f"{prefix}: {self.bits}-bit tables are not supported off the GPU "
                     "(2, 4 and 8 are)")
+            if not (self.scales.shape[0] == self.biases.shape[0]
+                    == self.weight.shape[0]) or self.biases.shape != self.scales.shape:
+                raise ValueError(f"{prefix}: weight, scales and biases disagree on "
+                                 "rows or groups")
             self.shifts = np.arange(0, 32, self.bits, dtype=np.uint32)
             self.mask = np.uint32((1 << self.bits) - 1)
         else:

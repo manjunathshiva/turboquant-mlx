@@ -13,15 +13,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   safetensors files, memory-mapped, and each step's rows (16 per token) are
   dequantized on the CPU. It needs no reconvert. On `tq4a-tq2e-g64`, MLX active
   memory drops **52.01 → 34.13 GiB**, and logits over 1,024 WikiText-2 positions are
-  **bit-identical**. Serving on a 64 GB M4 Max, the build stopped swapping (0
-  swapouts inside requests, against 621K-706K without the flag). Warm decode stays
+  **bit-identical**. Serving on a 64 GB M4 Max: 0 swapouts inside requests,
+  against 621K-706K without the flag. Warm decode stays
   within ~2% on a fresh machine, and a cold 16K prompt takes 70.1 s instead of 62.8
   s while the table's rows are first read from SSD.
 
   Getting bit-exact needed MLX's exact arithmetic: `nn.QuantizedEmbedding`
   computes `q * scale + bias` as a fused float32 operation, then rounds into the
-  scales' dtype, and its BF16 cast sends float32 subnormals to zero. The CPU path
-  reproduces all three. The shipped 2-bit table never hits the rounding; 4- and
+  scales' dtype, and the CPU path reproduces both. (Only the cast of float32
+  subnormals was seen to vary by GPU generation, and a dequantized row never
+  contains one.) The shipped 2-bit table never hits the rounding; 4- and
   8-bit and float16 tables do, and are tested. 3- and 6-bit tables are refused.
   Idea from ddalcu/mlx-serve (MIT), which memory-maps its table the same way.
 - **`turboquant-plan --ngram-offload`** projects with the table in the page cache,

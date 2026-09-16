@@ -31,9 +31,16 @@ def _index(path):
 
 
 def test_bf16_rounding_matches_mlx_cast():
+    """Over the normal BF16 range, including exact zeros and infinities.
+
+    Subnormals and values that overflow BF16 are left out on purpose: MLX's cast
+    handles them differently across GPU generations (M4 on macOS 26 zeroes float32
+    subnormals; the macOS 14 CI runners do not), and a dequantized n-gram row never
+    produces either, since scales are normal BF16 and the result is q*s+b.
+    """
     rng = np.random.default_rng(1)
-    x = (rng.normal(size=50_000) * 10.0 ** rng.uniform(-40, 38, 50_000)).astype(np.float32)
-    x = np.concatenate([x, np.array([0.0, -0.0, np.inf, -np.inf, 3.4e38, 1e-44], np.float32)])
+    x = (rng.normal(size=50_000) * 10.0 ** rng.uniform(-37, 37, 50_000)).astype(np.float32)
+    x = np.concatenate([x, np.array([0.0, -0.0, np.inf, -np.inf], np.float32)])
     with np.errstate(all="ignore"):
         want = mx.array(x).astype(mx.bfloat16).astype(mx.float32)
         mx.eval(want)
@@ -94,6 +101,23 @@ def test_three_bit_tables_are_refused_not_guessed(tmp_path):
                                     "t.biases": emb.biases})
     with pytest.raises(NotImplementedError, match="3-bit"):
         _Shard([path], "t", _index(path), 64)
+
+
+@pytest.mark.parametrize("words, dim, err", [
+    (4, 128, NotImplementedError),   # 128 bits / 128 values = 1 bit: not a shipped width
+    (5, 128, ValueError),            # 160 bits / 128 values is not whole
+    (64, 128, NotImplementedError),  # 16 bits per value
+])
+def test_packed_widths_other_than_2_4_8_are_refused(tmp_path, words, dim, err):
+    path = tmp_path / "shard.safetensors"
+    groups = dim // 32
+    mx.save_safetensors(str(path), {
+        "t.weight": mx.zeros((4, words), dtype=mx.uint32),
+        "t.scales": mx.ones((4, groups), dtype=mx.bfloat16),
+        "t.biases": mx.zeros((4, groups), dtype=mx.bfloat16),
+    })
+    with pytest.raises(err):
+        _Shard([path], "t", _index(path), dim)
 
 
 def test_a_missing_shard_is_a_clear_error(tmp_path):

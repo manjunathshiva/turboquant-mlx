@@ -1699,7 +1699,7 @@ runs fully resident on a 64 GB Mac:
 | peak | 56.30 GB short prompt · 59.43 GB at 15.7K tokens · 60.93 GB at 29.8K |
 | WikiText-2 perplexity (32 × 512 tokens) | 9.31 |
 | vision | reading text, left/right and counting: 3/3 on mlx-vlm 0.6.14 and 0.7.0 |
-| with `--ngram-offload` | **34.13 GiB** resident instead of 52.01 (the 17.88 GiB n-gram table stays in the page cache), bit-identical output, no swapping on 64 GB |
+| with `--ngram-offload` | **34.13 GiB** resident instead of 52.01 (the 17.88 GiB n-gram table stays in the page cache), bit-identical output, 0 swapouts inside requests on 64 GB |
 | streaming instead (12 GB expert cache) | 34.4 GB peak, 7.6 tok/s, no `sysctl` |
 
 The tiers: 4-bit codebook attention and `lm_head`; **2-bit codebook routed
@@ -1754,12 +1754,12 @@ directory in place while it is loaded**, since the rows are read from those file
 
 *Under a 48 GB-class GPU cap* (tested by lowering `iogpu.wired_limit_mb` to 39,648
 on the same 64 GB Mac, so the page cache still had 64 GB of RAM behind it; not a
-48 GB Mac), it loads and chats at 17.3 / 16.8 tok/s with no swapping. A 16K
+48 GB Mac), it loads and chats at 17.3 / 16.8 tok/s with 0 swapouts inside requests. A 16K
 context is answered correctly, but at that cap the server could not keep its
 prompt cache, so every repeat re-read the whole prompt (61–235 s). At the cap `turboquant-plan
 --ngram-offload` now recommends (41,603 MB), the cache holds: a cold 16K prompt
-answers in 62.3 s and each repeat in 0.27 s, decoding at 17.6 tok/s with no
-swapping.
+answers in 62.3 s and each repeat in 0.27 s, decoding at 17.6 tok/s with 0
+swapouts inside requests.
 
 Three things to know:
 
