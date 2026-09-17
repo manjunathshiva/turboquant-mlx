@@ -6,6 +6,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`turboquant-plan` now suggests `--ngram-offload` past the 85%-of-RAM warning,
+  not only when a fit needs the wired cap raised or fails.** Qwen3.8-Flash-Next on a
+  64 GB Mac with the cap already raised projects as resident at ~86% of RAM, so
+  the flag was never suggested. That setup swapped 621K-706K pages inside
+  requests in both sessions measured; with the table offloaded it swapped none.
+  The 85% warning also names the flag when a table is present.
+
+### Changed
+- **A 2-token forward through a polar linear layer runs `polar_qmv` once per token
+  instead of one `polar_qmm` call.** `polar_qmm` has a fixed cost that makes 2
+  tokens cost 2.0-3.5x one token; two `polar_qmv` calls cost 1.0-1.95x (Qwen3.8-27B
+  tq4 layers, M4 Max). Output is bit-identical, being the same kernel single-token
+  decode uses. The MTP speculative verify is the 2-token case: on Qwen3.8-27B tq4
+  with its MTP head, speculative decoding moves from **0.58-0.63x to 0.84-0.92x
+  greedy** (snapshot / state rollback, 3 prompts x 64 tokens, two alternating
+  rounds, tokens identical to greedy). It is still slower than greedy. A kernel that
+  reads each weight row once for both tokens was built and measured at the same cost
+  as two `polar_qmv` calls, so it was not kept. `TURBOQUANT_QMV_MAX_ROWS` overrides
+  the cutoff (default 2).
+
 ## [0.27.0] - 2026-09-17
 
 ### Added

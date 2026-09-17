@@ -675,7 +675,13 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         flags.append(f"--prefill-step-size {chosen}   (the default 2048 needs "
                      f"{_gb(prefill_workspace_bytes(cfg, context, 2048, cfg.get('quantization'), is_moe))} of "
                      f"transient workspace at this context)")
-    if fp["ngram_bytes"] and not ngram_offload and (needs_bump or mode != "resident"):
+    # Also past the load cliff, not only when the fit needs a bump or fails: a
+    # resident Flash-Next at 86% of a 64 GB Mac's RAM "fits" on paper and swapped
+    # 621K-706K pages inside requests in both sessions measured, while the same
+    # server with the table offloaded swapped none.
+    past_cliff = bool(ram and mode == "resident" and peak / ram > _MAC_LOAD_CLIFF)
+    if fp["ngram_bytes"] and not ngram_offload and (needs_bump or mode != "resident"
+                                                     or past_cliff):
         flags.append(f"--ngram-offload   (serves the {_gb(fp['ngram_bytes'])} n-gram "
                      "table from disk instead of GPU memory, bit-identical output; "
                      "re-run plan with it to see the new fit)")
@@ -691,10 +697,12 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
     if mode == "resident" and ceiling and peak > ceiling * 0.93:
         warnings.append("tight: under ~7% headroom — a longer context or a "
                         "background app can still push it over")
-    if mode == "resident" and ram and peak / ram > _MAC_LOAD_CLIFF:
+    if past_cliff:
+        hint = ("; --ngram-offload moves the n-gram table out of GPU memory into the page cache"
+                if fp["ngram_bytes"] and not ngram_offload else "")
         warnings.append(f"peak is {peak / ram:.1%} of system RAM: past 85%, Mac "
                         "loads fail far more often in field data (69% succeed at "
-                        "85-100%, 56% beyond); close other apps first")
+                        f"85-100%, 56% beyond); close other apps first{hint}")
 
     return {
         "schema": 1,

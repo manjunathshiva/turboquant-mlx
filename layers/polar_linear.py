@@ -34,6 +34,23 @@ from turboquant_mlx.kernels.polar_qmm import polar_qmm
 # materializing it costs nothing anyway.
 _QMM_MAX_TOKENS = int(os.environ.get("TURBOQUANT_QMM_MAX_TOKENS", "256"))
 _QMM_MIN_OUTPUT_DIMS = 512
+# Up to this many vectors go through polar_qmv one row at a time instead of one
+# polar_qmm call. polar_qmm has a large fixed cost that a 2-token speculative
+# verify pays in full. Measured on Qwen3.8-27B tq4 (M4 Max), as a multiple of one
+# polar_qmv:
+#
+#   shape (out, in)     2 x qmv   qmm S=2   | per-row / qmm at S=3   S=4
+#   lm_head 248320x5120  1.95x     2.44x    |                1.19   1.57
+#   mlp up  17408x5120   1.84x     2.42x    |                1.00   1.27
+#   mlp dn   5120x17408  1.83x     3.44x    |                0.70   0.87
+#   attn    12288x5120   1.59x     2.21x    |                1.08   1.35
+#   small    1024x5120   1.06x     1.97x    |                0.66   0.72
+#
+# Per-row wins at S=2 on every shape; from S=3 it depends on the shape, so only
+# S=2 is routed here. A kernel that reads each weight row once for both vectors was
+# built and measured at the same cost as two polar_qmv calls (1.45-1.90x), so the
+# work is compute, not weight reads, and it was dropped.
+_QMV_MAX_ROWS = int(os.environ.get("TURBOQUANT_QMV_MAX_ROWS", "2"))
 
 
 class PolarQuantizedLinear(nn.Module):
@@ -127,6 +144,15 @@ class PolarQuantizedLinear(nn.Module):
                 x_vec, self.bits, self.group_size,
             )
             y = y.reshape(*orig_shape[:-1], -1) if x.ndim >= 2 else y
+        elif n_vectors <= _QMV_MAX_ROWS:
+            orig_shape = x.shape
+            rows = x.reshape(n_vectors, orig_shape[-1])
+            y = mx.stack([
+                polar_qmv(self.weight, self.scales, self.codebook,
+                          rows[r], self.bits, self.group_size)
+                for r in range(n_vectors)
+            ])
+            y = y.reshape(*orig_shape[:-1], -1)
         elif (n_vectors <= _QMM_MAX_TOKENS
                 and self.output_dims >= _QMM_MIN_OUTPUT_DIMS):
             orig_shape = x.shape
