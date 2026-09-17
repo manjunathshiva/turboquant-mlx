@@ -6,6 +6,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **`turboquant-plan` now suggests `--ngram-offload` past the 85%-of-RAM warning,
+  not only when a fit needs the wired cap raised or fails.** Qwen3.8-Flash-Next on a
+  64 GB Mac with the cap already raised projects as resident at ~86% of RAM, so
+  the flag was never suggested. That setup swapped 621K-706K pages inside
+  requests in both sessions measured; with the table offloaded it swapped none.
+  The 85% warning also names the flag when a table is present.
+
 ## [0.27.0] - 2026-09-17
 
 ### Added

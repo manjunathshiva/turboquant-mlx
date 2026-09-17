@@ -838,6 +838,24 @@ class TestNgramOffload:
         on = build_plan(p, wired_gb=51.54, ram_gb=64, context=4096, ngram_offload=True)
         assert not any(f.startswith("--ngram-offload") for f in on["flags"])
 
+    def test_the_flag_is_recommended_past_the_load_cliff_even_when_it_fits(self, tmp_path):
+        """Flash-Next on a 64 GB Mac with the cap already raised: resident, no bump
+        needed, but at ~86% of RAM, the setup that swapped in practice."""
+        p = _write_model(tmp_path, Q35, {
+            "model.layers.0.self_attn.q_proj.weight": ("U32", (int(39 * GB / 4),)),
+            "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight":
+                ("U32", (int(19 * GB / 4),)),
+        })
+        pl = build_plan(p, wired_gb=63.35, ram_gb=64, context=4096)
+        assert pl["verdict"]["mode"] == "resident"
+        assert not pl["verdict"]["needs_wired_bump"]
+        assert pl["projection"]["ram_share"] > 0.85
+        assert any(f.startswith("--ngram-offload") for f in pl["flags"])
+        assert any("--ngram-offload takes the n-gram table out" in w for w in pl["warnings"])
+        on = build_plan(p, wired_gb=63.35, ram_gb=64, context=4096, ngram_offload=True)
+        assert not any(f.startswith("--ngram-offload") for f in on["flags"])
+        assert not any("of system RAM" in w for w in on["warnings"])
+
     def test_models_without_a_table_are_unchanged(self, tmp_path):
         p = _write_model(tmp_path, Q35, {
             "model.layers.0.self_attn.q_proj.weight": ("U32", (int(5 * GB / 4),)),
@@ -846,6 +864,7 @@ class TestNgramOffload:
         b = build_plan(p, wired_gb=10.5, ram_gb=16, ngram_offload=True)
         assert a["projection"]["peak_bytes"] == b["projection"]["peak_bytes"]
         assert not any("ngram" in f for f in a["flags"])
+        assert not any("ngram" in w for w in a["warnings"])
 
 
 class TestWiredCapLeavesRoomForThePromptCache:
