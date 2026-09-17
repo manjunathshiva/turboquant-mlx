@@ -115,14 +115,30 @@ _ROW_BLOCK = 16_384
 class _Shard:
     """One shard's tensors, memory-mapped, and how to turn rows into float32."""
 
-    def __init__(self, files, prefix: str, index: dict, dim: int):
+    def __init__(self, files, prefix: str, index: dict, dim: int,
+                 rows: int | None = None):
         self.weight = _map(files, f"{prefix}.weight", index)
+        # Check the shape here, at load: a table with the wrong row count would
+        # otherwise load cleanly and fail with an IndexError on the first token.
+        if self.weight.ndim != 2 or (rows is not None and self.weight.shape[0] != rows):
+            raise ValueError(f"{prefix}: weight has shape {list(self.weight.shape)}, "
+                             f"expected {rows if rows is not None else 'N'} rows")
         self.scale_key = f"{prefix}.scales"
         if self.scale_key in index:
             self.scales = _map(files, self.scale_key, index)
             self.biases = _map(files, f"{prefix}.biases", index)
             self.scale_dtype = index[self.scale_key][1]["dtype"]
             self.bias_dtype = index[f"{prefix}.biases"][1]["dtype"]
+            weight_dtype = index[f"{prefix}.weight"][1]["dtype"]
+            if weight_dtype != "U32":
+                raise ValueError(f"{prefix}: quantized weight is {weight_dtype}, "
+                                 "expected packed U32")
+            floats = ("F32", "F16", "BF16")
+            if (self.scale_dtype not in floats or self.bias_dtype not in floats
+                    or self.scales.ndim != 2 or self.biases.ndim != 2):
+                raise ValueError(f"{prefix}: scales and biases must be 2-D floats, got "
+                                 f"{self.scale_dtype} {list(self.scales.shape)} and "
+                                 f"{self.bias_dtype} {list(self.biases.shape)}")
             groups = self.scales.shape[-1]
             if groups == 0 or dim % groups:
                 raise ValueError(f"{prefix}: {groups} groups do not divide width {dim}")
@@ -147,6 +163,11 @@ class _Shard:
             self.mask = np.uint32((1 << self.bits) - 1)
         else:
             self.scales = None
+            if self.weight.shape[-1] != dim:
+                raise ValueError(f"{prefix}: weight is {self.weight.shape[-1]} wide, "
+                                 f"the model's table is {dim}")
+            if index[f"{prefix}.weight"][1]["dtype"] == "U32":
+                raise ValueError(f"{prefix}: packed U32 weight without scales")
             self.weight_bf16 = index[f"{prefix}.weight"][1]["dtype"] == "BF16"
         self.dim = dim
         self.nbytes = sum(a.nbytes for a in (self.weight, self.scales, getattr(self, "biases", None))
@@ -230,7 +251,7 @@ def offload_ngram_tables(model, weights: dict, weight_files) -> int:
             continue
         table = module.ngram_embedding
         prefix = f"{name}.ngram_embedding"
-        shards = [_Shard(files, f"{prefix}.shard_{i}", index, table.dim)
+        shards = [_Shard(files, f"{prefix}.shard_{i}", index, table.dim, table.rows)
                   for i in range(table.n_shards)]
         for i in range(table.n_shards):
             for part in ("weight", "scales", "biases"):

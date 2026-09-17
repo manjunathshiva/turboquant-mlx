@@ -126,6 +126,45 @@ def test_packed_widths_other_than_2_4_8_are_refused(tmp_path, words, dim, err):
         _Shard([path], "t", _index(path), dim)
 
 
+def test_a_table_with_the_wrong_row_count_fails_at_load(tmp_path):
+    """Not at the first token, as an IndexError from deep inside generation."""
+    emb = nn.QuantizedEmbedding.from_embedding(_embedding(10, 32, mx.bfloat16),
+                                               group_size=32, bits=2)
+    path = tmp_path / "shard.safetensors"
+    mx.save_safetensors(str(path), {"t.weight": emb.weight, "t.scales": emb.scales,
+                                    "t.biases": emb.biases})
+    _Shard([path], "t", _index(path), 32, rows=10)
+    with pytest.raises(ValueError, match="expected 12 rows"):
+        _Shard([path], "t", _index(path), 32, rows=12)
+
+
+def test_an_unquantized_table_of_the_wrong_width_fails_at_load(tmp_path):
+    path = tmp_path / "shard.safetensors"
+    mx.save_safetensors(str(path), {"t.weight": mx.zeros((10, 16))})
+    with pytest.raises(ValueError, match="16 wide"):
+        _Shard([path], "t", _index(path), 32)
+
+
+@pytest.mark.parametrize("tensors, match", [
+    ({"t.weight": mx.zeros((4, 1), dtype=mx.float16),
+      "t.scales": mx.ones((4, 1), dtype=mx.float16),
+      "t.biases": mx.zeros((4, 1), dtype=mx.float16)}, "expected packed U32"),
+    ({"t.weight": mx.zeros((4, 1), dtype=mx.uint32),
+      "t.scales": mx.ones((4, 1), dtype=mx.uint32),
+      "t.biases": mx.zeros((4, 1), dtype=mx.float16)}, "2-D floats"),
+    ({"t.weight": mx.zeros((4, 1), dtype=mx.uint32),
+      "t.scales": mx.ones((4,), dtype=mx.float16),
+      "t.biases": mx.zeros((4,), dtype=mx.float16)}, "2-D floats"),
+])
+def test_quantized_tensor_contracts_are_checked_at_load(tmp_path, tensors, match):
+    """Integer scales would be widened as integers and dequantize to wrong values;
+    a float weight or 1-D scales would fail later, inside a lookup."""
+    path = tmp_path / "shard.safetensors"
+    mx.save_safetensors(str(path), tensors)
+    with pytest.raises(ValueError, match=match):
+        _Shard([path], "t", _index(path), 16)
+
+
 def test_a_missing_shard_is_a_clear_error(tmp_path):
     path = tmp_path / "shard.safetensors"
     mx.save_safetensors(str(path), {"other.weight": mx.zeros((2, 2))})
