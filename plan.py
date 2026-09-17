@@ -698,7 +698,7 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
         warnings.append("tight: under ~7% headroom — a longer context or a "
                         "background app can still push it over")
     if past_cliff:
-        hint = ("; --ngram-offload takes the n-gram table out of this"
+        hint = ("; --ngram-offload moves the n-gram table out of GPU memory into the page cache"
                 if fp["ngram_bytes"] and not ngram_offload else "")
         warnings.append(f"peak is {peak / ram:.1%} of system RAM: past 85%, Mac "
                         "loads fail far more often in field data (69% succeed at "

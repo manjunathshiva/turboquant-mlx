@@ -851,7 +851,7 @@ class TestNgramOffload:
         assert not pl["verdict"]["needs_wired_bump"]
         assert pl["projection"]["ram_share"] > 0.85
         assert any(f.startswith("--ngram-offload") for f in pl["flags"])
-        assert any("--ngram-offload takes the n-gram table out" in w for w in pl["warnings"])
+        assert any("--ngram-offload moves the n-gram table out of GPU memory" in w for w in pl["warnings"])
         on = build_plan(p, wired_gb=63.35, ram_gb=64, context=4096, ngram_offload=True)
         assert not any(f.startswith("--ngram-offload") for f in on["flags"])
         assert not any("of system RAM" in w for w in on["warnings"])
