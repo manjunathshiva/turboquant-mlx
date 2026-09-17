@@ -156,7 +156,8 @@ pip install "turboquant-mlx-full[kimi]"   # Kimi K3's tiktoken-based tokenizer
 > merged 2026-08-10). `[vlm]` pins that floor, so the one-liner above is all you
 > need — the git pin previously documented here is obsolete.
 
-> **Qwen3.8-Flash-Next needs `turboquant-mlx-full >= 0.26.0`.** Text runs on the
+> **Qwen3.8-Flash-Next needs `turboquant-mlx-full >= 0.26.0`**, and `>= 0.27.0` for
+> `--ngram-offload` (0 swapouts inside requests on a 64 GB Mac, measured). Text runs on the
 > base install. Its vision path needs `[vlm]` and is verified on mlx-vlm 0.6.14 and
 > 0.7.0 — see [Qwen3.8-Flash-Next](#qwen38-flash-next-180b-moe-512-experts).
 
@@ -1708,10 +1709,10 @@ tier; without it the build is ~124 GiB); routers, the QSA block indexer and the 
 hyper-connection gating matrices at full precision.
 
 ```bash
-pip install "turboquant-mlx-full>=0.26.0"
+pip install "turboquant-mlx-full>=0.27.0"
 sudo sysctl -w iogpu.wired_limit_mb=60416   # resident runs; resets on reboot
 
-turboquant-generate --model manjunathshiva/Qwen3.8-Flash-Next-tq4a-tq2e-g64 \
+turboquant-generate --model manjunathshiva/Qwen3.8-Flash-Next-tq4a-tq2e-g64 --ngram-offload \
     --no-think --prompt "Explain sparse attention in two sentences." --max-tokens 300
 
 # Reproduce the build: needs the 336 GiB bf16 source; converts on a 64 GB Mac
@@ -1729,7 +1730,7 @@ through mlx-vlm's Qwen3-VL tower. The
 [model card](https://huggingface.co/manjunathshiva/Qwen3.8-Flash-Next-tq4a-tq2e-g64)
 has the vision code, the server command and the fit plan.
 
-**`--ngram-offload` (generate, serve, streaming).** The n-gram table is 17.88
+**`--ngram-offload` (generate, serve, streaming; 0.27.0+).** The n-gram table is 17.88
 GiB of the build, yet a token reads only 16 of its 320M rows. With the flag,
 the table stays in the checkpoint's safetensors files, memory-mapped, and the
 rows each step needs are dequantized on the CPU. The pages sit in the OS page
