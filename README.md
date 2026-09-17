@@ -157,7 +157,7 @@ pip install "turboquant-mlx-full[kimi]"   # Kimi K3's tiktoken-based tokenizer
 > need — the git pin previously documented here is obsolete.
 
 > **Qwen3.8-Flash-Next needs `turboquant-mlx-full >= 0.26.0`**, and `>= 0.27.0` for
-> `--ngram-offload`, which is how it runs on a 64 GB Mac without swapping. Text runs on the
+> `--ngram-offload` (0 swapouts inside requests on a 64 GB Mac, measured). Text runs on the
 > base install. Its vision path needs `[vlm]` and is verified on mlx-vlm 0.6.14 and
 > 0.7.0 — see [Qwen3.8-Flash-Next](#qwen38-flash-next-180b-moe-512-experts).
 
