@@ -318,7 +318,6 @@ def turboquant_quantize(
     _layer_idx_rx = _re.compile(r"(?:^|\.)layers\.(\d+)\.")
     protected_layers = set(tq_config.protect_expert_layers or ())
     matched_protected_layers = set()
-    matched_tier_layers = set()
     n_switch = 0
     # Check the tier map against the model before quantizing anything: a layer
     # with no routed experts found only at the end would cost the whole
@@ -331,6 +330,25 @@ def turboquant_quantize(
         if missing:
             raise ValueError(f"expert_layer_tiers names layer(s) {missing} that have "
                              "no routed experts in this model")
+        # Every projection of a tiered layer must be quantizable: one that the
+        # group-size check below would skip stays at source precision while the
+        # config claims the tier for the whole layer.
+        unfit = []
+        for p, t in module_types.items():
+            m = _layer_idx_rx.search(p)
+            if t not in ("switch", "switch_quantized") or not m \
+                    or int(m.group(1)) not in tq_config.expert_layer_tiers:
+                continue
+            mod = _get_nested_attr(model, p)
+            width = (mod.scales.shape[-1] * mod.group_size if t == "switch_quantized"
+                     else mod.weight.shape[-1])
+            if width % tq_config.group_size_for_path(p):
+                unfit.append(p)
+        if unfit:
+            raise ValueError("expert_layer_tiers: these projections' input width isn't "
+                             "divisible by the expert group size, so they would be "
+                             f"skipped and keep source precision: {unfit[:6]}"
+                             + (f" (+{len(unfit) - 6} more)" if len(unfit) > 6 else ""))
 
     for path in module_paths:
         mtype = module_types[path]
@@ -389,7 +407,6 @@ def turboquant_quantize(
                 m = _layer_idx_rx.search(path)
                 tier = tq_config.expert_tier_for_layer(int(m.group(1))) if m else None
                 if tier is not None:
-                    matched_tier_layers.add(int(m.group(1)))
                     layer_bits, use_ternary = tier
             if protected_layers:
                 m = _layer_idx_rx.search(path)
@@ -506,13 +523,6 @@ def turboquant_quantize(
     centroids, _ = get_codebook(tq_config.bits)
     config.pop("quantization_config", None)
     if tq_config.expert_layer_tiers:
-        missing = sorted(set(tq_config.expert_layer_tiers) - matched_tier_layers)
-        if missing:
-            # Layers that exist but were skipped (input width not divisible by the
-            # expert group size). Never silent: the config would claim tiers the
-            # build doesn't have.
-            raise ValueError(f"expert_layer_tiers: layer(s) {missing} were skipped, "
-                             "so their tiers were not applied")
         counts = {}
         for t in tq_config.expert_layer_tiers.values():
             counts[t] = counts.get(t, 0) + 1

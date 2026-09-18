@@ -113,3 +113,21 @@ def test_cli_rejects_a_tier_file_that_is_not_text(tmp_path):
     p.write_bytes(b"\xff\xfe\x00\x81 not utf-8")
     with pytest.raises(argparse.ArgumentTypeError):
         _load_tiers(str(p))
+
+
+def test_a_tiered_layer_with_a_projection_that_would_be_skipped_fails_up_front():
+    """SwitchGLU(64, 128, 4) at expert group size 128: gate/up (64 wide) would be
+    skipped and stay at source precision while down (128 wide) takes the tier, so
+    the config would claim a tier the layer only partly has."""
+    from turboquant_mlx.quantize_model import turboquant_quantize
+
+    mx.random.seed(0)
+    model = TinyModel()
+    mx.eval(model.parameters())
+    written = []
+    with pytest.raises(ValueError, match="gate_proj"):
+        turboquant_quantize(model, {"model_type": "test"},
+                            TurboQuantConfig(group_size=32, mlp_group_size=128, mlp_bits=2,
+                                             expert_layer_tiers={1: "3"}),
+                            on_quantized=lambda path, module: written.append(path))
+    assert written == []
