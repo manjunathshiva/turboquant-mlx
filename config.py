@@ -74,8 +74,9 @@ class TurboQuantConfig:
     # ``switch_mlp``) and have silently missed before.
     protect_expert_layers: Optional[tuple] = None
     protect_bits: int = 3
-    # Per-layer expert tiers from a byte-budget allocation (turboquant_mlx.allocate):
-    # {layer index: "ternary" | "2" | "3" | "4"}. Layers not listed keep the expert
+    # Per-layer expert tiers, chosen by hand: {layer index: "ternary" | "2" | "3" |
+    # "4"}. (A data-free way to choose them was tried and lost to its own
+    # complement; see CHANGELOG 0.28.0.) Layers not listed keep the expert
     # tier. Like protection it changes bit width only, never group size, so the
     # loader reads each layer's width back from its codebook length. Mutually
     # exclusive with protect_expert_layers, which is the one-tier special case.

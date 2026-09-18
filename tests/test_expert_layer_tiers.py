@@ -1,4 +1,4 @@
-"""Per-layer expert tiers (``expert_layer_tiers``), as written by an allocation.
+"""Per-layer expert tiers (``expert_layer_tiers`` / ``convert --expert-layer-tiers``).
 
 The same contract as layer protection, which is its one-tier special case: tiers
 change bit width only, each layer's format is self-describing through its codebook
@@ -65,3 +65,17 @@ def test_fresh_load_matches_converted_outputs():
         a = model.model.layers[i].mlp.switch_mlp(x, idx)
         b = fresh.model.layers[i].mlp.switch_mlp(x, idx)
         assert mx.allclose(a, b, atol=1e-5), i
+
+
+def test_cli_reads_a_plain_map_or_a_tiers_block(tmp_path):
+    import json
+
+    from turboquant_mlx.convert import _load_tiers
+
+    plain = tmp_path / "plain.json"
+    plain.write_text(json.dumps({"0": "4", "3": "ternary"}))
+    wrapped = tmp_path / "wrapped.json"
+    wrapped.write_text(json.dumps({"counts": {}, "tiers": {"0": "4", "3": "ternary"}}))
+    for p in (plain, wrapped):
+        tq = TurboQuantConfig(expert_layer_tiers=_load_tiers(str(p)))
+        assert tq.expert_layer_tiers == {0: "4", 3: "ternary"}

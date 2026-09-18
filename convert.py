@@ -120,8 +120,8 @@ def convert(
             ``protect_bits`` Gaussian codebook instead of the expert tier
             (ternary or mlp_bits). See TurboQuantConfig.protect_expert_layers.
         protect_bits: Codebook width for protected expert layers.
-        expert_layer_tiers: ``{layer: "ternary" | "2" | "3" | "4"}`` from
-            ``turboquant_mlx.allocate``. See TurboQuantConfig.expert_layer_tiers.
+        expert_layer_tiers: ``{layer: "ternary" | "2" | "3" | "4"}``, a hand-chosen
+            tier per MoE layer. See TurboQuantConfig.expert_layer_tiers.
     """
     from mlx_lm.utils import load, save
 
@@ -326,8 +326,8 @@ def configure_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--expert-layer-tiers",
         type=_load_tiers, default=None, metavar="JSON",
-        help="Per-layer expert tiers from `python -m turboquant_mlx.allocate choose`: "
-             "a JSON file mapping layer index to 'ternary', '2', '3' or '4'. Layers not "
+        help="Per-layer expert tiers: a JSON file mapping MoE layer index to "
+             "'ternary', '2', '3' or '4' (or {\"tiers\": {...}}). Layers not "
              "listed keep the expert tier. Exclusive with --protect-expert-layers and "
              "--expert-down-bits.",
     )
