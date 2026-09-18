@@ -30,7 +30,7 @@ def _load_tiers(path: str) -> dict:
     try:
         with open(path) as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise argparse.ArgumentTypeError(f"can't read {path}: {e}")
     tiers = data.get("tiers", data) if isinstance(data, dict) else data
     if not isinstance(tiers, dict) or not tiers:

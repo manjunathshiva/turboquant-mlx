@@ -102,3 +102,14 @@ def test_cli_rejects_bad_tier_files_as_argument_errors(tmp_path, content):
     p.write_text(content)
     with pytest.raises(argparse.ArgumentTypeError):
         _load_tiers(str(p))
+
+
+def test_cli_rejects_a_tier_file_that_is_not_text(tmp_path):
+    import argparse
+
+    from turboquant_mlx.convert import _load_tiers
+
+    p = tmp_path / "binary.json"
+    p.write_bytes(b"\xff\xfe\x00\x81 not utf-8")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _load_tiers(str(p))
