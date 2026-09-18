@@ -8,6 +8,7 @@ Handles the full pipeline:
 """
 
 import gc
+import zlib
 from functools import partial
 
 import mlx.core as mx
@@ -36,8 +37,15 @@ def _detect_architecture(config: dict) -> str:
 
 
 def _get_layer_seed(base_seed: int, layer_path: str) -> int:
-    """Generate a deterministic seed for each layer based on its path."""
-    return base_seed + hash(layer_path) % (2**31)
+    """A per-layer rotation seed, the same in every process.
+
+    This used ``hash(layer_path)``, which Python randomizes per process, so
+    converting the same model twice gave different rotations and different
+    weights. Loading was never affected (each build stores its signs), but builds
+    weren't reproducible, and two builds compared in an experiment differed on
+    layers that should have been identical. CRC-32 of the path is stable.
+    """
+    return base_seed + zlib.crc32(layer_path.encode()) % (2**31)
 
 
 def _should_quantize(path: str, module: nn.Module) -> bool:
@@ -310,6 +318,7 @@ def turboquant_quantize(
     _layer_idx_rx = _re.compile(r"(?:^|\.)layers\.(\d+)\.")
     protected_layers = set(tq_config.protect_expert_layers or ())
     matched_protected_layers = set()
+    matched_tier_layers = set()
     n_switch = 0
 
     for path in module_paths:
@@ -365,6 +374,12 @@ def turboquant_quantize(
                 # self-describing via the on-disk codebook length.
                 use_ternary = False
                 layer_bits = tq_config.expert_down_bits
+            if tq_config.expert_layer_tiers:
+                m = _layer_idx_rx.search(path)
+                tier = tq_config.expert_tier_for_layer(int(m.group(1))) if m else None
+                if tier is not None:
+                    matched_tier_layers.add(int(m.group(1)))
+                    layer_bits, use_ternary = tier
             if protected_layers:
                 m = _layer_idx_rx.search(path)
                 if m and int(m.group(1)) in protected_layers:
@@ -479,6 +494,17 @@ def turboquant_quantize(
     from turboquant_mlx.core.codebook import get_codebook
     centroids, _ = get_codebook(tq_config.bits)
     config.pop("quantization_config", None)
+    if tq_config.expert_layer_tiers:
+        missing = sorted(set(tq_config.expert_layer_tiers) - matched_tier_layers)
+        if missing:
+            # Never silent, as with protection: a tier map that matches nothing
+            # produces a build whose config claims an allocation it doesn't have.
+            raise ValueError(f"expert_layer_tiers names layer(s) {missing} that have "
+                             "no routed experts in this model")
+        counts = {}
+        for t in tq_config.expert_layer_tiers.values():
+            counts[t] = counts.get(t, 0) + 1
+        print(f"[INFO] Expert tiers per layer: {counts}")
     if protected_layers:
         missing = sorted(protected_layers - matched_protected_layers)
         if missing:

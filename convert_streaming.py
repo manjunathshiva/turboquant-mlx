@@ -123,6 +123,7 @@ def convert_streaming(
     extras_group_size: int = 64,
     protect_expert_layers: list = None,
     protect_bits: int = 3,
+    expert_layer_tiers: dict = None,
     max_file_size_gb: int = MAX_FILE_SIZE_GB,
 ):
     """Convert an HF model to TurboQuant MLX format with bounded peak memory.
@@ -146,6 +147,7 @@ def convert_streaming(
         expert_down_bits=expert_down_bits,
         protect_expert_layers=protect_expert_layers,
         protect_bits=protect_bits,
+        expert_layer_tiers=expert_layer_tiers,
     )
 
     print(f"[INFO] Loading model from {hf_path} (lazy)")

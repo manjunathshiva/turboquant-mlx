@@ -1,9 +1,10 @@
 """Unit test for the streaming shard writer (no model / disk-of-a-model needed).
 
 The end-to-end guarantee — that ``--streaming`` conversion is byte-identical to
-the in-memory converter — is validated manually on real models (it depends on a
-fixed PYTHONHASHSEED, since the per-layer rotation seed uses ``hash()``). Here we
-just exercise the shard writer's sharding, naming, index, and reload-fidelity.
+the in-memory converter — is validated manually on real models (per-layer
+rotation seeds are process-stable since they moved from ``hash()`` to CRC-32; see
+tests/test_layer_seed.py). Here we just exercise the shard writer's sharding,
+naming, index, and reload-fidelity.
 """
 
 import glob

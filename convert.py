@@ -19,6 +19,15 @@ from turboquant_mlx.config import TurboQuantConfig
 from turboquant_mlx.quantize_model import turboquant_quantize
 
 
+def _load_tiers(path: str) -> dict:
+    """Read a ``{layer: tier}`` JSON file for --expert-layer-tiers."""
+    import json
+
+    with open(path) as f:
+        data = json.load(f)
+    return data.get("tiers", data)
+
+
 def _parse_layer_list(text: str) -> list:
     """Parse a layer list for --protect-expert-layers: '0-5,42-47' or '0,1,47'.
 
@@ -72,6 +81,7 @@ def convert(
     extras_group_size: int = 64,
     protect_expert_layers: list = None,
     protect_bits: int = 3,
+    expert_layer_tiers: dict = None,
 ):
     """Convert a HuggingFace model to TurboQuant-compressed MLX format.
 
@@ -110,6 +120,8 @@ def convert(
             ``protect_bits`` Gaussian codebook instead of the expert tier
             (ternary or mlp_bits). See TurboQuantConfig.protect_expert_layers.
         protect_bits: Codebook width for protected expert layers.
+        expert_layer_tiers: ``{layer: "ternary" | "2" | "3" | "4"}`` from
+            ``turboquant_mlx.allocate``. See TurboQuantConfig.expert_layer_tiers.
     """
     from mlx_lm.utils import load, save
 
@@ -133,6 +145,7 @@ def convert(
         expert_down_bits=expert_down_bits,
         protect_expert_layers=protect_expert_layers,
         protect_bits=protect_bits,
+        expert_layer_tiers=expert_layer_tiers,
     )
 
     # Load model
@@ -311,6 +324,14 @@ def configure_parser() -> argparse.ArgumentParser:
              "matching rule. Warns if a listed layer matches nothing.",
     )
     parser.add_argument(
+        "--expert-layer-tiers",
+        type=_load_tiers, default=None, metavar="JSON",
+        help="Per-layer expert tiers from `python -m turboquant_mlx.allocate choose`: "
+             "a JSON file mapping layer index to 'ternary', '2', '3' or '4'. Layers not "
+             "listed keep the expert tier. Exclusive with --protect-expert-layers and "
+             "--expert-down-bits.",
+    )
+    parser.add_argument(
         "--protect-bits",
         type=int, default=3, choices=[2, 3, 4],
         help="Codebook width for --protect-expert-layers (default 3).",
@@ -375,6 +396,7 @@ def main():
             extras_group_size=args.extras_group_size,
             protect_expert_layers=args.protect_expert_layers,
             protect_bits=args.protect_bits,
+            expert_layer_tiers=args.expert_layer_tiers,
         )
         # Applied here rather than threaded through convert_streaming: the head
         # is copied from the source shards after the fact either way, so the
@@ -408,6 +430,7 @@ def main():
         extras_group_size=args.extras_group_size,
         protect_expert_layers=args.protect_expert_layers,
         protect_bits=args.protect_bits,
+        expert_layer_tiers=args.expert_layer_tiers,
     )
 
 
