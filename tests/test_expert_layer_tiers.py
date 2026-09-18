@@ -40,9 +40,20 @@ def test_config_round_trips_and_validates():
         TurboQuantConfig(expert_layer_tiers={0: "3"}, expert_down_bits=4)
 
 
-def test_a_tier_for_a_layer_without_experts_is_an_error():
+def test_a_tier_for_a_layer_without_experts_fails_before_any_layer_is_quantized():
+    """Checked up front: a streaming convert must not write anything first."""
+    written = []
     with pytest.raises(ValueError, match=r"\[9\]"):
-        _quantize(mlp_bits=2, expert_layer_tiers={0: "3", 9: "4"})
+        mx.random.seed(0)
+        model = TinyModel()
+        mx.eval(model.parameters())
+        from turboquant_mlx.quantize_model import turboquant_quantize
+
+        turboquant_quantize(model, {"model_type": "test"},
+                            TurboQuantConfig(group_size=32, mlp_group_size=32, mlp_bits=2,
+                                             expert_layer_tiers={0: "3", 9: "4"}),
+                            on_quantized=lambda path, module: written.append(path))
+    assert written == []
 
 
 def test_fresh_load_matches_converted_outputs():
@@ -79,3 +90,15 @@ def test_cli_reads_a_plain_map_or_a_tiers_block(tmp_path):
     for p in (plain, wrapped):
         tq = TurboQuantConfig(expert_layer_tiers=_load_tiers(str(p)))
         assert tq.expert_layer_tiers == {0: "4", 3: "ternary"}
+
+
+@pytest.mark.parametrize("content", ['[1, 2]', '{"tiers": [1]}', '{}', '{"0": "5"}', 'not json'])
+def test_cli_rejects_bad_tier_files_as_argument_errors(tmp_path, content):
+    import argparse
+
+    from turboquant_mlx.convert import _load_tiers
+
+    p = tmp_path / "bad.json"
+    p.write_text(content)
+    with pytest.raises(argparse.ArgumentTypeError):
+        _load_tiers(str(p))

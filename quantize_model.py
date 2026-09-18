@@ -320,6 +320,17 @@ def turboquant_quantize(
     matched_protected_layers = set()
     matched_tier_layers = set()
     n_switch = 0
+    # Check the tier map against the model before quantizing anything: a layer
+    # with no routed experts found only at the end would cost the whole
+    # conversion and, when streaming, leave a half-written output directory.
+    if tq_config.expert_layer_tiers:
+        expert_layers = {int(m.group(1)) for p, t in module_types.items()
+                         if t in ("switch", "switch_quantized")
+                         for m in [_layer_idx_rx.search(p)] if m}
+        missing = sorted(set(tq_config.expert_layer_tiers) - expert_layers)
+        if missing:
+            raise ValueError(f"expert_layer_tiers names layer(s) {missing} that have "
+                             "no routed experts in this model")
 
     for path in module_paths:
         mtype = module_types[path]
@@ -497,10 +508,11 @@ def turboquant_quantize(
     if tq_config.expert_layer_tiers:
         missing = sorted(set(tq_config.expert_layer_tiers) - matched_tier_layers)
         if missing:
-            # Never silent, as with protection: a tier map that matches nothing
-            # produces a build whose config claims an allocation it doesn't have.
-            raise ValueError(f"expert_layer_tiers names layer(s) {missing} that have "
-                             "no routed experts in this model")
+            # Layers that exist but were skipped (input width not divisible by the
+            # expert group size). Never silent: the config would claim tiers the
+            # build doesn't have.
+            raise ValueError(f"expert_layer_tiers: layer(s) {missing} were skipped, "
+                             "so their tiers were not applied")
         counts = {}
         for t in tq_config.expert_layer_tiers.values():
             counts[t] = counts.get(t, 0) + 1

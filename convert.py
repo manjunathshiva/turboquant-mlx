@@ -20,12 +20,28 @@ from turboquant_mlx.quantize_model import turboquant_quantize
 
 
 def _load_tiers(path: str) -> dict:
-    """Read a ``{layer: tier}`` JSON file for --expert-layer-tiers."""
+    """Read and validate a ``{layer: tier}`` JSON file for --expert-layer-tiers.
+
+    Raises ``argparse.ArgumentTypeError`` so a bad file is reported as a bad
+    argument before any conversion work starts.
+    """
     import json
 
-    with open(path) as f:
-        data = json.load(f)
-    return data.get("tiers", data)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        raise argparse.ArgumentTypeError(f"can't read {path}: {e}")
+    tiers = data.get("tiers", data) if isinstance(data, dict) else data
+    if not isinstance(tiers, dict) or not tiers:
+        raise argparse.ArgumentTypeError(
+            f"{path} must hold a non-empty JSON object mapping layer index to tier "
+            "(or {\"tiers\": {...}})")
+    try:
+        TurboQuantConfig(expert_layer_tiers=tiers)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"{path}: {e}")
+    return tiers
 
 
 def _parse_layer_list(text: str) -> list:
