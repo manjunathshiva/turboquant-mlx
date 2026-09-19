@@ -6,7 +6,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`convert --expert-layer-tiers tiers.json` sets the routed experts of each MoE
+  layer to its own tier** (`ternary`, `2`, `3` or `4`; unlisted layers keep the
+  expert tier). It generalizes `--protect-expert-layers` and is exclusive with it
+  and with `--expert-down-bits`. It changes bit width only, so the loader reads each
+  layer's width back from its codebook length, as it does for protection.
+  `TurboQuantConfig.expert_layer_tiers` round-trips through `config.json`, and a
+  tier for a layer with no experts is an error rather than a silent no-op.
+
+  A data-free way to choose the tiers was built and measured, and did not make it
+  in. Under TurboQuant's rotation and per-group scaling, every layer's relative
+  reconstruction error at a given tier is the same (DeepSeek-V2-Lite, all 26 MoE
+  layers: ternary 0.1862, 2-bit 0.1145, 3-bit 0.0334, 4-bit 0.0092), so an
+  error-per-byte allocator can only rank layers by weight energy. At equal size
+  (uniform 2-bit plus 13 of 26 layers at 3-bit), its pick of the heaviest, later
+  layers scored WikiText-2 PPL 12.94 against 12.74 for the other 13 layers, and
+  was better on only 11 of 32 paired chunks. Choosing per-layer widths well
+  appears to need activation data, which TurboQuant doesn't use.
+
 ### Fixed
+- **Converting the same model twice gave different weights.** Per-layer rotation
+  seeds came from Python's `hash()`, which is randomized per process. Loading was
+  never affected, since every build stores its signs, but builds weren't
+  reproducible and two builds compared in an experiment differed even on layers
+  they quantized identically. Seeds now come from CRC-32 of the layer path, so a
+  build made after this change will differ from an older build of the same model
+  (neither is more accurate; they use different random rotations).
 - **`turboquant-plan` now suggests `--ngram-offload` past the 85%-of-RAM warning,
   not only when a fit needs the wired cap raised or fails.** Qwen3.8-Flash-Next on a
   64 GB Mac with the cap already raised projects as resident at ~86% of RAM, so

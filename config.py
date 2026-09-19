@@ -74,6 +74,13 @@ class TurboQuantConfig:
     # ``switch_mlp``) and have silently missed before.
     protect_expert_layers: Optional[tuple] = None
     protect_bits: int = 3
+    # Per-layer expert tiers, chosen by hand: {layer index: "ternary" | "2" | "3" |
+    # "4"}. (A data-free way to choose them was tried and lost to its own
+    # complement; see CHANGELOG 0.28.0.) Layers not listed keep the expert
+    # tier. Like protection it changes bit width only, never group size, so the
+    # loader reads each layer's width back from its codebook length. Mutually
+    # exclusive with protect_expert_layers, which is the one-tier special case.
+    expert_layer_tiers: Optional[dict] = None
 
     def __post_init__(self):
         if self.bits not in (2, 3, 4):
@@ -110,6 +117,32 @@ class TurboQuantConfig:
                     f"protect_expert_layers must be non-negative, got {layers}")
             # Normalized: sorted, de-duplicated, and None when empty.
             self.protect_expert_layers = tuple(layers) or None
+        if self.expert_layer_tiers is not None:
+            try:
+                tiers = {int(k): str(v) for k, v in dict(self.expert_layer_tiers).items()}
+            except (TypeError, ValueError):
+                raise ValueError("expert_layer_tiers must map layer indices to tiers, "
+                                 f"got {self.expert_layer_tiers!r}")
+            bad = {k: v for k, v in tiers.items()
+                   if k < 0 or v not in ("ternary", "2", "3", "4")}
+            if bad:
+                raise ValueError(f"expert_layer_tiers: invalid entries {bad}; tiers are "
+                                 "'ternary', '2', '3', '4' on non-negative layers")
+            if self.expert_down_bits is not None and tiers:
+                raise ValueError("expert_layer_tiers sets whole layers, including "
+                                 "down_proj; don't combine it with expert_down_bits")
+            if self.protect_expert_layers and tiers:
+                raise ValueError("expert_layer_tiers and protect_expert_layers are "
+                                 "mutually exclusive; express protection as tiers")
+            self.expert_layer_tiers = dict(sorted(tiers.items())) or None
+
+    def expert_tier_for_layer(self, layer: int) -> Optional[tuple]:
+        """``(bits, ternary)`` for a layer's routed experts from ``expert_layer_tiers``,
+        or None when the layer isn't listed."""
+        if not self.expert_layer_tiers or layer not in self.expert_layer_tiers:
+            return None
+        tier = self.expert_layer_tiers[layer]
+        return (2, True) if tier == "ternary" else (int(tier), False)
 
     def bits_for_path(self, path: str) -> int:
         """Resolve the bit-width for a layer based on its dotted path.
@@ -194,6 +227,8 @@ class TurboQuantConfig:
         if self.protect_expert_layers:
             d["protected_expert_layers"] = list(self.protect_expert_layers)
             d["protect_bits"] = self.protect_bits
+        if self.expert_layer_tiers:
+            d["expert_layer_tiers"] = {str(k): v for k, v in self.expert_layer_tiers.items()}
         return d
 
     @classmethod
@@ -211,6 +246,7 @@ class TurboQuantConfig:
             expert_down_bits=d.get("expert_down_bits", None),
             protect_expert_layers=d.get("protected_expert_layers", None),
             protect_bits=d.get("protect_bits", 3),
+            expert_layer_tiers=d.get("expert_layer_tiers", None),
         )
 
     @property
