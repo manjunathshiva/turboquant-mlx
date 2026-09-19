@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-19
+
 ### Added
 - **`convert --expert-layer-tiers tiers.json` sets the routed experts of each MoE
   layer to its own tier** (`ternary`, `2`, `3` or `4`; unlisted layers keep the
