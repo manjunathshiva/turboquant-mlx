@@ -1845,10 +1845,10 @@ four. Laguna-S-2.1 (118B) streams on a 16 GB Mac at a measured 7.3 GB peak.
 ### Changed
 
 - **License relicensed from MIT to Apache-2.0.** The MIT license that covered
-  versions 0.1.x and 0.2.0 is preserved verbatim in `LICENSE-MIT` for
-  reference; users of those versions retain their MIT rights. All new
-  contributions and releases (0.3.0 and later) are governed by `LICENSE`
-  (Apache-2.0).
+  versions 0.1.x and 0.2.0 is preserved verbatim in `LICENSE-MIT` (since moved
+  to `LICENSES/MIT.txt`) for reference; users of those versions retain their
+  MIT rights. All new contributions and releases (0.3.0 and later) are
+  governed by `LICENSE` (Apache-2.0).
 - `pyproject.toml` `license` field updated to `Apache-2.0`; classifier
   updated accordingly. Author field corrected to legal name
   (`Manjunath Janardhan`).
