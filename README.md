@@ -442,8 +442,8 @@ The [Flash-MoE streaming levers](#tuning-the-streaming-reader-v061) ride along:
 with `--kv-*` to compress the growing KV cache of long agentic loops, and
 `--prompt-concurrency 1` since streaming is a single-user path.
 
-`--cache-budget-gb auto` sizes the expert cache from the machine (80% of
-Metal's recommended working set, minus resident weights and a KV reserve),
+`--cache-budget-gb auto` sizes the expert cache from the machine (Metal's
+recommended working set, minus resident weights and a runtime + KV reserve),
 and a `hot_experts.json` shipped in the model directory (the pin output of
 `calibrate_experts.py`) is auto-discovered: those experts are pinned **and
 preloaded** at startup — measured on the 35B ternary, a 1.1 GB / 1,500-expert

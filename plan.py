@@ -44,10 +44,17 @@ import glob
 import json
 import os
 import struct
-import subprocess
 import sys
 
-from turboquant_mlx.cache_budget import auto_cache_budget, projected_peak_bytes
+# estimate_wss lives in cache_budget (the loader and server need it too) and is
+# re-exported here, where it has always been importable from.
+from turboquant_mlx.cache_budget import (
+    auto_cache_budget,
+    estimate_wss,
+    physical_ram_bytes,
+    projected_peak_bytes,
+    working_set_bytes,
+)
 from turboquant_mlx.expert_naming import is_streamed_expert_key
 
 _ITEMSIZE = {"F64": 8, "I64": 8, "U64": 8, "F32": 4, "I32": 4, "U32": 4,
@@ -475,22 +482,6 @@ def prefill_workspace_bytes(cfg: dict, context: int, step: int,
 # machine
 # --------------------------------------------------------------------------
 
-def estimate_wss(ram_bytes: float | None) -> float | None:
-    """Estimate Metal's default working-set cap from RAM.
-
-    Apple's `recommendedMaxWorkingSetSize` is roughly two-thirds of RAM on small
-    machines and a larger fraction on big ones — measured here: a 16 GB mini
-    reports 10.5 GB (66%), a 68.7 GB M4 Max reports 55.7 GB (81%). A single
-    fraction can't serve both, so this is piecewise and deliberately biased LOW:
-    under-promising the cap costs a user an unnecessary flag, over-promising
-    costs them an OOM.
-    """
-    if not ram_bytes:
-        return None
-    frac = 0.66 if ram_bytes <= 36 * _GB else 0.75
-    return frac * ram_bytes
-
-
 def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
     """Metal working-set cap + system RAM. Overridable so you can plan for a
     machine you're not sitting at ("will this run on my 16 GB mini?").
@@ -511,11 +502,8 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
     if ram_gb:
         out["ram_bytes"] = ram_gb * _GIB
     else:
-        try:
-            out["ram_bytes"] = float(subprocess.check_output(
-                ["sysctl", "-n", "hw.memsize"]).strip())
-        except Exception:
-            out["ram_bytes"] = None
+        ram = physical_ram_bytes()
+        out["ram_bytes"] = float(ram) if ram else None
 
     if wired_gb:
         out["wss_bytes"] = wired_gb * _GB
@@ -524,15 +512,12 @@ def machine(wired_gb: float | None = None, ram_gb: float | None = None) -> dict:
         out["wss_bytes"] = estimate_wss(out["ram_bytes"])
         out["wss_estimated"] = True
     else:
-        try:
-            import mlx.core as mx
-            out["wss_bytes"] = float(
-                mx.device_info()["max_recommended_working_set_size"])
-        except Exception:
-            # no Metal device (Linux/CI): fall back to the RAM estimate rather
-            # than leaving it unknown, which made every verdict "needs a bump"
-            out["wss_bytes"] = estimate_wss(out["ram_bytes"])
-            out["wss_estimated"] = out["wss_bytes"] is not None
+        # no Metal device (Linux/CI): working_set_bytes falls back to the RAM
+        # estimate rather than leaving it unknown, which made every verdict
+        # "needs a bump"
+        ws = working_set_bytes()
+        out["wss_bytes"] = float(ws[0]) if ws else None
+        out["wss_estimated"] = bool(ws and ws[1])
     return out
 
 

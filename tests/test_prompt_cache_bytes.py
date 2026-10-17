@@ -88,6 +88,79 @@ class TestPatchedLRU:
         assert len(lru) >= 0
 
 
+class TestWithoutMetal:
+    """MLX's CPU backend on Linux has no Metal working set: device_info() is
+    just architecture + device_name. ``auto`` is the default, so indexing the
+    Metal key kept the server from starting at all."""
+
+    CPU_INFO = {"architecture": "x86_64", "device_name": "cpu"}
+
+    def _machine(self, monkeypatch, info, ram, active):
+        from turboquant_mlx import cache_budget
+        monkeypatch.setattr(mx, "device_info", lambda: dict(info))
+        monkeypatch.setattr(cache_budget, "physical_ram_bytes", lambda: ram)
+        monkeypatch.setattr(mx, "get_active_memory", lambda: active)
+
+    def test_estimates_the_working_set_from_ram(self, restore_lru,
+                                                monkeypatch, capsys):
+        from turboquant_mlx.cache_budget import estimate_wss
+        self._machine(monkeypatch, self.CPU_INFO, 16 * GB, 8 * GB)
+        assert _patch_prompt_cache_bytes("auto") == "auto"
+        lru = server_mod.LRUPromptCache(max_size=10)
+        assert lru.max_bytes == _auto_prompt_cache_bytes(
+            int(estimate_wss(16 * GB)), 8 * GB)
+        err = capsys.readouterr().err
+        assert "Prompt-cache byte cap: working set " in err
+        assert "estimated from RAM (no Metal device)" in err
+
+    def test_no_ram_either_leaves_the_stock_cache(self, restore_lru,
+                                                  monkeypatch, capsys):
+        self._machine(monkeypatch, self.CPU_INFO, None, 8 * GB)
+        assert _patch_prompt_cache_bytes("auto") is None
+        assert server_mod.LRUPromptCache is LRUPromptCache
+        err = capsys.readouterr().err
+        assert "Prompt-cache byte cap: off — no Metal working set" in err
+        assert "--prompt-cache-max-gb <GB>" in err
+
+    def test_metal_figure_is_still_used_and_logs_nothing(self, restore_lru,
+                                                         monkeypatch, capsys):
+        from turboquant_mlx import cache_budget
+        self._machine(monkeypatch, {
+            **self.CPU_INFO, "max_recommended_working_set_size": 20 * GB},
+            None, 15 * GB)
+        monkeypatch.setattr(cache_budget, "physical_ram_bytes",
+                            lambda: pytest.fail("RAM read with Metal present"))
+        assert _patch_prompt_cache_bytes("auto") == "auto"
+        lru = server_mod.LRUPromptCache(max_size=10)
+        assert lru.max_bytes == 3 * GB    # 20 - 15 - the 2 GB reserve
+        assert capsys.readouterr().err == ""
+
+    def test_serve_main_starts_and_drops_the_auto_banner(self, restore_lru,
+                                                         monkeypatch, capsys):
+        """The server main path end to end, minus the HTTP server: no crash,
+        and no banner promising a cap that is not there."""
+        import sys
+
+        import mlx_lm.utils as mlx_utils
+
+        from turboquant_mlx import serve
+
+        self._machine(monkeypatch, self.CPU_INFO, None, 0)
+        started = []
+        monkeypatch.setattr(server_mod, "load", server_mod.load)
+        monkeypatch.setattr(mlx_utils, "load", mlx_utils.load)
+        handler = server_mod.APIHandler     # main() wraps a method on it
+        monkeypatch.setattr(handler, "validate_model_parameters",
+                            handler.validate_model_parameters)
+        monkeypatch.setattr(server_mod, "main", lambda: started.append(1))
+        monkeypatch.setattr(sys, "argv", ["turboquant-serve", "--port", "8080"])
+        serve.main()
+        assert started
+        err = capsys.readouterr().err
+        assert "Prompt-cache byte cap: off — no Metal working set" in err
+        assert "Prompt-cache byte cap: auto" not in err
+
+
 class TestFlagParsing:
     def test_default_auto(self):
         mode, remaining = _extract_prompt_cache_max_args(["--model", "m"])

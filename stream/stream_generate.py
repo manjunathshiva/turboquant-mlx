@@ -63,7 +63,8 @@ def main():
     p.add_argument("--cache-budget-gb", type=_budget_arg, default=3.0,
                    help="Max resident expert memory (LRU-evicted). Lower = less RAM, "
                         "more disk reads. Pass 'auto' to size it from the machine "
-                        "(80%% of Metal's working set minus resident weights).")
+                        "(Metal's working set minus resident weights and a runtime + "
+                        "KV reserve).")
     p.add_argument("--wire-memory", action="store_true",
                    help="Raise MLX's wired-memory limit so weights + expert cache "
                         "stay resident under memory pressure (for constrained "

@@ -35,8 +35,8 @@ Passing ``--cache-budget-gb`` routes the loader through
 MoE whose weights exceed RAM (e.g. a 122B on a 16 GB Mac mini) can be *served*
 over the OpenAI API — only the router-selected experts are paged from disk per
 token. ``--cache-budget-gb auto`` sizes the expert cache from the machine
-(80% of Metal's recommended working set minus the resident weights and a KV
-reserve), and ``--wire-memory`` keeps weights + cache resident under memory
+(Metal's recommended working set minus the resident weights and a runtime +
+KV reserve), and ``--wire-memory`` keeps weights + cache resident under memory
 pressure (for constrained machines). The Flash-MoE streaming levers come with it: ``--max-active-experts``
 (K-reduction, default 4 → ~2x less disk I/O) and ``--use-page-cache`` /
 ``--no-page-cache`` (auto by model-size-vs-RAM; trust-OS is ~2.4x faster decode
@@ -142,6 +142,9 @@ unbounded. Pass a size in GB to force a cap or ``off`` for stock behavior.
 Pair with ``--disk-cache``: evicted states restore from disk instead of
 re-prefilling.
 
+Without a Metal device (MLX's CPU backend on Linux) both ``auto`` defaults
+size against a working set estimated from RAM, as ``turboquant-plan`` does.
+
 Prefill keepalive (long cold prefills behind a proxy)
 -----------------------------------------------------
 A streaming agentic client (Claude Code via claude-code-router) aborts a
@@ -224,13 +227,40 @@ def _auto_metal_cache_limit(wss_bytes: int, active_bytes: int) -> int | None:
     return max(_CACHE_LIMIT_MIN_BYTES, int(headroom - _CACHE_LIMIT_RESERVE_BYTES))
 
 
+def _auto_working_set(what: str, flag: str) -> int | None:
+    """The working set ``auto`` sizes against, logged when it is a guess.
+
+    Without a Metal device (MLX's CPU backend on Linux) it is estimated from
+    RAM; when even RAM is unknown, returns None and says the cap is off.
+    """
+    from turboquant_mlx.cache_budget import working_set_bytes
+
+    ws = working_set_bytes()
+    if ws is None:
+        sys.stderr.write(
+            f"[turboquant-serve] {what}: off — no Metal working set and "
+            f"system RAM unknown; pass {flag} <GB> to set one\n"
+        )
+        return None
+    wss, estimated = ws
+    if estimated:
+        sys.stderr.write(
+            f"[turboquant-serve] {what}: working set {wss / 1024**3:.1f} GiB "
+            "estimated from RAM (no Metal device)\n"
+        )
+    return wss
+
+
 def _apply_metal_cache_limit(mode) -> None:
     """Apply the Metal buffer-cache cap. Runs right after the model loads —
     the auto formula needs the measured resident (active) bytes."""
     import mlx.core as mx
 
     if mode == "auto":
-        wss = mx.device_info()["max_recommended_working_set_size"]
+        wss = _auto_working_set("Metal buffer-cache limit",
+                                "--metal-cache-limit-gb")
+        if wss is None:
+            return
         active = mx.get_active_memory()
         limit = _auto_metal_cache_limit(wss, active)
         if limit is None:
@@ -283,19 +313,26 @@ def _auto_prompt_cache_bytes(wss_bytes: int,
                int(headroom - _PROMPT_CACHE_RESERVE_BYTES))
 
 
-def _patch_prompt_cache_bytes(mode) -> None:
+def _patch_prompt_cache_bytes(mode) -> str | float | None:
     """Swap ``mlx_lm.server.LRUPromptCache`` for a subclass whose
     ``max_bytes`` is computed at insert time (the model isn't loaded yet
     when the server constructs the cache, so a static value can't be
-    derived up front). The base class enforces the cap on every insert."""
+    derived up front). The base class enforces the cap on every insert.
+
+    Returns the mode in effect: ``mode``, or None when ``auto`` has no
+    working set to size against and the stock unbounded cache stays."""
     import mlx.core as mx
     import mlx_lm.server as _server_mod
     from mlx_lm.models.cache import LRUPromptCache
 
     # The device working set is static for the server's lifetime; query it
     # once here instead of on every cache insertion.
-    wss = (mx.device_info()["max_recommended_working_set_size"]
-           if mode == "auto" else None)
+    wss = None
+    if mode == "auto":
+        wss = _auto_working_set("Prompt-cache byte cap",
+                                "--prompt-cache-max-gb")
+        if wss is None:
+            return None
 
     class _BudgetLRUPromptCache(LRUPromptCache):
         @property
@@ -312,6 +349,7 @@ def _patch_prompt_cache_bytes(mode) -> None:
             pass
 
     _server_mod.LRUPromptCache = _BudgetLRUPromptCache
+    return mode
 
 
 def _extract_prompt_cache_max_args(argv):
@@ -946,7 +984,7 @@ def main() -> None:
     ngram_offload, remaining = _extract_ngram_offload_args(remaining)
     _patch_loader(stream_config, cache_limit_mode, ngram_offload)
     if prompt_cache_max_mode is not None:
-        _patch_prompt_cache_bytes(prompt_cache_max_mode)
+        prompt_cache_max_mode = _patch_prompt_cache_bytes(prompt_cache_max_mode)
     if tool_greedy_config is not None:
         from turboquant_mlx.tool_syntax_greedy import install as _install_tool_greedy
         _install_tool_greedy(**tool_greedy_config)

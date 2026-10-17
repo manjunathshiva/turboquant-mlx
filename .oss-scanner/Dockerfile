@@ -48,7 +48,6 @@ ENV TQ_METAL_ONLY_TESTS="\
 --deselect=tests/test_ngram_offload.py::test_quantized_rows_match_quantized_embedding \
 --deselect=tests/test_ngram_offload.py::test_lookup_handles_repeats_and_every_shard \
 --deselect=tests/test_ngram_offload.py::test_offloaded_model_is_bit_identical \
---deselect=tests/test_prompt_cache_bytes.py::TestPatchedLRU::test_auto_mode_reads_device_state \
 --deselect=tests/test_qwen3_5_vlm.py::test_the_fused_kernel_bound_is_what_makes_the_skip_load_bearing \
 --deselect=tests/test_trit_packing.py::test_dequant_experts_trit_matches_reference \
 --deselect=tests/test_trit_packing.py::test_gather_qmm_trit_matches_reference \

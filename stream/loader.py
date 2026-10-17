@@ -22,6 +22,7 @@ from turboquant_mlx.cache_budget import (
     RUNTIME_OVERHEAD_BYTES,
     auto_cache_budget,
     projected_peak_bytes,
+    working_set_bytes,
 )
 from turboquant_mlx.expert_naming import SWITCH_ATTRS, is_streamed_expert_key
 from turboquant_mlx.generate import load_turboquant, resolve_model_path
@@ -286,10 +287,10 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     """Returns (model, tokenizer, cache).
 
     cache_budget_gb bounds total resident expert memory (LRU-evicted). Pass
-    the string ``"auto"`` to size it from the machine instead: 80% of Metal's
-    max recommended working set, minus the resident (non-expert) weights,
-    minus a 2 GB reserve for KV + prefill workspace, clamped to
-    [0.5 GB, all experts].
+    the string ``"auto"`` to size it from the machine instead: Metal's max
+    recommended working set (estimated from RAM without a Metal device),
+    minus the resident (non-expert) weights, minus a runtime + KV reserve,
+    clamped to [0.5 GB, all experts] — see ``cache_budget.py``.
     wire_memory=True (--wire-memory) additionally raises MLX's wired-memory
     limit to resident + budget + reserve (capped at the working set) so the
     weights and the expert cache stay resident under memory pressure — the
@@ -342,26 +343,41 @@ def load_streaming(model_path, cache_budget_gb=3.0, fast: bool = False,
     if isinstance(cache_budget_gb, str) and not auto:
         cache_budget_gb = float(cache_budget_gb)
     if auto:
-        wss = mx.device_info()["max_recommended_working_set_size"]
+        ws = working_set_bytes()
+        if ws is None:
+            raise RuntimeError(
+                "--cache-budget-gb auto: no Metal working set and the system "
+                "RAM could not be read, so there is nothing to size the expert "
+                "cache from; pass --cache-budget-gb <GB>")
+        wss, estimated = ws
         budget_bytes = _auto_cache_budget(resident_bytes + expert_bytes,
                                           expert_bytes, wss)
         cache_budget_gb = budget_bytes / 1e9
-        print(f"[stream] auto budget: working set {wss / 1e9:.1f} GB − "
+        est = " estimated from RAM (no Metal device)" if estimated else ""
+        print(f"[stream] auto budget: working set {wss / 1e9:.1f} GB{est} − "
               f"resident {resident_bytes / 1e9:.1f} GB − reserve "
               f"{_AUTO_RESERVE_BYTES / 1e9:.1f} GB -> cache "
               f"{cache_budget_gb:.1f} GB (experts on disk: "
               f"{expert_bytes / 1e9:.1f} GB, projected peak "
               f"{projected_peak_bytes(budget_bytes, resident_bytes) / 1e9:.1f} GB)")
     if wire_memory:
-        wss = mx.device_info()["max_recommended_working_set_size"]
-        want = int(min(wss, resident_bytes + cache_budget_gb * 1e9
-                       + _AUTO_RESERVE_BYTES))
-        try:
-            mx.set_wired_limit(want)
-            print(f"[stream] wired-memory limit {want / 1e9:.1f} GB — weights "
-                  "and expert cache stay resident under memory pressure")
-        except Exception as exc:
-            print(f"[stream] could not set wired limit ({exc}); continuing unwired")
+        ws = working_set_bytes()
+        if ws is None or ws[1]:
+            # Wiring is a Metal residency control; MLX's CPU backend accepts
+            # set_wired_limit and does nothing with it.
+            print("[stream] no Metal device — skipping --wire-memory; "
+                  "continuing unwired")
+        else:
+            want = int(min(ws[0], resident_bytes + cache_budget_gb * 1e9
+                           + _AUTO_RESERVE_BYTES))
+            try:
+                mx.set_wired_limit(want)
+                print(f"[stream] wired-memory limit {want / 1e9:.1f} GB — "
+                      "weights and expert cache stay resident under memory "
+                      "pressure")
+            except Exception as exc:
+                print(f"[stream] could not set wired limit ({exc}); "
+                      "continuing unwired")
 
     # Learning cache (colibri #3). `history` is what previous runs recorded and
     # decides this run's pins; `profile` collects THIS run and is merged into

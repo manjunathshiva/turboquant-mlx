@@ -28,7 +28,15 @@ reserve, which double-counts safety: on that mini it reserved 4.5 GB against a
 measured need of ~1.05 GB plus KV, and cost ~15% of achievable throughput
 (5.89 GB → 1.36 tok/s where 8 GB → 1.58 tok/s). The reserve here is explicit
 about what each gigabyte is for.
+
+The working set itself is answered here too (``working_set_bytes``), for the
+same reason: plan, the streaming loader and the server's ``auto`` defaults all
+need it, and MLX's CPU backend on Linux has no Metal working set to report.
 """
+
+import os
+import subprocess
+import sys
 
 # Runtime cost that scales with neither the cache nor the resident weights:
 # activations, buffer-cache slack, fragmentation. Measured at ~1.05 GB; carried
@@ -76,3 +84,61 @@ def projected_peak_bytes(budget_bytes: int, resident_bytes: int,
     """
     return int(budget_bytes) + int(resident_bytes) + RUNTIME_OVERHEAD_BYTES \
         + int(kv_bytes)
+
+
+def estimate_wss(ram_bytes: float | None) -> float | None:
+    """Estimate Metal's default working-set cap from RAM.
+
+    Apple's `recommendedMaxWorkingSetSize` is roughly two-thirds of RAM on small
+    machines and a larger fraction on big ones — measured here: a 16 GB mini
+    reports 10.5 GB (66%), a 68.7 GB M4 Max reports 55.7 GB (81%). A single
+    fraction can't serve both, so this is piecewise and deliberately biased LOW:
+    under-promising the cap costs a user an unnecessary flag, over-promising
+    costs them an OOM.
+    """
+    if not ram_bytes:
+        return None
+    frac = 0.66 if ram_bytes <= 36e9 else 0.75
+    return frac * ram_bytes
+
+
+def physical_ram_bytes() -> int | None:
+    """Installed RAM in bytes, or None when it can't be read.
+
+    macOS reports it via `sysctl hw.memsize`; elsewhere (Linux, where MLX runs
+    on its CPU backend) `sysconf` does.
+    """
+    if sys.platform == "darwin":
+        try:
+            return int(subprocess.check_output(
+                ["sysctl", "-n", "hw.memsize"]).strip())
+        except Exception:
+            pass
+    try:  # AttributeError: os.sysconf is absent on some platforms (Windows)
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return None
+    return ram if ram > 0 else None
+
+
+def working_set_bytes() -> tuple[int, bool] | None:
+    """``(bytes, estimated)`` for the memory a run may plan against, or None.
+
+    Metal's `max_recommended_working_set_size` when the device reports one
+    (``estimated`` False). Without a Metal device — MLX's CPU backend on Linux,
+    whose `device_info()` has no such key — the cap is estimated from RAM with
+    `estimate_wss` (``estimated`` True). None only when RAM can't be read
+    either; callers decide what ``auto`` means then.
+
+    mlx is imported here, not at module level, so plan.py stays importable
+    without loading a framework.
+    """
+    try:
+        import mlx.core as mx
+        wss = mx.device_info().get("max_recommended_working_set_size")
+    except Exception:
+        wss = None
+    if wss:
+        return int(wss), False
+    est = estimate_wss(physical_ram_bytes())
+    return (int(est), True) if est else None

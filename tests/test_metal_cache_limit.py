@@ -85,3 +85,72 @@ class TestFlagParsing:
         with pytest.raises(SystemExit):
             _extract_metal_cache_limit_args(
                 ["--metal-cache-limit-gb", "-1"])
+
+
+class TestApplyAuto:
+    """`_apply_metal_cache_limit("auto")` on and off a Metal device. On Linux
+    (MLX's CPU backend) device_info() has no working-set key, and indexing it
+    crashed every model load under the default flag."""
+
+    CPU_INFO = {"architecture": "x86_64", "device_name": "cpu"}
+
+    @pytest.fixture
+    def machine(self, monkeypatch):
+        import mlx.core as mx
+
+        from turboquant_mlx import cache_budget
+
+        limits = []
+        monkeypatch.setattr(mx, "set_cache_limit", limits.append)
+
+        def set_up(info, ram, active):
+            monkeypatch.setattr(mx, "device_info", lambda: dict(info))
+            monkeypatch.setattr(cache_budget, "physical_ram_bytes", lambda: ram)
+            monkeypatch.setattr(mx, "get_active_memory", lambda: active)
+            return limits
+        return set_up
+
+    def test_mac_tight_machine_log_is_unchanged(self, machine, capsys):
+        from turboquant_mlx.serve import _apply_metal_cache_limit
+        limits = machine({**self.CPU_INFO,
+                          "max_recommended_working_set_size": 20 * GB},
+                         None, 15 * GB)
+        _apply_metal_cache_limit("auto")
+        assert limits == [3 * GB]
+        assert capsys.readouterr().err == (
+            "[turboquant-serve] Metal buffer-cache limit: 3.00 GiB (auto: "
+            "working set 20.0 GiB, resident 15.0 GiB) — bounds reuse-cache "
+            "growth during long prefills; pair with --prefill-step-size 256 "
+            "on 16 GB machines\n")
+
+    def test_mac_roomy_machine_log_is_unchanged(self, machine, capsys):
+        from turboquant_mlx.serve import _apply_metal_cache_limit
+        limits = machine({**self.CPU_INFO,
+                          "max_recommended_working_set_size": int(51.5 * GB)},
+                         None, int(13.4 * GB))
+        _apply_metal_cache_limit("auto")
+        assert limits == []
+        assert capsys.readouterr().err == (
+            "[turboquant-serve] Metal buffer-cache limit: off — ample "
+            "headroom (working set 51.5 GiB, resident 13.4 GiB)\n")
+
+    def test_without_metal_estimates_from_ram(self, machine, capsys):
+        from turboquant_mlx.cache_budget import estimate_wss
+        from turboquant_mlx.serve import _apply_metal_cache_limit
+        limits = machine(self.CPU_INFO, 16 * GB, 8 * GB)
+        _apply_metal_cache_limit("auto")
+        assert limits == [_auto_metal_cache_limit(
+            int(estimate_wss(16 * GB)), 8 * GB)]
+        err = capsys.readouterr().err
+        assert ("Metal buffer-cache limit: working set 10.6 GiB estimated "
+                "from RAM (no Metal device)") in err
+        assert "(auto: working set 10.6 GiB, resident 8.0 GiB)" in err
+
+    def test_without_metal_or_ram_leaves_mlx_default(self, machine, capsys):
+        from turboquant_mlx.serve import _apply_metal_cache_limit
+        limits = machine(self.CPU_INFO, None, 8 * GB)
+        _apply_metal_cache_limit("auto")
+        assert limits == []
+        err = capsys.readouterr().err
+        assert "Metal buffer-cache limit: off — no Metal working set" in err
+        assert "--metal-cache-limit-gb <GB>" in err

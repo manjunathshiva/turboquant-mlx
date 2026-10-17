@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- On Linux (MLX's CPU backend), `turboquant-serve`'s default
+  `--prompt-cache-max-gb auto` and `--metal-cache-limit-gb auto`, and the
+  streaming loader's `--cache-budget-gb auto` and `--wire-memory`, no longer
+  crash with `KeyError: 'max_recommended_working_set_size'`. Without a Metal
+  device they estimate the working set from RAM, as `turboquant-plan` does
+  (which now also reads RAM on Linux); `--wire-memory`, which only means
+  something on Metal, is skipped with a message.
+
 ## [0.28.1] - 2026-10-17
 
 ### Security

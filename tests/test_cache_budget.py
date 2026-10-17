@@ -17,6 +17,8 @@ Laguna-S-2.1 ternary, 2.28 GB resident, 26.42 GB of experts):
 
 import os
 
+import pytest
+
 from turboquant_mlx.cache_budget import (
     MIN_BUDGET_BYTES,
     auto_cache_budget,
@@ -173,3 +175,109 @@ def test_local_path_typo_says_so(tmp_path):
     # a real repo id must still be treated as remote, not as a broken path
     target, remote = _resolve("manjunathshiva/Laguna-S-2.1-tqTe-g64")
     assert remote or os.path.isdir(target)
+
+
+# --------------------------------------------------------------------------
+# The working set itself. MLX's CPU backend on Linux reports no Metal working
+# set (device_info() is just architecture + device_name), and every `auto`
+# default used to index it and die with KeyError.
+# --------------------------------------------------------------------------
+
+_GIB = float(1 << 30)
+_CPU_DEVICE_INFO = {"architecture": "x86_64", "device_name": "cpu"}
+
+
+def _fake_sysconf(page, pages):
+    def sysconf(name):
+        return {"SC_PAGE_SIZE": page, "SC_PHYS_PAGES": pages}[name]
+    return sysconf
+
+
+def test_working_set_is_metals_figure_when_there_is_one(monkeypatch):
+    import mlx.core as mx
+
+    from turboquant_mlx import cache_budget
+
+    monkeypatch.setattr(mx, "device_info", lambda: {
+        **_CPU_DEVICE_INFO, "max_recommended_working_set_size": 12_710_000_000})
+    monkeypatch.setattr(cache_budget, "physical_ram_bytes",
+                        lambda: pytest.fail("RAM read with Metal present"))
+    assert cache_budget.working_set_bytes() == (12_710_000_000, False)
+
+
+def test_working_set_without_metal_is_the_ram_estimate(monkeypatch):
+    import mlx.core as mx
+
+    from turboquant_mlx import cache_budget
+
+    monkeypatch.setattr(mx, "device_info", lambda: dict(_CPU_DEVICE_INFO))
+    monkeypatch.setattr(cache_budget, "physical_ram_bytes", lambda: 16 * _GIB)
+    wss, estimated = cache_budget.working_set_bytes()
+    assert estimated is True
+    assert wss == int(cache_budget.estimate_wss(16 * _GIB))
+
+
+def test_working_set_survives_device_info_raising(monkeypatch):
+    import mlx.core as mx
+
+    from turboquant_mlx import cache_budget
+
+    def boom():
+        raise RuntimeError("no device")
+
+    monkeypatch.setattr(mx, "device_info", boom)
+    monkeypatch.setattr(cache_budget, "physical_ram_bytes", lambda: 16 * _GIB)
+    assert cache_budget.working_set_bytes()[1] is True
+
+
+def test_working_set_is_none_without_metal_or_ram(monkeypatch):
+    import mlx.core as mx
+
+    from turboquant_mlx import cache_budget
+
+    monkeypatch.setattr(mx, "device_info", lambda: dict(_CPU_DEVICE_INFO))
+    monkeypatch.setattr(cache_budget, "physical_ram_bytes", lambda: None)
+    assert cache_budget.working_set_bytes() is None
+
+
+def test_physical_ram_on_linux_comes_from_sysconf(monkeypatch):
+    import subprocess
+    import sys
+
+    from turboquant_mlx import cache_budget
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(subprocess, "check_output",
+                        lambda *a, **k: pytest.fail("sysctl run on Linux"))
+    monkeypatch.setattr(os, "sysconf", _fake_sysconf(4096, 4_194_304))
+    assert cache_budget.physical_ram_bytes() == 4096 * 4_194_304
+
+
+def test_physical_ram_unreadable_is_none(monkeypatch):
+    import sys
+
+    from turboquant_mlx import cache_budget
+
+    def no_sysconf(name):
+        raise ValueError(name)
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "sysconf", no_sysconf)
+    assert cache_budget.physical_ram_bytes() is None
+    # sysconf answers -1 for a value it does not know
+    monkeypatch.setattr(os, "sysconf", _fake_sysconf(4096, -1))
+    assert cache_budget.physical_ram_bytes() is None
+
+
+def test_physical_ram_on_macos_comes_from_sysctl(monkeypatch):
+    import subprocess
+    import sys
+
+    from turboquant_mlx import cache_budget
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(subprocess, "check_output",
+                        lambda argv: b"17179869184\n"
+                        if argv == ["sysctl", "-n", "hw.memsize"] else None)
+    monkeypatch.setattr(os, "sysconf", _fake_sysconf(1, 1))
+    assert cache_budget.physical_ram_bytes() == 17179869184

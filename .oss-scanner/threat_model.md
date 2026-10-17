@@ -62,7 +62,7 @@ write, or a folder somebody shared.
   `~/.cache/turboquant/prompt-cache/` by default (`disk_prompt_cache.py`);
   `--prefill-stats-file` appends JSONL.
 - **Shell-outs:** fixed argv only, no shell: `sysctl -n hw.memsize`
-  (`plan.py`, `stream/loader.py`) and `ps -o rss= -p <pid>`
+  (`cache_budget.py`, `stream/loader.py`) and `ps -o rss= -p <pid>`
   (`stream/stream_generate.py`). `plan` / `doctor` print
   `sudo sysctl -w iogpu.wired_limit_mb=...` as advice and never run it.
 
@@ -91,13 +91,9 @@ write, or a folder somebody shared.
 - The image is built from `.oss-scanner/Dockerfile`: Python 3.12, CPU-only
   `mlx[cpu]`, the package installed editable with `[kimi,vlm]`. No model
   weights are present and the scan is offline.
-- CPU-safe tests (about 620, ~15 s):
+- CPU-safe tests (about 640, ~15 s):
   `python -m pytest tests/ -k "not requires_model" --deselect tests/test_core.py::test_qjl_unbiasedness $TQ_METAL_ONLY_TESTS`.
   `TQ_METAL_ONLY_TESTS` (set in the image) leaves out the tests that need Metal.
-  Known Linux failure until it is fixed:
-  `tests/test_tokenizer_trust.py::test_serve_main_registers_the_operator_model`
-  starts `serve` with the default `--prompt-cache-max-gb auto`, which reads a
-  Metal-only device field and raises `KeyError` (see the server note below).
 - Tests build tiny synthetic models in a temp dir and are good templates for
   crafted inputs: `tests/test_flag_effects.py` and
   `tests/test_expert_layer_tiers.py` (convert, save, reload),
@@ -105,10 +101,10 @@ write, or a folder somebody shared.
   `tests/test_tokenizer_trust.py` (the K3 trust gate),
   `tests/test_safetensors_reader_teardown.py`, `tests/test_ngram_offload.py`,
   `tests/test_disk_prompt_cache.py`, `tests/test_serve_*.py`.
-- Server on Linux: `python -m turboquant_mlx.serve --host 127.0.0.1 --port 8080
-  --prompt-cache-max-gb off --metal-cache-limit-gb off` (the `auto` defaults
-  read Metal device info and fail on Linux). It starts without `--model`; point
-  a request's `model` at a crafted local directory.
+- Server on Linux: `python -m turboquant_mlx.serve --host 127.0.0.1 --port 8080`
+  (the default `auto` memory settings work there: with no Metal device they
+  size against a working set estimated from RAM). It starts without `--model`;
+  point a request's `model` at a crafted local directory.
 - CLIs, each with `--help`: `python -m turboquant_mlx.convert`,
   `python -m turboquant_mlx.generate`, `python -m turboquant_mlx.plan`,
   `python -m turboquant_mlx.serve_vlm` and

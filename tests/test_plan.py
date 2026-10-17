@@ -902,3 +902,47 @@ class TestWiredCapLeavesRoomForThePromptCache:
         from turboquant_mlx.plan import _PROMPT_CACHE_RESERVE_BYTES
         from turboquant_mlx.serve import _PROMPT_CACHE_RESERVE_BYTES as served
         assert _PROMPT_CACHE_RESERVE_BYTES == served
+
+
+class TestMachineOnLinux:
+    """MLX's CPU backend on Linux: device_info() has no Metal working set and
+    there is no `sysctl hw.memsize`. RAM used to be read only via sysctl, so
+    the RAM estimate had nothing to work from and every cap was unknown."""
+
+    CPU_INFO = {"architecture": "x86_64", "device_name": "cpu"}
+
+    def _linux(self, monkeypatch, pages):
+        import os
+        import sys
+
+        import mlx.core as mx
+
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(mx, "device_info", lambda: dict(self.CPU_INFO))
+        monkeypatch.setattr(os, "sysconf", lambda name: {
+            "SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": pages}[name])
+        return 4096 * pages
+
+    def test_reads_ram_and_estimates_the_cap(self, monkeypatch):
+        ram = self._linux(monkeypatch, 16 * 262_144)     # 16 GiB
+        m = machine()
+        assert m["ram_bytes"] == ram
+        assert m["wss_estimated"] is True
+        assert m["wss_bytes"] == pytest.approx(estimate_wss(ram), abs=1)
+        assert m["assumed"] is False
+
+    def test_wired_gb_override_still_uses_this_machines_ram(self, monkeypatch):
+        ram = self._linux(monkeypatch, 16 * 262_144)
+        m = machine(wired_gb=13.5)
+        assert m["ram_bytes"] == ram
+        assert m["wss_bytes"] == pytest.approx(13.5 * GB)
+        assert not m["wss_estimated"]
+
+    def test_metal_figure_wins_when_present(self, monkeypatch):
+        import mlx.core as mx
+
+        monkeypatch.setattr(mx, "device_info", lambda: {
+            **self.CPU_INFO, "max_recommended_working_set_size": 12_710_000_000})
+        m = machine()
+        assert m["wss_bytes"] == 12_710_000_000
+        assert not m["wss_estimated"]

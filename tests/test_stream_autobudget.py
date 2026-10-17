@@ -114,3 +114,110 @@ def test_auto_budget_experts_smaller_than_floor_cap_at_experts():
                            expert_bytes=200_000_000,
                            wss_bytes=16_000_000_000)
     assert b == 200_000_000
+
+
+# --------------------------------------------------------------------------
+# load_streaming's memory block, off and on a Metal device. MLX's CPU backend
+# on Linux has no working-set key in device_info(); both `--cache-budget-gb
+# auto` and `--wire-memory` indexed it and crashed. The model load is stubbed
+# out and the run stops right after the memory block.
+# --------------------------------------------------------------------------
+
+_CPU_INFO = {"architecture": "x86_64", "device_name": "cpu"}
+_GIB = float(1 << 30)
+_RESIDENT, _EXPERTS = 3_000_000_000, 20_000_000_000
+
+
+class _Stop(Exception):
+    pass
+
+
+@pytest.fixture
+def stub_load(monkeypatch, tmp_path):
+    import mlx.core as mx
+
+    from turboquant_mlx import cache_budget
+    from turboquant_mlx.stream import loader
+    from turboquant_mlx.stream.usage_profile import UsageProfile
+
+    monkeypatch.setattr(loader, "resolve_model_path", lambda p: tmp_path)
+    monkeypatch.setattr(loader, "load_turboquant",
+                        lambda *a, **k: (object(), object()))
+    monkeypatch.setattr(loader, "SafetensorsExpertReader",
+                        lambda *a, **k: object())
+    monkeypatch.setattr(loader, "_streamed_expert_bytes", lambda r: _EXPERTS)
+    monkeypatch.setattr(loader, "_model_file_bytes",
+                        lambda p: _RESIDENT + _EXPERTS)
+    monkeypatch.setattr(loader, "offloaded_ngram_bytes", lambda m: 0)
+
+    def stop(*a, **k):
+        raise _Stop
+
+    monkeypatch.setattr(UsageProfile, "load", stop)
+    wired = []
+    monkeypatch.setattr(mx, "set_wired_limit", wired.append)
+
+    def run(info, ram, **kw):
+        monkeypatch.setattr(mx, "device_info", lambda: dict(info))
+        monkeypatch.setattr(cache_budget, "physical_ram_bytes", lambda: ram)
+        with pytest.raises(_Stop):
+            loader.load_streaming("m", use_page_cache=False,
+                                  usage_file=str(tmp_path / "u.json"), **kw)
+        return wired
+    return run
+
+
+def test_auto_budget_without_metal_estimates_from_ram(stub_load, capsys):
+    from turboquant_mlx.cache_budget import estimate_wss
+
+    stub_load(_CPU_INFO, 16 * _GIB, cache_budget_gb="auto")
+    wss = int(estimate_wss(16 * _GIB))
+    budget = _auto_cache_budget(_RESIDENT + _EXPERTS, _EXPERTS, wss)
+    out = capsys.readouterr().out
+    assert (f"working set {wss / 1e9:.1f} GB estimated from RAM "
+            "(no Metal device) − resident 3.0 GB") in out
+    assert f"-> cache {budget / 1e9:.1f} GB" in out
+
+
+def test_auto_budget_without_metal_or_ram_says_what_to_pass(stub_load):
+    with pytest.raises(RuntimeError, match=r"--cache-budget-gb <GB>"):
+        stub_load(_CPU_INFO, None, cache_budget_gb="auto")
+
+
+def test_auto_budget_on_metal_log_is_unchanged(stub_load, capsys):
+    wss = 12_710_000_000
+    stub_load({**_CPU_INFO, "max_recommended_working_set_size": wss}, None,
+              cache_budget_gb="auto")
+    budget = _auto_cache_budget(_RESIDENT + _EXPERTS, _EXPERTS, wss)
+    assert capsys.readouterr().out == (
+        f"[stream] auto budget: working set 12.7 GB − resident 3.0 GB − "
+        f"reserve {_AUTO_RESERVE_BYTES / 1e9:.1f} GB -> cache "
+        f"{budget / 1e9:.1f} GB (experts on disk: 20.0 GB, projected peak "
+        f"{projected_peak_bytes(budget, _RESIDENT) / 1e9:.1f} GB)\n")
+
+
+def test_wire_memory_without_metal_skips(stub_load, capsys):
+    # RAM is known, but there is no Metal residency to wire on the CPU backend
+    wired = stub_load(_CPU_INFO, 8 * _GIB, cache_budget_gb=4.0,
+                      wire_memory=True)
+    assert wired == []
+    assert "no Metal device — skipping --wire-memory; continuing unwired" \
+        in capsys.readouterr().out
+
+
+def test_wire_memory_without_metal_or_ram_continues_unwired(stub_load, capsys):
+    wired = stub_load(_CPU_INFO, None, cache_budget_gb=4.0, wire_memory=True)
+    assert wired == []
+    assert "no Metal device — skipping --wire-memory; continuing unwired" \
+        in capsys.readouterr().out
+
+
+def test_wire_memory_on_metal_is_unchanged(stub_load, capsys):
+    wss = 55_000_000_000
+    wired = stub_load({**_CPU_INFO, "max_recommended_working_set_size": wss},
+                      None, cache_budget_gb=4.0, wire_memory=True)
+    want = int(_RESIDENT + 4.0e9 + _AUTO_RESERVE_BYTES)
+    assert wired == [want]
+    assert capsys.readouterr().out == (
+        f"[stream] wired-memory limit {want / 1e9:.1f} GB — weights and "
+        "expert cache stay resident under memory pressure\n")
