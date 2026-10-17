@@ -39,7 +39,10 @@ classifiers = [
 ]
 dependencies = [
     "mlx>=0.20.0",
-    "mlx-lm>=0.31.3",
+    # mlx-lm 0.32 changed the KV cache API (no meta_state) and ships its own
+    # kimi_k3 and laguna modules, which displace ours: 25 tests fail on 0.32.x.
+    # Lift the cap once the package is ported to 0.32.
+    "mlx-lm>=0.31.3,<0.32",
     # transformers 5.13 dropped string keys in AutoTokenizer.register, which
     # mlx-lm <= 0.31.3 still uses (NewlineTokenizer) at module scope — importing
     # mlx_lm.tokenizer_utils raises AttributeError. 5.14 restored string keys,

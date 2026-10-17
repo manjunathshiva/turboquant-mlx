@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `mlx-lm` is capped below 0.32 (`mlx-lm>=0.31.3,<0.32`). mlx-lm 0.32 changed the
+  KV cache API and ships its own `kimi_k3` and `laguna` modules, which displace
+  this package's: on Python 3.11+, where pip picks 0.32, the disk prompt cache,
+  Kimi K3, Laguna and MTP broke (25 tests). Python 3.10 already got 0.31.3.
+
 ## [0.28.0] - 2026-09-19
 
 ### Added
