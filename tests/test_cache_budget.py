@@ -187,6 +187,14 @@ _GIB = float(1 << 30)
 _CPU_DEVICE_INFO = {"architecture": "x86_64", "device_name": "cpu"}
 
 
+@pytest.fixture(autouse=True)
+def _no_host_cgroup(monkeypatch):
+    # the host running the tests may itself be a memory-limited container
+    from turboquant_mlx import cache_budget
+
+    monkeypatch.setattr(cache_budget, "_CGROUP_MEMORY_LIMITS", ())
+
+
 def _fake_sysconf(page, pages):
     def sysconf(name):
         return {"SC_PAGE_SIZE": page, "SC_PHYS_PAGES": pages}[name]
@@ -281,3 +289,74 @@ def test_physical_ram_on_macos_comes_from_sysctl(monkeypatch):
                         if argv == ["sysctl", "-n", "hw.memsize"] else None)
     monkeypatch.setattr(os, "sysconf", _fake_sysconf(1, 1))
     assert cache_budget.physical_ram_bytes() == 17179869184
+
+
+def _limit_files(monkeypatch, tmp_path, *values):
+    from turboquant_mlx import cache_budget
+
+    files = []
+    for i, value in enumerate(values):
+        f = tmp_path / f"limit{i}"
+        if value is not None:
+            f.write_text(value + "\n")
+        files.append(str(f))
+    monkeypatch.setattr(cache_budget, "_CGROUP_MEMORY_LIMITS", tuple(files))
+
+
+@pytest.fixture
+def linux_16gib(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "sysconf", _fake_sysconf(4096, 4_194_304))
+    return 4096 * 4_194_304
+
+
+def test_physical_ram_in_a_container_is_its_cgroup_v2_limit(
+        monkeypatch, tmp_path, linux_16gib):
+    from turboquant_mlx import cache_budget
+
+    _limit_files(monkeypatch, tmp_path, str(int(4 * _GIB)), None)
+    assert cache_budget.physical_ram_bytes() == 4 * _GIB
+
+
+def test_physical_ram_reads_cgroup_v1_when_there_is_no_v2(
+        monkeypatch, tmp_path, linux_16gib):
+    from turboquant_mlx import cache_budget
+
+    _limit_files(monkeypatch, tmp_path, None, str(int(2 * _GIB)))
+    assert cache_budget.physical_ram_bytes() == 2 * _GIB
+
+
+@pytest.mark.parametrize("unlimited", ["max", str(2**63 - 4096)])
+def test_physical_ram_without_a_cgroup_limit_is_the_hosts(
+        monkeypatch, tmp_path, linux_16gib, unlimited):
+    from turboquant_mlx import cache_budget
+
+    # v2 says "max"; v1 says a page-rounded 2**63
+    _limit_files(monkeypatch, tmp_path, unlimited)
+    assert cache_budget.physical_ram_bytes() == linux_16gib
+
+
+def test_cgroup_limit_stands_in_when_sysconf_fails(monkeypatch, tmp_path):
+    import sys
+
+    from turboquant_mlx import cache_budget
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "sysconf", _fake_sysconf(4096, -1))
+    _limit_files(monkeypatch, tmp_path, str(int(3 * _GIB)))
+    assert cache_budget.physical_ram_bytes() == 3 * _GIB
+
+
+def test_working_set_in_a_container_is_estimated_from_its_limit(
+        monkeypatch, tmp_path, linux_16gib):
+    import mlx.core as mx
+
+    from turboquant_mlx import cache_budget
+    from turboquant_mlx.cache_budget import estimate_wss
+
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": "cpu"})
+    _limit_files(monkeypatch, tmp_path, str(int(4 * _GIB)))
+    assert cache_budget.working_set_bytes() == (int(estimate_wss(4 * _GIB)),
+                                                True)

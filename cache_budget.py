@@ -102,11 +102,31 @@ def estimate_wss(ram_bytes: float | None) -> float | None:
     return frac * ram_bytes
 
 
+# A container's memory limit: cgroup v2, then v1. sysconf reports the host's
+# RAM inside a container, and sizing against that gets the process OOM-killed.
+_CGROUP_MEMORY_LIMITS = ("/sys/fs/cgroup/memory.max",
+                         "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+
+
+def _cgroup_memory_limit() -> int | None:
+    """This process's cgroup memory limit in bytes, or None when unlimited
+    (v2 says ``max``; v1 says a huge number, which the caller's min() drops)
+    or not on Linux."""
+    for limit_file in _CGROUP_MEMORY_LIMITS:
+        try:
+            with open(limit_file) as f:
+                value = f.read().strip()
+        except OSError:
+            continue
+        return int(value) if value.isdigit() and int(value) > 0 else None
+    return None
+
+
 def physical_ram_bytes() -> int | None:
-    """Installed RAM in bytes, or None when it can't be read.
+    """RAM this process can use, in bytes, or None when it can't be read.
 
     macOS reports it via `sysctl hw.memsize`; elsewhere (Linux, where MLX runs
-    on its CPU backend) `sysconf` does.
+    on its CPU backend) `sysconf` does, capped at a container's cgroup limit.
     """
     if sys.platform == "darwin":
         try:
@@ -117,7 +137,10 @@ def physical_ram_bytes() -> int | None:
     try:  # AttributeError: os.sysconf is absent on some platforms (Windows)
         ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (ValueError, OSError, AttributeError):
-        return None
+        ram = 0
+    limit = _cgroup_memory_limit()
+    if limit and (ram <= 0 or limit < ram):
+        ram = limit
     return ram if ram > 0 else None
 
 
