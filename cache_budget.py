@@ -102,24 +102,54 @@ def estimate_wss(ram_bytes: float | None) -> float | None:
     return frac * ram_bytes
 
 
-# A container's memory limit: cgroup v2, then v1. sysconf reports the host's
-# RAM inside a container, and sizing against that gets the process OOM-killed.
-_CGROUP_MEMORY_LIMITS = ("/sys/fs/cgroup/memory.max",
-                         "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+# sysconf reports the host's RAM inside a container or a memory-limited
+# systemd service, and sizing against that gets the process OOM-killed. The
+# limit that applies is the tightest one on this process's cgroup and its
+# ancestors, which /proc/self/cgroup locates under the cgroup mount.
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
+_CGROUP_ROOT = "/sys/fs/cgroup"
 
 
 def _cgroup_memory_limit() -> int | None:
-    """This process's cgroup memory limit in bytes, or None when unlimited
-    (v2 says ``max``; v1 says a huge number, which the caller's min() drops)
-    or not on Linux."""
-    for limit_file in _CGROUP_MEMORY_LIMITS:
-        try:
-            with open(limit_file) as f:
-                value = f.read().strip()
-        except OSError:
+    """The tightest cgroup memory limit on this process, in bytes, or None
+    when there is none (v2 says ``max``; v1 says a huge number, which the
+    caller's min() drops) or this isn't Linux.
+
+    A path from /proc/self/cgroup that doesn't exist under the mount (a v1
+    container without its own cgroup namespace sees the host's path) walks up
+    to the mount root, which is then that container's own cgroup.
+    """
+    try:
+        with open(_PROC_SELF_CGROUP) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    limits = []
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) != 3:
             continue
-        return int(value) if value.isdigit() and int(value) > 0 else None
-    return None
+        _, controllers, cgroup = parts
+        if controllers == "":  # v2: "0::/path"
+            base, name = _CGROUP_ROOT, "memory.max"
+        elif "memory" in controllers.split(","):  # v1: "N:memory:/path"
+            base, name = os.path.join(_CGROUP_ROOT, "memory"), \
+                "memory.limit_in_bytes"
+        else:
+            continue
+        rel = cgroup.strip("/")
+        while True:
+            try:
+                with open(os.path.join(base, rel, name)) as f:
+                    value = f.read().strip()
+            except OSError:
+                value = ""
+            if value.isdigit() and int(value) > 0:
+                limits.append(int(value))
+            if not rel:
+                break
+            rel = os.path.dirname(rel)
+    return min(limits) if limits else None
 
 
 def physical_ram_bytes() -> int | None:

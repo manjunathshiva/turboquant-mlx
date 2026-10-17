@@ -192,7 +192,8 @@ def _no_host_cgroup(monkeypatch):
     # the host running the tests may itself be a memory-limited container
     from turboquant_mlx import cache_budget
 
-    monkeypatch.setattr(cache_budget, "_CGROUP_MEMORY_LIMITS", ())
+    monkeypatch.setattr(cache_budget, "_PROC_SELF_CGROUP",
+                        "/nonexistent/proc/self/cgroup")
 
 
 def _fake_sysconf(page, pages):
@@ -291,16 +292,29 @@ def test_physical_ram_on_macos_comes_from_sysctl(monkeypatch):
     assert cache_budget.physical_ram_bytes() == 17179869184
 
 
-def _limit_files(monkeypatch, tmp_path, *values):
+def _cgroups(monkeypatch, tmp_path, proc_self_cgroup, files):
+    """A fake cgroup mount: ``files`` maps paths under it to limits."""
     from turboquant_mlx import cache_budget
 
-    files = []
-    for i, value in enumerate(values):
-        f = tmp_path / f"limit{i}"
-        if value is not None:
-            f.write_text(value + "\n")
-        files.append(str(f))
-    monkeypatch.setattr(cache_budget, "_CGROUP_MEMORY_LIMITS", tuple(files))
+    root = tmp_path / "cgroup"
+    for rel, value in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(value + "\n")
+    proc = tmp_path / "proc_self_cgroup"
+    proc.write_text(proc_self_cgroup)
+    monkeypatch.setattr(cache_budget, "_CGROUP_ROOT", str(root))
+    monkeypatch.setattr(cache_budget, "_PROC_SELF_CGROUP", str(proc))
+
+
+def _limit_files(monkeypatch, tmp_path, v2=None, v1=None):
+    # a container with its own cgroup namespace: its cgroup is the mount root
+    files = {}
+    if v2 is not None:
+        files["memory.max"] = v2
+    if v1 is not None:
+        files["memory/memory.limit_in_bytes"] = v1
+    _cgroups(monkeypatch, tmp_path, "0::/\n" if v1 is None else
+             "7:memory:/\n", files)
 
 
 @pytest.fixture
@@ -360,3 +374,48 @@ def test_working_set_in_a_container_is_estimated_from_its_limit(
     _limit_files(monkeypatch, tmp_path, str(int(4 * _GIB)))
     assert cache_budget.working_set_bytes() == (int(estimate_wss(4 * _GIB)),
                                                 True)
+
+
+def test_physical_ram_in_a_systemd_service_is_its_cgroup_limit(
+        monkeypatch, tmp_path, linux_16gib):
+    from turboquant_mlx import cache_budget
+
+    # MemoryMax= on the service; the slice above it and the root are unlimited
+    _cgroups(monkeypatch, tmp_path, "0::/system.slice/tq.service\n", {
+        "system.slice/tq.service/memory.max": str(int(6 * _GIB)),
+        "system.slice/memory.max": "max",
+    })
+    assert cache_budget.physical_ram_bytes() == 6 * _GIB
+
+
+def test_an_ancestors_tighter_limit_wins(monkeypatch, tmp_path, linux_16gib):
+    from turboquant_mlx import cache_budget
+
+    _cgroups(monkeypatch, tmp_path, "0::/user.slice/user-501.slice/app\n", {
+        "user.slice/user-501.slice/app/memory.max": str(int(8 * _GIB)),
+        "user.slice/memory.max": str(int(5 * _GIB)),
+    })
+    assert cache_budget.physical_ram_bytes() == 5 * _GIB
+
+
+def test_v1_host_path_missing_in_the_container_falls_back_to_the_root(
+        monkeypatch, tmp_path, linux_16gib):
+    from turboquant_mlx import cache_budget
+
+    # without a cgroup namespace the container sees the host's path, but its
+    # own cgroup is mounted at the root
+    _cgroups(monkeypatch, tmp_path, "12:cpu,cpuacct:/docker/abc\n"
+             "7:memory:/docker/abc\n", {
+                 "memory/memory.limit_in_bytes": str(int(2 * _GIB)),
+             })
+    assert cache_budget.physical_ram_bytes() == 2 * _GIB
+
+
+
+def test_a_malformed_proc_self_cgroup_line_is_skipped(
+        monkeypatch, tmp_path, linux_16gib):
+    from turboquant_mlx import cache_budget
+
+    _cgroups(monkeypatch, tmp_path, "garbage\n0::/\n",
+             {"memory.max": str(int(4 * _GIB))})
+    assert cache_budget.physical_ram_bytes() == 4 * _GIB
