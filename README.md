@@ -1899,7 +1899,7 @@ turboquant_mlx/
 
 ## License
 
-Apache-2.0 (`LICENSE`, `NOTICE`), from v0.3.0. Versions 0.1.x–0.2.0 were released under MIT (`LICENSE-MIT`).
+Apache-2.0 (`LICENSE`, `NOTICE`), from v0.3.0. Versions 0.1.x–0.2.0 were released under MIT (`LICENSES/MIT.txt`).
 
 ## Acknowledgments
 
