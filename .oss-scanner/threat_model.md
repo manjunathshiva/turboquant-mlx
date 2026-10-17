@@ -91,9 +91,13 @@ write, or a folder somebody shared.
 - The image is built from `.oss-scanner/Dockerfile`: Python 3.12, CPU-only
   `mlx[cpu]`, the package installed editable with `[kimi,vlm]`. No model
   weights are present and the scan is offline.
-- CPU-safe tests (about 580, ~15 s):
+- CPU-safe tests (about 620, ~15 s):
   `python -m pytest tests/ -k "not requires_model" --deselect tests/test_core.py::test_qjl_unbiasedness $TQ_METAL_ONLY_TESTS`.
   `TQ_METAL_ONLY_TESTS` (set in the image) leaves out the tests that need Metal.
+  Known Linux failure until it is fixed:
+  `tests/test_tokenizer_trust.py::test_serve_main_registers_the_operator_model`
+  starts `serve` with the default `--prompt-cache-max-gb auto`, which reads a
+  Metal-only device field and raises `KeyError` (see the server note below).
 - Tests build tiny synthetic models in a temp dir and are good templates for
   crafted inputs: `tests/test_flag_effects.py` and
   `tests/test_expert_layer_tiers.py` (convert, save, reload),
@@ -105,8 +109,10 @@ write, or a folder somebody shared.
   --prompt-cache-max-gb off --metal-cache-limit-gb off` (the `auto` defaults
   read Metal device info and fail on Linux). It starts without `--model`; point
   a request's `model` at a crafted local directory.
-- CLIs: `python -m turboquant_mlx.convert | generate | plan | serve_vlm`,
-  `python -m turboquant_mlx.stream.stream_generate`; all take `--help`.
+- CLIs, each with `--help`: `python -m turboquant_mlx.convert`,
+  `python -m turboquant_mlx.generate`, `python -m turboquant_mlx.plan`,
+  `python -m turboquant_mlx.serve_vlm` and
+  `python -m turboquant_mlx.stream.stream_generate`.
 
 ## How you rate severity
 
