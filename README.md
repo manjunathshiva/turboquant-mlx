@@ -51,6 +51,10 @@ Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, 
 | Qwen3.8-Flash-Next (180B MoE, 512 experts) | [Affine oQ2 (Vontra)](https://huggingface.co/Vontra/Qwen3.8-Flash-Next-MLX-oQ2) | 2 | — | 63.03 GiB | *Too big to load resident on a 64 GB Mac* |
 | Qwen3.8-Flash-Next | [imatrix iQ-MLX 3.3 bpw (ddalcu, for mlx-serve)](https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-iQ-MLX-3.3bpw) | 3.3 | — | 50.6 GiB | *Fits 64 GB per its card; not measured here* |
 | **[Qwen3.8-Flash-Next](https://huggingface.co/manjunathshiva/Qwen3.8-Flash-Next-tq4a-tq2e-g64)** | **TQ 4-attn / 2-experts / 2-bit affine n-gram table, data-free** | **2/4 mix** | **9.31** | **52.00 GiB** + 0.84 GiB vision | **16–18 tok/s · fully resident on 64 GB · vision passes** |
+| NVIDIA Nemotron 3.5 Super VL 120B (VLM, 512 experts, top-22) | BF16 (original) | 16 | — | 249 GB | *Doesn't fit 64GB* |
+| Nemotron 3.5 Super VL 120B | NVFP4 (NVIDIA) | 4 | — | 63.0 GiB | *Doesn't fit resident on a 64 GB Mac* |
+| **[Nemotron 3.5 Super VL 120B (ternary experts)](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts / 8-bit affine extras, gs=64** | **1.6/3 mix** | **—** | **29.29 GiB** | **~7–8 tok/s · fully resident on 64 GB at default settings · 36K context · text 6/6, vision 3/3** |
+| **[Nemotron 3.5 Super VL 120B (3-bit)](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3-g64)** | **TurboQuant, gs=64** | **3** | **—** | **50.22 GiB** | **~19–21 tok/s · 64 GB with `sysctl` + `--prefill-step-size 256`** |
 
 ## Key Results — KV Cache Compression
 
@@ -1840,6 +1844,7 @@ Options:
 | Sarvam MoE (Megatron-style fused QKV, DeepSeek-V3 routing) | `sarvam_moe` | Yes | Port tested against fp32 (7122/7122 tensors, layer-1 parity 5.4e-7). Custom arch — MLX port shipped here. **No quantized build published**: 4-bit degenerates on long generations (53% of trials; mlx-lm affine 4-bit 100%) |
 | Muse Glimmer (dense VLM: gated attention, sandwich norms, sliding/NoPE mix, ViT-G/14) | `muse_glimmer` | No | Tested (29.8B: `tq4-g64` beats affine 4-bit on PPL — 4.3315 vs 4.3798 — in 25% less space; `tq3-g64` = 12.53 GiB). Structural match verified against the checkpoint, 1436/1436 tensors. Needs **mlx-vlm >= 0.6.12** ([#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838), merged) — see [Muse Glimmer](#muse-glimmer-30b-dense-vlm) |
 | Qwen3.8-Flash-Next (Gated DeltaNet + Qwen Sparse Attention, n-gram/PLE embedding, hyper-connections; Qwen3-VL tower) | `qwen4_exp` | Yes (512 experts, top-10, 640 wide) | Tested (180B: `tq4a-tq2e-g64` = 52.00 GiB, fully resident on a 64 GB Mac at 16–18 tok/s; vision through mlx-vlm's Qwen3-VL tower). Architecture vendored from the open mlx-lm PR [#1788](https://github.com/ml-explore/mlx-lm/pull/1788) until it merges. `--kv-bits` has no effect on it — see [Qwen3.8-Flash-Next](#qwen38-flash-next-180b-moe-512-experts) |
+| NVIDIA Nemotron 3.5 Super VL (Mamba-2 + attention + latent MoE, RADIO vision tower, via **mlx-vlm**) | `nemotron_h_omni` | Yes (512 experts, top-22, latent MoE) | Tested (124B: ternary `tq3a-tqTe-g64` = 29.29 GiB, resident on a 64 GB Mac at default settings, text 6/6 and vision 3/3; `tq3-g64` = 50.22 GiB at ~20 tok/s with `sysctl` + `--prefill-step-size 256`). mlx-vlm >= 0.7.9 runs the model; `lm_head` and the vision projector `mlp1` stay off the polar path. Needs turboquant-mlx-full >= 0.29.0 |
 | DiffusionGemma (block-diffusion MoE, via **mlx-vlm**) | `diffusion_gemma` | Yes (128 experts, top-8) | Tested (26B-A4B: convert + block-diffusion sampler, coherent at 3-bit — [HF](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)). **Experimental**: decode is much slower than native 4-bit until a batched codebook gather-GEMM kernel lands |
 
 ### mlx-vlm architectures (multimodal / diffusion)
@@ -1848,7 +1853,7 @@ Architectures that live in [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) rather
 than mlx-lm convert and run through dedicated entry points (v0.7.0+):
 
 ```bash
-pip install "turboquant-mlx-full[vlm]"   # adds mlx-vlm >= 0.6.12
+pip install "turboquant-mlx-full[vlm]"   # adds mlx-vlm >= 0.7.9
 
 # Convert (vision towers, routers, and known quant-sensitive blocks stay full precision)
 python -m turboquant_mlx.convert_vlm \
