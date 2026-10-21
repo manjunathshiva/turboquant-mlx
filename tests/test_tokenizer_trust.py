@@ -388,7 +388,10 @@ def test_serve_streaming_path_passes_trust_through(monkeypatch, hub):
     for flag in (False, True):
         with pytest.raises(_Stop):
             _provider(trust_remote_code=flag).load(hub.repo)
-    assert seen == [{"trust_remote_code": None}, {"trust_remote_code": True}]
+    # An unregistered repo keeps the server's explicit False (a refusal, never
+    # transformers' interactive prompt); only the operator's registered K3
+    # directory is mapped back to "unset" (test_serve_operator_local_k3_model_loads).
+    assert seen == [{"trust_remote_code": False}, {"trust_remote_code": True}]
 
 
 def test_load_streaming_passes_tokenizer_config_on(monkeypatch, local_k3):

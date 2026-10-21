@@ -28,7 +28,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   buffer.
 - `turboquant-serve` without `--trust-remote-code` still trusts the Kimi K3
   directory you pass as `--model` (mlx-lm 0.32's server sends `False` where
-  0.31 sent "unset"), and still trusts nothing a request can name.
+  0.31 sent "unset"), and still trusts nothing a request can name: every
+  other model keeps the explicit refusal.
+- `turboquant-convert --trust-remote-code` also reaches mlx-lm 0.32's new gate
+  on a source's own model code (`model_file`), as mlx-lm's own converter does.
 - The MTP reference loop's snapshot of the recurrent layers is a real copy
   again; under mlx-lm 0.32 the snapshot shared a list with the live cache, so
   restoring after a rejected draft changed nothing.
