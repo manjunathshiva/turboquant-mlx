@@ -58,6 +58,40 @@ def test_get_nested_module_resolves_and_returns_none():
     assert _get_nested_module(m, "embed_tokens.nope.deeper") is None
 
 
+class _Projector(nn.Module):
+    """Nemotron 3.5 VL's vision projector holds its linears in a list
+    (`mlp1.layers.1` / `.3`), so the extra is replaced by index."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = [nn.LayerNorm(DIM), nn.Linear(DIM, OUT, bias=False),
+                       nn.GELU(), nn.Linear(OUT, DIM, bias=False)]
+
+
+class WithProjector(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.mlp1 = _Projector()
+
+
+def test_affine_extra_held_in_a_list_is_replaced_by_index():
+    a = _affine((OUT, DIM))
+    b = _affine((DIM, OUT))
+    w = {"mlp1.layers.1.weight": a[0], "mlp1.layers.1.scales": a[1],
+         "mlp1.layers.1.biases": a[2],
+         "mlp1.layers.3.weight": b[0], "mlp1.layers.3.scales": b[1],
+         "mlp1.layers.3.biases": b[2]}
+    m = WithProjector()
+    specs = _prepare_affine_extras(m, w)
+    assert set(specs) == {"mlp1.layers.1", "mlp1.layers.3"}
+    assert isinstance(m.mlp1.layers[1], nn.QuantizedLinear)
+    assert isinstance(m.mlp1.layers[3], nn.QuantizedLinear)
+    assert isinstance(m.mlp1.layers[0], nn.LayerNorm)
+    m.load_weights(list(w.items()), strict=False)
+    y = m.mlp1.layers[3](m.mlp1.layers[1](mx.ones((1, DIM))))
+    assert y.shape == (1, DIM) and y.dtype != mx.uint32
+
+
 def test_affine_extras_become_quantized_modules():
     m, w = Tiny(), _checkpoint()
     specs = _prepare_affine_extras(m, w)

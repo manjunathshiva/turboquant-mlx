@@ -40,7 +40,12 @@ def _set_nested_attr(model, path, value):
             parent = parent[int(p)]
         else:
             raise AttributeError(f"Cannot resolve '{p}' in '{path}'")
-    setattr(parent, parts[-1], value)
+    # A module held in a list (e.g. Nemotron VL's projector `mlp1.layers.3`)
+    # is replaced by index, not by attribute.
+    if isinstance(parent, list) and parts[-1].isdigit():
+        parent[int(parts[-1])] = value
+    else:
+        setattr(parent, parts[-1], value)
 
 
 def _get_nested_module(model, path):
