@@ -18,6 +18,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **TurboQuant builds of mlx-vlm MoE models load again**, among them the
+  published DiffusionGemma ones. Since mlx-vlm 0.6.12, its MoE models build
+  their experts from mlx-vlm's own `SwitchLinear` class rather than mlx-lm's,
+  and this package recognised only mlx-lm's: `convert_vlm` left every expert
+  unquantized, and loading swapped in none of them.
 - Laguna and Kimi K3 TurboQuant checkpoints load through this package's own
   model code again. mlx-lm 0.32 ships its own `laguna` and `kimi_k3` modules
   with a different weight layout, which would have taken over. Plain mlx-lm

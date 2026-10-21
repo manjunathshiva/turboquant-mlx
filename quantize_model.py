@@ -15,15 +15,9 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from turboquant_mlx.config import TurboQuantConfig
+from turboquant_mlx.compat import switch_linear_classes
 from turboquant_mlx.layers.polar_linear import PolarQuantizedLinear
 from turboquant_mlx.layers.polar_switch_linear import PolarQuantizedSwitchLinear
-
-# Try importing SwitchLinear for MoE detection
-try:
-    from mlx_lm.models.switch_layers import SwitchLinear, QuantizedSwitchLinear
-    _HAS_SWITCH_LINEAR = True
-except ImportError:
-    _HAS_SWITCH_LINEAR = False
 
 
 def _detect_architecture(config: dict) -> str:
@@ -191,10 +185,10 @@ def quantize_affine_extras(model, config, bits: int, group_size: int,
 
 
 def _is_switch_linear(module: nn.Module) -> bool:
-    """Check if a module is a SwitchLinear or QuantizedSwitchLinear (MoE expert weights)."""
-    if not _HAS_SWITCH_LINEAR:
-        return False
-    return isinstance(module, (SwitchLinear, QuantizedSwitchLinear))
+    """Check if a module is a SwitchLinear or QuantizedSwitchLinear (MoE expert
+    weights) — mlx-lm's or mlx-vlm's; see ``compat.switch_linear_classes``."""
+    plain, quantized = switch_linear_classes()
+    return isinstance(module, plain + quantized)
 
 
 def _dequantize_switch_expert(module, e: int) -> mx.array:
@@ -301,7 +295,7 @@ def turboquant_quantize(
     module_types = {}  # path -> "switch" | "switch_quantized" | "linear" | "skip"
     for path, module in model.named_modules():
         if _is_switch_linear(module):
-            is_preq = _HAS_SWITCH_LINEAR and isinstance(module, QuantizedSwitchLinear)
+            is_preq = isinstance(module, switch_linear_classes()[1])
             module_types[path] = "switch_quantized" if is_preq else "switch"
             module_paths.append(path)
         elif isinstance(module, nn.Linear):

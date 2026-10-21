@@ -173,11 +173,10 @@ def _prepare_polar_layers(model, weights, tq_config):
     Detects which layers were quantized by checking for '.codebook' keys
     in the saved weights, then creates matching PolarQuantized layers.
     """
-    try:
-        from mlx_lm.models.switch_layers import SwitchLinear
-        has_switch = True
-    except ImportError:
-        has_switch = False
+    from turboquant_mlx.compat import switch_linear_classes
+
+    # mlx-lm's SwitchLinear and, for a VLM, mlx-vlm's own (since 0.6.12).
+    switch_classes, _ = switch_linear_classes()
 
     # Find all layers that have codebook in saved weights
     quantized_paths = set()
@@ -249,7 +248,7 @@ def _prepare_polar_layers(model, weights, tq_config):
                     return derived
             return tq_config.group_size_for_path(path)
 
-        if has_switch and isinstance(module, SwitchLinear):
+        if switch_classes and isinstance(module, switch_classes):
             num_experts, output_dims, input_dims = module.weight.shape
             pq = PolarQuantizedSwitchLinear(
                 input_dims=input_dims,

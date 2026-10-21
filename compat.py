@@ -129,6 +129,40 @@ def get_model_classes(config: dict):
     return _get_classes(config)
 
 
+def switch_linear_classes():
+    """The upstream MoE expert-layer classes, as ``(plain, quantized)`` tuples.
+
+    mlx-lm's, plus mlx-vlm's: since 0.6.12, ``mlx_vlm.models.switch_layers``
+    defines its own ``SwitchLinear`` / ``QuantizedSwitchLinear`` (0.6.3 reused
+    mlx-lm's), and every mlx-vlm MoE (DiffusionGemma, Nemotron-H Omni) builds
+    its experts from those. Checking mlx-lm's classes alone skipped every
+    expert of a VLM on convert and swapped in none of them on load.
+
+    mlx-vlm is only consulted once something has imported it: a module cannot
+    be an instance of a class whose module was never loaded, so this never
+    pulls mlx-vlm into a text-only process.
+    """
+    import importlib
+    import sys
+
+    plain, quantized = [], []
+    for name in ("mlx_lm.models.switch_layers", "mlx_vlm.models.switch_layers"):
+        mod = sys.modules.get(name)
+        if mod is None and name.startswith("mlx_lm."):
+            try:
+                mod = importlib.import_module(name)
+            except ImportError:
+                mod = None
+        if mod is None:
+            continue
+        for cls_name, bucket in (("SwitchLinear", plain),
+                                 ("QuantizedSwitchLinear", quantized)):
+            cls = getattr(mod, cls_name, None)
+            if cls is not None and cls not in bucket:
+                bucket.append(cls)
+    return tuple(plain), tuple(quantized)
+
+
 def load_source(path_or_hf_repo, tokenizer_config=None, lazy=False,
                 trust_remote_code=False):
     """``mlx_lm.utils.load`` for conversion sources, built via our ports.
