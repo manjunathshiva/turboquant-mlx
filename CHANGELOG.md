@@ -6,6 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-21
+
+### Added
+
+- **Documentation site** at https://manjunathshiva.github.io/turboquant-mlx/:
+  getting started, choosing a model by Mac memory, guides, one page per
+  model family, benchmarks and a command-line reference. The README is
+  trimmed to point into it.
+
 ### Changed
 
 - **Ternary expert layers decode much faster, with bit-identical output.** The
@@ -14,9 +23,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once where a group starts and step by a constant `/ 3` per weight. Kernel
   time at real expert shapes: 2.5–3.1× faster for decode gate/up
   (`polar_gather_qmv`), 4.8–5.2× for decode down (`polar_multi_gather_qmv`)
-  and 4.7–5.3× for dequantizing all experts. Every published ternary build
-  benefits without re-conversion. Bit-packed 2/3/4-bit kernels and the sorted
-  prefill kernel (`polar_gather_qmm`, already fast) are unchanged.
+  and 4.7–5.3× for dequantizing all experts. End to end, NVIDIA Nemotron 3.5
+  Super VL ternary decodes 2× faster on an M4 Max (10.5 → 21.0 tok/s, same
+  output). Every published ternary build benefits without re-conversion; the
+  README and docs give estimates for the others, marked as such. Bit-packed
+  2/3/4-bit kernels and the sorted prefill kernel (`polar_gather_qmm`,
+  already fast) are unchanged.
 
 ### Fixed
 

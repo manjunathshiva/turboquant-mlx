@@ -19,14 +19,14 @@ Measured results, mostly on a 64 GB M4 Max, plus a 16 GB M4 Mac mini and a 48 GB
 | GPT-OSS-120B | TurboQuant | 2 | — | 32 GB | 51 tok/s (poor quality) |
 | Qwen3.5-122B-A10B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **[Qwen3.5-122B-A10B](https://huggingface.co/manjunathshiva/qwen3.5-122b-tq3)** | **TurboQuant** | **3** | **—** | **~50 GB** | **26.5 tok/s (64 GB) · streams on a 16 GB Mac mini** |
-| **[Qwen3.5-122B-A10B (ternary experts)](https://huggingface.co/manjunathshiva/Qwen3.5-122B-A10B-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **30.9 GB** | **~13 tok/s · 32.5 GB peak, resident on 48 GB Macs without sysctl · 6/6 stress** |
+| **[Qwen3.5-122B-A10B (ternary experts)](https://huggingface.co/manjunathshiva/Qwen3.5-122B-A10B-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **30.9 GB** | **~25 tok/s\* (0.29.0: ~13) · 32.5 GB peak, resident on 48 GB Macs without sysctl · 6/6 stress** |
 | **[Qwen3.6-35B-A3B](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **~16 GB** | **~60 tok/s (resident) · runs in <4 GB via streaming** |
-| **[Qwen3.6-35B-A3B (ternary experts)](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **9.4 GB** | **~10.4 tok/s fully resident on a 16 GB Mac mini (~33 tok/s M4 Max) · chat; not for agent harnesses** |
-| **[Qwen3.6-35B-A3B (ternary + 4-bit expert-down)](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64)** | **TQ 3-attn / ternary experts / 4-bit expert-down, gs=64** | **1.6/3/4 mix** | **—** | **12.6 GB** | **15.2–15.6 tok/s on a 16 GB Mac mini (sysctl) · Opencode agentic 3/3** |
+| **[Qwen3.6-35B-A3B (ternary experts)](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **9.4 GB** | **~17 tok/s\* fully resident on a 16 GB Mac mini (0.29.0: ~10.4) · ~55 tok/s\* M4 Max (0.29.0: ~33) · chat; not for agent harnesses** |
+| **[Qwen3.6-35B-A3B (ternary + 4-bit expert-down)](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64)** | **TQ 3-attn / ternary experts / 4-bit expert-down, gs=64** | **1.6/3/4 mix** | **—** | **12.6 GB** | **~17 tok/s\* on a 16 GB Mac mini (sysctl; 0.29.0: 15.2–15.6) · Opencode agentic 3/3** |
 | **[Qwen3.6-27B (dense coder)](https://huggingface.co/manjunathshiva/Qwen3.6-27B-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **~13 GB** | **~14 tok/s (resident) · fits 48 GB, SWE-bench coder** |
 | **[Qwen3-235B-A22B-Instruct-2507 (hybrid)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3a-tq2e-g32)** | **TQ 3-attn / 2-experts, gs=32** | **2/3 mix** | **—** | **70.5 GB** | **~4–6 tok/s (64 GB, 40 GB cache) · converts + streams on a 16 GB Mac mini** |
 | **[Qwen3-235B-A22B-Instruct-2507 (full 3-bit)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **103 GB** | **~1.3 tok/s (64 GB, 40 GB cache) · recall-critical sibling, passes 6/6 stress** |
-| **[Qwen3-235B-A22B-Instruct-2507 (ternary experts, 1.58-bit)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **53 GB** | **5.6 tok/s (64 GB) · fully resident, no streaming** |
+| **[Qwen3-235B-A22B-Instruct-2507 (ternary experts, 1.58-bit)](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **53 GB** | **~9–12 tok/s\* (64 GB; 0.29.0: 5.6) · fully resident, no streaming** |
 | **Nemotron-3-Nano-4B** | **TurboQuant** | **3** | **—** | **~2.2 GB** | **75.6 tok/s** |
 | Nemotron-3-Super-120B-A12B | BF16 (original) | 16 | — | ~240 GB | *Doesn't fit 64GB* |
 | **Nemotron-3-Super-120B-A12B** | **TurboQuant** | **3** | **—** | **~50 GB** | **18.7 tok/s** |
@@ -34,7 +34,7 @@ Measured results, mostly on a 64 GB M4 Max, plus a 16 GB M4 Mac mini and a 48 GB
 | **[Laguna-XS.2 (33B agentic coder)](https://huggingface.co/manjunathshiva/Laguna-XS.2-tq3-g64)** | **TurboQuant, gs=64** | **3** | **—** | **13.8 GB** | **46.8 tok/s · 32 GB Mac · Opencode pass** |
 | Laguna-S-2.1 (118B) | BF16 (original) | 16 | — | ~219 GB | *Doesn't fit 64GB* |
 | Laguna-S-2.1 (118B) | Affine 4-bit (mlx-community; since removed from Hugging Face) | 4 | — | ~64 GB | *Exceeds Metal's ~56 GB working set — won't load* |
-| **[Laguna-S-2.1 (118B, ternary experts)](https://huggingface.co/manjunathshiva/Laguna-S-2.1-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **~27 GB** | **~12.5 tok/s · fully resident on 64 GB with ~25 GB spare · Opencode pass** |
+| **[Laguna-S-2.1 (118B, ternary experts)](https://huggingface.co/manjunathshiva/Laguna-S-2.1-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts, gs=64** | **1.6/3 mix** | **—** | **~27 GB** | **~20–28 tok/s\* (0.29.0: ~12.5) · fully resident on 64 GB with ~25 GB spare · Opencode pass** |
 | **Kimi K3 (2.8T MoE)** | **TQ 3-attn / ternary experts / 4-bit expert-down, gs=64** | **1.6/3/4 mix** | **—** | **931 GB** | **2.3 tok/s (Mac Studio 512 GB, top-8) · 1.2 tok/s at native top-16 · streams experts from disk** |
 | DiffusionGemma-26B-A4B (block-diffusion MoE) | [Affine 4-bit (mlx-community)](https://huggingface.co/mlx-community/diffusiongemma-26B-A4B-it-4bit) | 4 | — | 15.0 GB | ~35 tok/s |
 | **[DiffusionGemma-26B-A4B](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)** | **TurboQuant, gs=32** | **3** | **—** | **13.8 GB** | **~4.6 tok/s · experimental: slower than 4-bit** |
@@ -51,8 +51,10 @@ Measured results, mostly on a 64 GB M4 Max, plus a 16 GB M4 Mac mini and a 48 GB
 | **[Qwen3.8-Flash-Next](https://huggingface.co/manjunathshiva/Qwen3.8-Flash-Next-tq4a-tq2e-g64)** | **TQ 4-attn / 2-experts / 2-bit affine n-gram table, data-free** | **2/4 mix** | **9.31** | **52.00 GiB** + 0.84 GiB vision | **16–18 tok/s · fully resident on 64 GB · vision passes** |
 | NVIDIA Nemotron 3.5 Super VL 120B (VLM, 512 experts, top-22) | BF16 (original) | 16 | — | 249 GB | *Doesn't fit 64GB* |
 | Nemotron 3.5 Super VL 120B | NVFP4 (NVIDIA) | 4 | — | 63.0 GiB | *Doesn't fit resident on a 64 GB Mac* |
-| **[Nemotron 3.5 Super VL 120B (ternary experts)](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts / 8-bit affine extras, gs=64** | **1.6/3 mix** | **—** | **29.29 GiB** | **~7–8 tok/s · fully resident on 64 GB at default settings · 36K context · text 6/6, vision 3/3** |
+| **[Nemotron 3.5 Super VL 120B (ternary experts)](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3a-tqTe-g64)** | **TQ 3-attn / ternary trit-packed experts / 8-bit affine extras, gs=64** | **1.6/3 mix** | **—** | **29.29 GiB** | **~16–21 tok/s, measured on 0.30.0 (2× 0.29.0 on the same prompts) · fully resident on 64 GB at default settings · 36K context · text 6/6, vision 3/3** |
 | **[Nemotron 3.5 Super VL 120B (3-bit)](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3-g64)** | **TurboQuant, gs=64** | **3** | **—** | **50.22 GiB** | **~19–21 tok/s · 64 GB with `sysctl` + `--prefill-step-size 256`** |
+
+\* **Estimated for 0.30.0, not measured.** 0.30.0 makes ternary experts decode faster (the kernels no longer do an integer division per weight). These figures come from kernel timings at each model's expert shapes, calibrated against the model's measured speeds; the same estimate predicted 20.4 tok/s for Nemotron 3.5 VL, which measured 21.0. The 0.29.0 figures in parentheses were measured.
 
 ## KV cache compression
 

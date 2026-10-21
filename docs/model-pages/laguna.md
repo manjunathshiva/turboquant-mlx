@@ -67,7 +67,8 @@ python -m turboquant_mlx.generate --model ./laguna-s21-tqTe-g64 \
     --temp 0.7 --top-p 0.9 --max-tokens 1024 --no-think
 ```
 
-- **~30 GB peak resident, ~12.5 tok/s** on an M4 Max, leaving ~25 GB for the OS.
+- **~30 GB peak resident, ~20–28 tok/s\*** on an M4 Max (~12.5 measured on 0.29.0), leaving ~25 GB
+  for the OS. \* Estimated for 0.30.0, which made ternary experts decode faster; not measured.
 - **MMLU-Redux 79.5 %, GSM8K 82.5 %** — at 1.58-bit experts this 118B still edges
   the 33B XS.2 at 3-bit (76.9 / 79.0). The larger, wider expert pool absorbs the
   deeper quantization.

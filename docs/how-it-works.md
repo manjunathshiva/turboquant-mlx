@@ -63,7 +63,9 @@ against a reference dequantize-and-multiply.
 
 **The cost:** rotating the input every step is extra work. On decode-bound runs, a 3-bit
 TurboQuant model is usually slower than MLX's native affine 4-bit (about 2× on Laguna-XS.2),
-and ternary is slower again (about 1.9× slower than 3-bit). TurboQuant buys **size and quality
+and ternary was slower again (about 1.9× slower than 3-bit) until 0.30.0 took a per-weight integer
+division out of its kernels. It now decodes close to 3-bit speed: 2× faster than before on
+Nemotron 3.5 VL. TurboQuant buys **size and quality
 at low bit widths**: Muse Glimmer at 4-bit beats affine 4-bit on perplexity in 25% less space,
 and at 2 and 3 bits affine quantization falls apart where TurboQuant holds.
 

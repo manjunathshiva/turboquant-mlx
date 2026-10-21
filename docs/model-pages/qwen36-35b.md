@@ -8,8 +8,10 @@ A pre-converted 3-bit (group-size 32) model is on the Hub:
 
 Two smaller builds run **fully resident on a 16 GB Mac mini**, with no streaming:
 
-- → [`Qwen3.6-35B-A3B-tq3a-tqTe-g64`](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-g64): ternary experts, **9.4 GB**, ~10.4 tok/s on the mini at the default memory limit. Good for chat; it does not hold up in agent harnesses.
-- → [`Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64`](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64): ternary experts with a 4-bit expert `down_proj`, **12.6 GB**, 15.2–15.6 tok/s on the mini (needs `sudo sysctl -w iogpu.wired_limit_mb=13824`). Passes an Opencode agentic task 3/3.
+- → [`Qwen3.6-35B-A3B-tq3a-tqTe-g64`](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-g64): ternary experts, **9.4 GB**, ~17 tok/s\* on the mini at the default memory limit (~10.4 measured on 0.29.0). Good for chat; it does not hold up in agent harnesses.
+- → [`Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64`](https://huggingface.co/manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64): ternary experts with a 4-bit expert `down_proj`, **12.6 GB**, ~17 tok/s\* on the mini (15.2–15.6 measured on 0.29.0) (needs `sudo sysctl -w iogpu.wired_limit_mb=13824`). Passes an Opencode agentic task 3/3.
+
+\* Estimated for 0.30.0, which made ternary experts decode faster; not measured. See [Benchmarks](../benchmarks.md).
 
 ## Run it fully resident (64 GB)
 
