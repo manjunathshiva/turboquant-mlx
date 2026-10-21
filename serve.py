@@ -1196,6 +1196,8 @@ def _mlx_lm_server_parser():
     try:
         _server_mod.main()
     except _ParserCaptured:
+        # Expected: _capture raised it to stop main() before it parses argv
+        # or starts a server; the parser is in `captured`.
         pass
     finally:
         argparse.ArgumentParser.parse_args = original
