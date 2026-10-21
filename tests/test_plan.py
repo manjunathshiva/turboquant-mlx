@@ -178,6 +178,27 @@ class TestKV:
         _, per_tok, _ = kv_bytes(cfg, 4096)
         assert per_tok == 2 * 2 * 128 * 8 * 2      # 8 attention layers, not 88
 
+    def test_nemotron_35_vl_layer_list_under_llm_config(self):
+        """Nemotron 3.5 Super VL nests the LM under `llm_config` (not
+        `text_config`), spells the layers as a `layers_block_type` list and
+        has no num_hidden_layers. Missing any of it reported "None experts"
+        and "config lacks KV geometry"."""
+        from turboquant_mlx.plan import _moe_geometry
+
+        blocks = (["mamba", "moe"] * 4 + ["attention"]) * 8
+        blocks += ["mamba", "moe"] * (44 - 4 * 8)
+        cfg = {"model_type": "nemotron_h_omni", "llm_config": {
+            "layers_block_type": blocks, "num_key_value_heads": 2,
+            "head_dim": 128, "n_routed_experts": 512, "num_experts_per_tok": 22,
+            "hidden_size": 4096, "moe_intermediate_size": 2688,
+        }}
+        n_full, _, n_layers, note = _attention_layers(cfg)
+        assert (n_full, n_layers) == (8, len(blocks))
+        assert "Mamba" in note
+        _, per_tok, _ = kv_bytes(cfg, 4096)
+        assert per_tok == 2 * 2 * 128 * 8 * 2
+        assert _moe_geometry(cfg)[:2] == (512, 22)
+
     def test_sliding_window_layers_are_counted_but_bounded(self):
         """GPT-OSS/Gemma sliding layers hold real KV capped at the window.
         Ignoring them under-predicts, which is the direction that OOMs."""

@@ -166,8 +166,9 @@ def footprint(index: dict) -> dict:
 
 
 def _text_config(cfg: dict) -> dict:
-    """Multimodal repos nest the LM config under text_config."""
-    return cfg.get("text_config", cfg)
+    """Multimodal repos nest the LM config: under ``text_config`` for most,
+    under ``llm_config`` for Nemotron-H Omni (Nemotron 3.5 Super VL)."""
+    return cfg.get("text_config") or cfg.get("llm_config") or cfg
 
 
 def _pos_int(value, fallback):
@@ -229,6 +230,15 @@ def _attention_layers(cfg: dict) -> tuple:
         n_full = pat.count("*")
         return n_full, 0, n_layers or len(pat), \
             f"Mamba hybrid: {n_full}/{len(pat)} attention layers"
+
+    # Newer Nemotron-H configs (Nemotron 3.5) spell the same thing as a list,
+    # `layers_block_type: ["mamba", "moe", "attention", ...]`, and drop
+    # num_hidden_layers.
+    blocks = c.get("layers_block_type")
+    if isinstance(blocks, list) and "attention" in blocks:
+        n_full = blocks.count("attention")
+        return n_full, 0, n_layers or len(blocks), \
+            f"Mamba hybrid: {n_full}/{len(blocks)} attention layers"
 
     iv = _pos_int(c.get("full_attention_interval"), 0)
     if iv and n_layers:
@@ -703,9 +713,10 @@ def build_plan(model_path: str, context: int = 16384, kv_bits: int | None = None
             "expert_down_bits": cfg.get("quantization", {}).get(
                 "expert_down_bits"),
             "n_layers": n_layers,
-            "n_experts": c.get("num_experts"),
-            "experts_per_tok": c.get("num_experts_per_tok")
-            or c.get("num_experts_per_token"),  # Kimi K3 spelling
+            # _moe_geometry knows every spelling (num_experts, num_local_experts,
+            # n_routed_experts; num_experts_per_tok / _per_token).
+            "n_experts": _moe_geometry(cfg)[0] or None,
+            "experts_per_tok": _moe_geometry(cfg)[1] or None,
             "is_moe": is_moe,
             **fp,
         },
