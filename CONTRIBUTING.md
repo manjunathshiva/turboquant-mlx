@@ -28,8 +28,9 @@ CMake 3.27+ to build the Metal kernels.
 pytest tests/
 ```
 
-48 tests should pass on a clean checkout. The KV cache tests require
-`mlx-lm>=0.31.3`.
+The whole suite should pass on a clean checkout. It targets
+`mlx-lm>=0.32.2,<0.33`, which `pip install -e .` installs; the VLM tests also
+need the `[vlm]` extra and skip themselves without it.
 
 ## How to propose a change
 

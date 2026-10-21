@@ -55,14 +55,23 @@ def _tiny_config():
     )
 
 
-def test_get_classes_resolves_laguna():
-    """Importing compat aliases our module so mlx-lm dispatch finds it."""
-    import turboquant_mlx.compat  # noqa: F401 — registers the laguna dispatch
-    from mlx_lm.utils import _get_classes
+def test_get_model_classes_resolves_our_laguna():
+    """TurboQuant builds laguna through our port: mlx-lm 0.32's own laguna
+    keys its experts and gate differently from our published checkpoints."""
+    from turboquant_mlx.compat import get_model_classes
 
-    model_cls, args_cls = _get_classes({"model_type": "laguna"})
+    model_cls, args_cls = get_model_classes({"model_type": "laguna"})
     assert model_cls is Model
     assert args_cls is ModelArgs
+
+
+def test_plain_mlx_lm_keeps_upstream_laguna():
+    """Importing compat must not hijack laguna for plain mlx-lm users."""
+    import turboquant_mlx.compat  # noqa: F401
+    from mlx_lm.utils import _get_classes
+
+    model_cls, _ = _get_classes({"model_type": "laguna"})
+    assert model_cls.__module__ == "mlx_lm.models.laguna"
 
 
 def test_forward_smoke():

@@ -203,35 +203,35 @@ def install_reasoning_strength_mapping(default_strength: Optional[str] = None) -
 def install_tool_call_suppression_fix() -> None:
     """Stop a reasoning-channel opener from suppressing the streamed answer.
 
-    Rebinds the name inside each route module rather than in `responses_state`,
-    because both import it directly and would otherwise keep the original.
-    Idempotent, and a no-op for every parser whose `tool_call_start` is not a
-    known collision — those pass straight through unchanged.
+    mlx-vlm 0.7 streams content through `ToolCallStreamState(tc_start,
+    tc_end)`, which both the openai and anthropic routes construct. Given the
+    router as `tc_start` it no longer latches forever, but it holds the whole
+    turn back and releases it as one chunk at the end, so nothing streams. The
+    class is shared, so remapping `tc_start` in its constructor covers both
+    routes. Idempotent, and a no-op for every parser whose `tool_call_start` is
+    not a known collision — those pass straight through unchanged.
     """
-    modules = []
-    for name in ("openai", "anthropic"):
-        try:
-            modules.append(__import__(f"mlx_vlm.server.{name}", fromlist=[name]))
-        except ImportError:  # pragma: no cover - route set varies by version
-            continue
+    try:
+        from mlx_vlm.server.responses_state import ToolCallStreamState
+    except ImportError:  # pragma: no cover - needs the [vlm] extra
+        return
 
-    for module in modules:
-        original = getattr(module, "suppress_tool_call_content", None)
-        if original is None or getattr(original, "_turboquant_wrapper", False):
-            continue
+    original = ToolCallStreamState.__init__
+    if getattr(original, "_turboquant_wrapper", False):
+        return
 
-        def suppress_tool_call_content(
-            full_output, in_tool_call, tc_start, delta_content, _original=original
-        ):
-            return _original(
-                full_output,
-                in_tool_call,
-                TOOL_CALL_SUPPRESSION_TRIGGER.get(tc_start, tc_start),
-                delta_content,
-            )
+    def __init__(self, tc_start, tc_end, *args, _original=original, **kwargs):
+        _original(
+            self,
+            TOOL_CALL_SUPPRESSION_TRIGGER.get(tc_start, tc_start),
+            tc_end,
+            *args,
+            **kwargs,
+        )
 
-        suppress_tool_call_content._turboquant_wrapper = True
-        module.suppress_tool_call_content = suppress_tool_call_content
+    __init__._turboquant_wrapper = True
+    __init__.__wrapped__ = original
+    ToolCallStreamState.__init__ = __init__
 
 
 def channel_delimiters_for(model_path) -> Optional[Tuple[str, str]]:

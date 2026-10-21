@@ -148,6 +148,9 @@ def stub_model(monkeypatch):
     import mlx_lm.utils as mlx_utils
 
     monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (_Tiny, _TinyArgs))
+    # TurboQuant's loader resolves kimi_k3 through its own port, not _get_classes.
+    monkeypatch.setattr(compat, "get_model_classes",
+                        lambda config: (_Tiny, _TinyArgs))
     monkeypatch.setattr(
         mlx_utils, "load_model",
         lambda model_path, lazy=False, model_config=None, **kw:

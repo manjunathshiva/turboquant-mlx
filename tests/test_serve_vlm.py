@@ -245,12 +245,17 @@ class TestToolCallSuppressionFix:
 
     ATEM declares `tool_call_start = "to=self<|message|>"`, which is exactly
     what Muse Glimmer emits at the start of every turn. mlx-vlm's streaming
-    suppressor latches `in_tool_call` on that string and never releases it, so
-    without this fix a tools-enabled request streams no content at all.
+    suppressor treats that string as a call opening, so without this fix a
+    tools-enabled request streams no content: 0.6 dropped it outright, 0.7's
+    `ToolCallStreamState` holds the whole turn back until the stream ends.
     """
 
     ROUTER = "to=self<|message|>"
     CALL_TAG = "<atem:function_calls>"
+    CALL_END = "</atem:function_calls>"
+    # A turn with no tool call: router, reasoning, then the answer.
+    TURN = [ROUTER, "thinking", "<|start|>assistant to=user<|message|>",
+            "The answer ", "is 42."]
 
     def test_the_router_is_remapped_to_the_real_call_tag(self):
         assert serve_vlm.TOOL_CALL_SUPPRESSION_TRIGGER[self.ROUTER] == self.CALL_TAG
@@ -258,61 +263,56 @@ class TestToolCallSuppressionFix:
     def test_unknown_parsers_pass_through_untouched(self):
         assert "<tool_call>" not in serve_vlm.TOOL_CALL_SUPPRESSION_TRIGGER
 
-    def _patched_module(self):
-        """A stand-in route module carrying mlx-vlm's real suppressor.
+    @pytest.fixture
+    def state_cls(self, monkeypatch):
+        """mlx-vlm's *real* stream state, with its constructor restored after.
 
-        Deliberately the *real* upstream function rather than a fake: these
-        tests assert what mlx-vlm actually does, so a hand-written stand-in
-        would only prove the stand-in matches itself. That makes them require
-        the optional `[vlm]` extra, which CI does not install.
+        Deliberately the real upstream class rather than a fake: these tests
+        assert what mlx-vlm actually does, so a hand-written stand-in would
+        only prove the stand-in matches itself. That makes them require the
+        optional `[vlm]` extra, which CI does not install.
         """
-        import types
-
         pytest.importorskip(
-            "mlx_vlm", reason="needs the [vlm] extra for the real suppressor"
+            "mlx_vlm", reason="needs the [vlm] extra for the real stream state"
         )
-        from mlx_vlm.server.responses_state import suppress_tool_call_content
+        from mlx_vlm.server.responses_state import ToolCallStreamState
 
-        module = types.ModuleType("fake_routes")
-        module.suppress_tool_call_content = suppress_tool_call_content
-        return module
+        # Start from upstream's own constructor even if another test already
+        # installed the fix on this shared class; restored afterwards.
+        init = ToolCallStreamState.__init__
+        while getattr(init, "_turboquant_wrapper", False):
+            init = init.__wrapped__
+        monkeypatch.setattr(ToolCallStreamState, "__init__", init)
+        return ToolCallStreamState
 
-    def _install_on(self, module, monkeypatch):
-        import sys
+    def _stream(self, cls, chunks):
+        state = cls(self.ROUTER, self.CALL_END)
+        return [state.feed(c, last=(i == len(chunks) - 1))
+                for i, c in enumerate(chunks)]
 
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server.openai", module)
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server.anthropic", module)
+    def test_reasoning_no_longer_swallows_the_answer(self, state_cls):
+        before = self._stream(state_cls, self.TURN)
+        assert before[:-1] == [None] * (len(self.TURN) - 1), (
+            "precondition: upstream holds the turn back until the end")
+
         serve_vlm.install_tool_call_suppression_fix()
 
-    def test_reasoning_no_longer_swallows_the_answer(self, monkeypatch):
-        module = self._patched_module()
-        before = module.suppress_tool_call_content(
-            self.ROUTER + "thinking", False, self.ROUTER, "the answer"
-        )
-        assert before == (True, None), "precondition: upstream drops the answer"
+        after = self._stream(state_cls, self.TURN)
+        assert after[-2:] == ["The answer", " is 42."], "the answer streams"
 
-        self._install_on(module, monkeypatch)
-
-        latched, delta = module.suppress_tool_call_content(
-            self.ROUTER + "thinking", False, self.ROUTER, "the answer"
-        )
-        assert (latched, delta) == (False, "the answer")
-
-    def test_a_real_tool_call_is_still_suppressed(self, monkeypatch):
-        module = self._patched_module()
-        self._install_on(module, monkeypatch)
-
-        latched, delta = module.suppress_tool_call_content(
-            self.ROUTER + "thinking" + self.CALL_TAG,
-            False,
-            self.ROUTER,
-            "<atem:invoke name=",
-        )
-        assert (latched, delta) == (True, None), "tool markup must not reach the user"
-
-    def test_installing_twice_does_not_double_wrap(self, monkeypatch):
-        module = self._patched_module()
-        self._install_on(module, monkeypatch)
-        once = module.suppress_tool_call_content
+    def test_a_real_tool_call_is_still_suppressed(self, state_cls):
         serve_vlm.install_tool_call_suppression_fix()
-        assert module.suppress_tool_call_content is once
+
+        out = self._stream(state_cls, [
+            self.ROUTER, "plan", self.CALL_TAG, '{"name": "f"}', self.CALL_END,
+            " done"])
+        shown = "".join(x for x in out if x)
+        assert self.CALL_TAG not in shown and '"name"' not in shown, (
+            "tool markup must not reach the user")
+        assert shown.endswith("done")
+
+    def test_installing_twice_does_not_double_wrap(self, state_cls):
+        serve_vlm.install_tool_call_suppression_fix()
+        once = state_cls.__init__
+        serve_vlm.install_tool_call_suppression_fix()
+        assert state_cls.__init__ is once

@@ -12,8 +12,8 @@ inside ``sanitize()``::
 
     weights = {k: v for k, v in weights.items() if "mtp." not in k}
 
-using their mere *presence* as a hint for norm-weight shifting and nothing else.
-No model in mlx-lm implements MTP (``mimo.py`` strips it too). Because
+(up to 0.31 also using their mere *presence* as a hint for norm-weight
+shifting; see ``STORED_PREFIX``). No model in mlx-lm implements MTP (``mimo.py`` strips it too). Because
 ``convert.py`` loads through ``mlx_lm.load()``, the head is gone before
 quantization begins, so the converted checkpoint cannot contain it no matter what
 the converter does to the module tree.
@@ -66,18 +66,23 @@ MTP_PREFIX = "mtp."
 #: Prefix they are stored under in a **converted** checkpoint, and it must not
 #: contain the substring ``"mtp."``.
 #:
-#: This is not cosmetic — it prevents silent model corruption. ``sanitize()``
-#: decides whether to add 1.0 to every norm weight from::
+#: This was written to prevent silent model corruption. Up to mlx-lm 0.31,
+#: ``sanitize()`` decided whether to add 1.0 to every norm weight from::
 #:
 #:     has_mtp_weights = any("mtp." in k for k in weights)
 #:     should_shift_norm_weights = has_mtp_weights or has_unsanitized_conv1d
 #:
 #: A converted checkpoint's norms were **already shifted** at conversion time
 #: (verified: source layer-3 ``input_layernorm`` mean +0.2493 → converted
-#: +1.2492). Storing the head under any name containing ``"mtp."`` makes that
-#: predicate fire again on load and shifts them a *second* time, silently
-#: breaking every norm in the model. Note the test is a substring match, so
-#: ``tq_mtp.`` and ``turboquant_mtp.`` are both unsafe.
+#: +1.2492). Storing the head under any name containing ``"mtp."`` made that
+#: predicate fire again on load and shift them a *second* time, silently
+#: breaking every norm in the model. The test is a substring match, so
+#: ``tq_mtp.`` and ``turboquant_mtp.`` were both unsafe.
+#:
+#: mlx-lm 0.32 shifts only when ``conv1d`` weights are still in the HF layout,
+#: which a converted checkpoint never is, so the rename is no longer what keeps
+#: the norms right there. It stays: published checkpoints use this prefix, and
+#: ``test_mtp.py`` pins the upstream predicate so a future change is caught.
 STORED_PREFIX = "tq_speculator."
 
 #: Filename the preserved head is written to. The ``model*`` prefix matters:
@@ -385,6 +390,11 @@ def snapshot_recurrent(cache) -> list:
     The snapshot is evaluated eagerly. MLX arrays are immutable so holding
     references is safe, but leaving them lazy would pin the graph that produced
     them and defeat the point of a fixed-size snapshot.
+
+    The *containers* are not immutable: since mlx-lm 0.32, ``ArraysCache.state``
+    is ``(cache_list, left_padding, lengths)`` and ``cache[i] = ...`` writes into
+    that same ``cache_list``. Every list and tuple is therefore copied, or the
+    snapshot would silently follow the drafts it is meant to undo.
     """
     snap = []
     for c in cache:
@@ -392,14 +402,28 @@ def snapshot_recurrent(cache) -> list:
         if callable(trimmable) and trimmable():
             snap.append(None)
             continue
-        st = c.state
-        snap.append(list(st) if isinstance(st, (list, tuple)) else st)
+        st = _copy_containers(c.state)
+        snap.append(list(st) if isinstance(st, tuple) else st)
 
-    flat = [a for s in snap if s is not None
-            for a in (s if isinstance(s, list) else [s]) if a is not None]
+    flat = _array_leaves(snap)
     if flat:
         mx.eval(flat)
     return snap
+
+
+def _copy_containers(tree):
+    """Copy every list/tuple in ``tree``; leaves (arrays, scalars) are shared."""
+    if isinstance(tree, (list, tuple)):
+        return type(tree)(_copy_containers(x) for x in tree)
+    return tree
+
+
+def _array_leaves(tree) -> list:
+    if isinstance(tree, mx.array):
+        return [tree]
+    if isinstance(tree, (list, tuple)):
+        return [a for x in tree for a in _array_leaves(x)]
+    return []
 
 
 def restore_recurrent(cache, snap: list) -> None:
@@ -408,7 +432,9 @@ def restore_recurrent(cache, snap: list) -> None:
         raise ValueError(f"snapshot is for {len(snap)} layers, cache has {len(cache)}")
     for c, s in zip(cache, snap):
         if s is not None:
-            c.state = list(s) if isinstance(s, list) else s
+            # A fresh copy again: handing over the snapshot's own lists would
+            # let the next draft write into the snapshot.
+            c.state = _copy_containers(s)
 
 
 def trim_trimmable(cache, n: int) -> None:
@@ -427,8 +453,7 @@ def rollback(cache, snap: list, n: int) -> None:
 
 def snapshot_bytes(snap: list) -> int:
     """Size of a snapshot, for reporting against a machine's headroom."""
-    return sum(a.nbytes for s in snap if s is not None
-               for a in (s if isinstance(s, list) else [s]) if a is not None)
+    return sum(a.nbytes for a in _array_leaves(snap))
 
 
 # ── Stage 3c: rollback without a snapshot ────────────────────────────────────

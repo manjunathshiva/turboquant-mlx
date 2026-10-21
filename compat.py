@@ -69,6 +69,15 @@ def _patch_nemotron_h_pattern():
                     f"{invalid}. Must be one of: {valid_types}"
                 )
 
+    # transformers >= 5.20 decodes "-" itself and has no such validator; there
+    # is nothing to replace.
+    validators = getattr(NemotronHConfig, "__class_validators__", None) or []
+    if not hasattr(NemotronHConfig, "validate_layers_block_type") and not any(
+        getattr(fn, "__name__", "") == "validate_layers_block_type"
+        for fn in validators
+    ):
+        return
+
     NemotronHConfig.validate_layers_block_type = validate_layers_block_type
 
     # huggingface_hub's dataclass machinery captures validator functions into
@@ -85,19 +94,77 @@ def _patch_nemotron_h_pattern():
                 break
 
 
+#: ``model_type`` -> our module under ``turboquant_mlx.models``. TurboQuant
+#: checkpoints of these types (and the sources we convert them from) use OUR
+#: module's parameter layout, so :func:`get_model_classes` always picks ours.
+#: mlx-lm 0.32 ships its own ``laguna`` and ``kimi_k3`` with different names
+#: (K3 fuses q/k/v into ``qkv_proj``; Laguna's experts and gate are keyed
+#: differently), so deferring to them would mis-load every published build.
+#: For K3 the key is the *wrapper* type its config declares at top level, not
+#: the ``kimi_linear`` text tower inside ``text_config`` that mlx-lm also knows.
+LOCAL_PORTS = {
+    "laguna": "laguna",
+    "kimi_k3": "kimi_k3",
+    "sarvam_moe": "sarvam_moe",
+    # Qwen3.8-Flash-Next. Vendored from mlx-lm PR #1788.
+    "qwen4_exp": "qwen4_exp",
+}
+
+
+def get_model_classes(config: dict):
+    """mlx-lm's ``_get_classes``, except our own ports win for their types.
+
+    Pass this as ``get_model_classes`` to ``mlx_lm.utils.load_model``, or call it
+    in place of ``_get_classes``. It changes nothing for plain mlx-lm users: the
+    choice is made only where TurboQuant builds or converts a model.
+    """
+    import importlib
+
+    module_name = LOCAL_PORTS.get(config.get("model_type"))
+    if module_name is not None:
+        arch = importlib.import_module(f"turboquant_mlx.models.{module_name}")
+        return arch.Model, arch.ModelArgs
+    from mlx_lm.utils import _get_classes
+
+    return _get_classes(config)
+
+
+def load_source(path_or_hf_repo, tokenizer_config=None, lazy=False,
+                return_config=False, trust_remote_code=False):
+    """``mlx_lm.utils.load`` for conversion sources, built via our ports.
+
+    Same steps as upstream's ``load`` (download, ``load_model``,
+    ``load_tokenizer``) with :func:`get_model_classes` as the class resolver.
+    ``trust_remote_code`` is mlx-lm 0.32's gate on a checkpoint's own model code
+    (``model_file``); the tokenizer's trust travels in ``tokenizer_config``.
+    """
+    from mlx_lm.utils import _download, load_model, load_tokenizer
+
+    model_path = _download(path_or_hf_repo)
+    model, config = load_model(
+        model_path, lazy, get_model_classes=get_model_classes,
+        trust_remote_code=trust_remote_code,
+    )
+    tokenizer = load_tokenizer(
+        model_path, tokenizer_config,
+        eos_token_ids=config.get("eos_token_id", None),
+    )
+    if return_config:
+        return model, tokenizer, config
+    return model, tokenizer
+
+
 def _register_local_model(model_type: str, module_name: str = None):
-    """Register one of our MLX ports so mlx-lm's ``_get_classes`` can find it.
+    """Let plain mlx-lm find one of our ports that upstream lacks.
 
     mlx-lm dispatches a checkpoint's ``model_type`` via
-    ``importlib.import_module(f"mlx_lm.models.{model_type}")``. Architectures with
-    no upstream mlx-lm module (Poolside's Laguna, Moonshot's Kimi K3, Sarvam AI's
-    MoE) are aliased into ``sys.modules`` under that name — for K3 the alias is on
-    the *wrapper* type its config declares at top level, not the ``kimi_linear``
-    text tower inside ``text_config`` that mlx-lm already knows. ``importlib``
-    consults ``sys.modules`` first,
-    so this makes ``load_turboquant`` (and plain mlx-lm) resolve the type to our
-    ``Model`` / ``ModelArgs``. Idempotent, and self-disables per architecture the
-    moment mlx-lm ships native support for it.
+    ``importlib.import_module(f"mlx_lm.models.{model_type}")``, which consults
+    ``sys.modules`` first, so aliasing our module there makes ``_get_classes``
+    (and mlx-lm internals such as ``_tokenizer_defaults``) resolve it.
+    Idempotent, and self-disables per architecture once mlx-lm ships its own
+    module — never overriding upstream globally, so plain mlx-lm users keep
+    upstream's. TurboQuant's own loaders don't depend on this alias: they go
+    through :func:`get_model_classes`.
     """
     import importlib
     import sys
@@ -135,6 +202,15 @@ def _patch_compressed_tensors_mxfp4():
 
     if getattr(_utils, "_tq_mxfp4_patched", False):
         return
+    # mlx-lm 0.32 maps the compressed-tensors format itself, to the same mode
+    # this patch injects; leave load_model alone there.
+    native = getattr(_utils, "_compressed_tensors_quantization", None)
+    if native is not None:
+        try:
+            if native({"format": "mxfp4-pack-quantized"}).get("mode") == "mxfp4":
+                return
+        except Exception:  # an unexpected upstream shape: keep the patch
+            pass
 
     orig = _utils.load_model
     sig = inspect.signature(orig)
@@ -232,12 +308,16 @@ def _patch_kimi_k3_tokenizer_trust():
 
     orig = _tok.load
 
-    def load(model_path, tokenizer_config_extra=None, eos_token_ids=None):
+    # **kwargs: mlx-lm 0.32 added `defaults=` (the model module's
+    # TOKENIZER_DEFAULTS: eos ids, chat-template and tool-parser types — never
+    # trust_remote_code). Forward whatever else upstream passes, unchanged.
+    def load(model_path, tokenizer_config_extra=None, eos_token_ids=None,
+             **kwargs):
         extra = dict(tokenizer_config_extra or {})
         if (extra.get("trust_remote_code") is None
                 and is_trusted_kimi_k3(model_path)):
             extra["trust_remote_code"] = True
-        return orig(model_path, extra, eos_token_ids=eos_token_ids)
+        return orig(model_path, extra, eos_token_ids=eos_token_ids, **kwargs)
 
     _tok.load = load
     _tok._tq_local_trust_patched = True
@@ -293,12 +373,8 @@ def _patch_glm47_tool_name_strip():
 
 
 _patch_nemotron_h_pattern()
-_register_local_model("laguna")
-_register_local_model("kimi_k3")
-_register_local_model("sarvam_moe")
-# Qwen3.8-Flash-Next. Vendored from mlx-lm PR #1788 while that PR is open; this
-# call self-disables as soon as mlx-lm ships `qwen4_exp` natively.
-_register_local_model("qwen4_exp")
+for _model_type, _module_name in LOCAL_PORTS.items():
+    _register_local_model(_model_type, _module_name)
 _patch_compressed_tensors_mxfp4()
 _patch_kimi_k3_tokenizer_trust()
 _patch_glm47_tool_name_strip()

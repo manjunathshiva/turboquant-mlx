@@ -6,7 +6,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires mlx-lm 0.32** (`>=0.32.2,<0.33`) and therefore **Python 3.11 or
+  newer**; on Python 3.10, pip keeps installing 0.28.x. The `[vlm]` extra now
+  needs mlx-vlm 0.7.9 or newer. The `transformers!=5.13.*` exclusion is gone:
+  mlx-lm 0.32 no longer trips over 5.13.
+- The `--disk-cache` prompt-cache format is now version 2. A cache directory
+  written by an earlier release is cleared once on startup, with one log
+  line, instead of being misread.
+
 ### Fixed
+
+- Laguna and Kimi K3 TurboQuant checkpoints load through this package's own
+  model code again. mlx-lm 0.32 ships its own `laguna` and `kimi_k3` modules
+  with a different weight layout, which would have taken over. Plain mlx-lm
+  users who import `turboquant_mlx` still get upstream's modules.
+- With mlx-lm 0.32, `turboquant-serve --disk-cache` saves and restores
+  checkpoints again (the cache API moved `offset` and friends into `state`),
+  and writes only the positions that hold tokens rather than the padded
+  buffer.
+- `turboquant-serve` without `--trust-remote-code` still trusts the Kimi K3
+  directory you pass as `--model` (mlx-lm 0.32's server sends `False` where
+  0.31 sent "unset"), and still trusts nothing a request can name.
+- The MTP reference loop's snapshot of the recurrent layers is a real copy
+  again; under mlx-lm 0.32 the snapshot shared a list with the live cache, so
+  restoring after a rejected draft changed nothing.
+- `turboquant-serve-vlm`: with tools enabled, Muse Glimmer's answer streams
+  again on mlx-vlm 0.7.x, where the reasoning-channel opener made the server
+  hold the whole turn back until the end.
 
 - On Linux (MLX's CPU backend), `turboquant-serve`'s default
   `--prompt-cache-max-gb auto` and `--metal-cache-limit-gb auto`, and the

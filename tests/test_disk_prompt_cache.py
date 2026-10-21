@@ -81,10 +81,15 @@ def test_round_trip_standard_and_tq(tmp_path):
     ]
 
     assert lkv.offset == kv.offset
-    assert mx.allclose(lkv.state[0], kv.state[0]).item()
+    # mlx-lm 0.32's KVCache.state is the step-padded buffer; the checkpoint
+    # stores only the `offset` positions that hold tokens.
+    assert kv.keys.shape[-2] == 256 and lkv.keys.shape[-2] == 10
+    assert mx.allclose(lkv.keys_and_values()[0], kv.keys_and_values()[0]).item()
+    assert mx.allclose(lkv.keys_and_values()[1], kv.keys_and_values()[1]).item()
     assert all(
-        mx.allclose(x, y).item() for x, y in zip(larr.state, arr.state)
+        mx.allclose(x, y).item() for x, y in zip(larr.cache, arr.cache)
     )
+    assert larr.left_padding is None and larr.lengths is None
 
     # TQ with sink tier: params, offset, packed payload, and the fp16 tier
     # re-padded to the full threshold width for later slice-assign appends.
@@ -252,6 +257,49 @@ def test_corrupt_index_starts_empty_and_prunes_orphans(tmp_path):
     store = _store(tmp_path)
     assert len(store) == 0
     assert not (tmp_path / "deadbeef.safetensors").exists()
+
+
+def test_older_format_version_is_cleared_once(tmp_path):
+    """A v1 directory (mlx-lm 0.31 layout) is cleared, not misread, and the
+    rewritten index stops the clearing being reported on every start."""
+    import io
+    import json as _json
+
+    from turboquant_mlx.disk_prompt_cache import _FORMAT_VERSION
+
+    entry = dict(digest="ab" * 16, model_key="m", tokens=[1, 2, 3], nbytes=6,
+                 trimmable=True, created=0.0, last_used=0.0)
+    (tmp_path / "index.json").write_text(
+        _json.dumps(dict(version=1, entries=[entry])), encoding="utf-8")
+    (tmp_path / f"{'ab' * 16}.safetensors").write_bytes(b"v1 layout")
+
+    log = io.StringIO()
+    store = DiskPromptCache(tmp_path, sync=True, log=log)
+    assert len(store) == 0
+    assert not list(tmp_path.glob("*.safetensors"))
+    assert "cleared 1 checkpoint" in log.getvalue()
+    index = _json.loads((tmp_path / "index.json").read_text(encoding="utf-8"))
+    assert index["version"] == _FORMAT_VERSION
+
+    log2 = io.StringIO()
+    DiskPromptCache(tmp_path, sync=True, log=log2)
+    assert "format changed" not in log2.getvalue()
+
+
+def test_scalar_and_string_state_leaves_round_trip(tmp_path):
+    """mlx-lm 0.32 keeps scalars in `state`; every leaf kind must survive."""
+    from mlx_lm.models.cache import RotatingKVCache
+
+    rot = RotatingKVCache(max_size=8, keep=2)
+    rot.update_and_fetch(mx.random.normal((1, 1, 5, 4)),
+                         mx.random.normal((1, 1, 5, 4)))
+    path = tmp_path / "rot.safetensors"
+    save_cache_file(path, [rot], {"note": ""})
+    (loaded,), meta = load_cache_file(path)
+    assert meta["note"] == ""
+    assert (loaded.offset, loaded.keep, loaded.max_size, loaded._idx) == (
+        rot.offset, rot.keep, rot.max_size, rot._idx)
+    assert mx.allclose(loaded.keys, rot.keys).item()
 
 
 # ---------------------------------------------------------------------------

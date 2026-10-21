@@ -39,12 +39,15 @@ citizen", adapted to mlx_lm's token-level prompt trie):
   gives non-trimmable caches trim semantics at ``save_every`` granularity:
   the newest checkpoint at/below the divergence restores. It also makes a
   *crash* mid-prefill resumable instead of starting from token 0.
-- Storage: one ``.safetensors`` per checkpoint via the same state/meta_state
-  protocol as ``mlx_lm.models.cache.save_prompt_cache``, plus an
-  ``index.json`` holding the token lists. ``None`` entries inside a cache's
-  ``state`` (e.g. an absent fp16 tier in ``TurboQuantKVCache``) are stored
-  as placeholder arrays whose key paths are recorded in the file metadata
-  and put back to ``None`` on load.
+- Storage: one ``.safetensors`` per checkpoint holding each layer's
+  ``state`` (mlx-lm >= 0.32 keeps scalars such as ``offset`` inside
+  ``state``; ``TurboQuantKVCache`` keeps its parameters in its own
+  ``meta_state``, stored alongside), plus an ``index.json`` holding the token
+  lists. Leaves safetensors cannot hold — ``None`` (e.g. an absent fp16 tier
+  in ``TurboQuantKVCache``) and Python scalars — are stored as placeholder
+  arrays whose key paths and kinds are recorded in the file metadata and
+  converted back on load. A directory written by another format version is
+  cleared on startup rather than misread.
 - Eviction: least-recently-used by total bytes (``budget_gb``).
 - Writes happen on a background thread so the next request is never blocked
   behind a multi-GB checkpoint write; a flush runs at exit (the "shutdown
@@ -69,7 +72,9 @@ from typing import Any, Dict, List, Optional, TextIO
 
 import numpy as np
 
-_FORMAT_VERSION = 1
+# 2: mlx-lm 0.32 layout (scalars inside `state`, no `meta_state` on upstream
+# caches). Version-1 files hold the 0.31 layout and are cleared, not migrated.
+_FORMAT_VERSION = 2
 _INDEX_NAME = "index.json"
 # Loading a checkpoint must win at least this many tokens over what the
 # in-memory cache already covers — below that the file I/O isn't worth it.
@@ -100,33 +105,92 @@ def _lcp(a: np.ndarray, b: np.ndarray) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint file format (mlx_lm save_prompt_cache layout + None sentinels)
+# Checkpoint file format (per-layer state + placeholders for non-array leaves)
 # ---------------------------------------------------------------------------
 
-_NONE_KEYS_META = "__tq_none_state_keys__"
+_LEAF_KINDS_META = "__tq_state_leaf_kinds__"
 
 
-def _replace_nones(flat):
-    """Swap ``None`` state leaves for placeholder arrays (safetensors can
-    store neither None nor zero-size arrays); returns the affected key paths
-    so load can put the Nones back."""
+def _encode_leaves(flat):
+    """Make every flattened state leaf storable in safetensors.
+
+    safetensors holds neither ``None`` nor zero-size arrays nor Python
+    scalars, and mlx-lm >= 0.32 puts scalars (``offset``, ``keep``, ...) in
+    ``state``. Each such leaf becomes a placeholder array; the returned
+    ``{key: kind}`` map lets load convert it back.
+    """
     import mlx.core as mx
 
-    none_keys = [k for k, v in flat if v is None]
-    flat = [
-        (k, mx.zeros((1,), dtype=mx.float32) if v is None else v)
-        for k, v in flat
-    ]
-    return flat, none_keys
+    kinds: Dict[str, str] = {}
+    out = []
+    for k, v in flat:
+        if isinstance(v, mx.array):
+            out.append((k, v))
+            continue
+        if v is None:
+            kinds[k] = "none"
+            v = mx.zeros((1,), dtype=mx.float32)
+        elif isinstance(v, bool):
+            kinds[k] = "bool"
+            v = mx.array([int(v)], dtype=mx.int64)
+        elif isinstance(v, int):
+            kinds[k] = "int"
+            v = mx.array([v], dtype=mx.int64)
+        elif isinstance(v, float):
+            kinds[k] = "float"
+            v = mx.array([v], dtype=mx.float32)
+        elif isinstance(v, str):
+            kinds[k] = "str"
+            # Length-prefixed, so the empty string is storable too.
+            v = mx.array([len(v)] + [ord(ch) for ch in v], dtype=mx.int32)
+        else:
+            raise ValueError(f"cache state leaf {k!r} is not serializable: "
+                             f"{type(v).__name__}")
+        out.append((k, v))
+    return out, kinds
 
 
-def _set_none_at(tree, dotted_key: str) -> None:
-    """Set the leaf at a tree_flatten-style dotted index path to ``None``."""
+def _decode_leaf(array, kind: str):
+    if kind == "none":
+        return None
+    if kind == "bool":
+        return bool(array.item())
+    if kind == "int":
+        return int(array.item())
+    if kind == "float":
+        return float(array.item())
+    if kind == "str":
+        codes = array.tolist()
+        return "".join(chr(c) for c in codes[1:1 + codes[0]])
+    raise ValueError(f"unknown cache state leaf kind {kind!r}")
+
+
+def _set_at(tree, dotted_key: str, value) -> None:
+    """Set the leaf at a tree_flatten-style dotted index path."""
     parts = dotted_key.split(".")
     node = tree
     for p in parts[:-1]:
         node = node[int(p)]
-    node[int(parts[-1])] = None
+    node[int(parts[-1])] = value
+
+
+def _layer_state(c):
+    """A layer's ``state``, trimmed of preallocated padding where that is safe.
+
+    mlx-lm 0.32's ``KVCache.state`` returns the whole step-padded buffer (up to
+    255 unused positions per layer) plus ``offset``. Writing only the first
+    ``offset`` positions keeps checkpoints minimal; ``update_and_fetch`` regrows
+    the buffer on the next append. Subclasses that override ``state`` are left
+    alone — their layout is their own.
+    """
+    from mlx_lm.models.cache import KVCache
+
+    if isinstance(c, KVCache) and type(c).state is KVCache.state:
+        keys, values, offset = c.state
+        if keys is not None and keys.shape[-2] > offset:
+            return keys[..., :offset, :], values[..., :offset, :], offset
+        return keys, values, offset
+    return c.state
 
 
 def _cache_class(name: str):
@@ -155,11 +219,13 @@ def prepare_cache_payload(prompt_cache: List[Any], metadata: Dict[str, str]):
     import mlx.core as mx
     from mlx.utils import tree_flatten
 
-    cache_data = [c.state for c in prompt_cache]
-    cache_info = [c.meta_state for c in prompt_cache]
+    cache_data = [_layer_state(c) for c in prompt_cache]
+    # Only TurboQuantKVCache still keeps its parameters outside `state`;
+    # every other layer gets an empty slot so the list stays aligned.
+    cache_info = [getattr(c, "meta_state", "") for c in prompt_cache]
     cache_classes = [type(c).__name__ for c in prompt_cache]
-    flat_data, none_keys = _replace_nones(tree_flatten(cache_data))
-    metadata = {**metadata, _NONE_KEYS_META: json.dumps(none_keys)}
+    flat_data, leaf_kinds = _encode_leaves(tree_flatten(cache_data))
+    metadata = {**metadata, _LEAF_KINDS_META: json.dumps(leaf_kinds)}
     flat_meta = dict(tree_flatten([cache_info, metadata, cache_classes]))
     data = dict(flat_data)
     mx.eval(list(data.values()))
@@ -187,12 +253,19 @@ def load_cache_file(path):
     arrays = tree_unflatten(list(arrays.items()))
     meta = tree_unflatten(list(meta.items()))
     info, metadata, classes = meta
-    for key in json.loads(metadata.pop(_NONE_KEYS_META, "[]")):
-        _set_none_at(arrays, key)
-    cache = [
-        _cache_class(name).from_state(state, meta_state)
-        for name, state, meta_state in zip(classes, arrays, info)
-    ]
+    kinds = json.loads(metadata.pop(_LEAF_KINDS_META, "{}"))
+    for key, kind in kinds.items():
+        node = arrays
+        for p in key.split("."):
+            node = node[int(p)]
+        _set_at(arrays, key, _decode_leaf(node, kind))
+    cache = []
+    for name, state, meta_state in zip(classes, arrays, info):
+        cls = _cache_class(name)
+        if name == "TurboQuantKVCache":
+            cache.append(cls.from_state(state, meta_state))
+        else:
+            cache.append(cls.from_state(state))
     return cache, metadata
 
 
@@ -304,9 +377,22 @@ class DiskPromptCache:
     def _load_index(self) -> None:
         index_path = self.dir / _INDEX_NAME
         entries: Dict[str, _Entry] = {}
+        rewrite_index = False
         try:
             with open(index_path, encoding="utf-8") as f:
                 data = json.load(f)
+            version = data.get("version")
+            if version != _FORMAT_VERSION:
+                # Older checkpoints hold another cache layout; reading them
+                # would misparse. It is only a cache, so start over: the
+                # prune below removes every file the empty index lacks.
+                stale = len(list(self.dir.glob("*.safetensors")))
+                self.log.write(
+                    f"[disk-cache] prompt-cache format changed (v{version} -> "
+                    f"v{_FORMAT_VERSION}); cleared {stale} checkpoint(s)\n"
+                )
+                data = {}
+                rewrite_index = True
             for d in data.get("entries", []):
                 entry = _Entry.from_json(d)
                 if self._file(entry.digest).exists():
@@ -329,6 +415,11 @@ class DiskPromptCache:
                     self.log.write(
                         f"[disk-cache] failed to remove stale file {f}: {e}\n"
                     )
+        if rewrite_index:
+            # Record the new version now, so the next start doesn't report
+            # the same clearing again.
+            with self._lock:
+                self._save_index()
 
     def _save_index(self) -> None:
         # Called with self._lock held. Atomic via tmp + rename.

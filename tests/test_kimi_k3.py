@@ -70,13 +70,21 @@ def make_model():
     return model
 
 
-def test_get_classes_resolves_kimi_k3():
+def test_get_model_classes_resolves_our_kimi_k3():
+    """TurboQuant builds kimi_k3 through our port: mlx-lm 0.32's own kimi_k3
+    fuses q/k/v into `qkv_proj`, unlike our published checkpoints."""
+    model_class, args_class = compat.get_model_classes(tiny_config())
+    assert model_class is k3.Model
+    assert args_class is k3.ModelArgs
+
+
+def test_plain_mlx_lm_keeps_upstream_kimi_k3():
+    """Importing compat must not hijack kimi_k3 for plain mlx-lm users."""
     from mlx_lm.utils import _get_classes
 
     compat._register_local_model("kimi_k3")  # idempotent; already ran at import
-    model_class, args_class = _get_classes(tiny_config())
-    assert model_class is k3.Model
-    assert args_class is k3.ModelArgs
+    model_class, _ = _get_classes(tiny_config())
+    assert model_class.__module__ == "mlx_lm.models.kimi_k3"
 
 
 def test_layer_and_mlp_typing():

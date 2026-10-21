@@ -452,12 +452,25 @@ def _patch_loader(stream_config=None, cache_limit_mode=None,
         lazy=False,
         return_config=False,
         revision=None,
+        trust_remote_code=False,
     ):
+        # mlx-lm 0.31's server sent `trust_remote_code: None` without
+        # --trust-remote-code; 0.32 sends False. The compat gate treats an
+        # explicit False as final, which would refuse the operator's own
+        # registered --model K3 directory, so map the server's False back to
+        # "unset". Only True forces trust; the gate still trusts nothing a
+        # request can name.
+        if tokenizer_config is not None and \
+                tokenizer_config.get("trust_remote_code") is False:
+            tokenizer_config = {**tokenizer_config, "trust_remote_code": None}
+
         model_path = _download(path_or_hf_repo, revision=revision)
         cfg = load_config(model_path)
         is_tq = cfg.get("quantization", {}).get("mode") == "turboquant"
 
         if not is_tq:
+            # mlx-lm 0.32 gates a checkpoint's own model code (`model_file`)
+            # on this flag; pass the operator's choice through untouched.
             return _orig_load(
                 path_or_hf_repo,
                 tokenizer_config=tokenizer_config,
@@ -466,6 +479,7 @@ def _patch_loader(stream_config=None, cache_limit_mode=None,
                 lazy=lazy,
                 return_config=return_config,
                 revision=revision,
+                trust_remote_code=trust_remote_code,
             )
 
         if adapter_path is not None:

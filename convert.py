@@ -143,7 +143,9 @@ def convert(
             ``kimi_k3`` directory gets this without asking; a Hub repo id never
             does.
     """
-    from mlx_lm.utils import load, save
+    from mlx_lm.utils import save
+
+    from turboquant_mlx.compat import load_source
 
     mlx_path = Path(mlx_path)
     if mlx_path.exists():
@@ -170,7 +172,9 @@ def convert(
 
     # Load model
     print(f"[INFO] Loading model from {hf_path}")
-    model, tokenizer, config = load(
+    # Through our own ports for their types: mlx-lm's laguna/kimi_k3 use a
+    # different parameter layout from the one our loader reads back.
+    model, tokenizer, config = load_source(
         hf_path,
         # K3's custom tokenizer class (tokenization_kimi.py) needs the code
         # opt-in; gated on the user's own path being a local kimi_k3 dir.

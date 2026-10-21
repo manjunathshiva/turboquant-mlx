@@ -53,6 +53,10 @@ def test_get_classes_resolves_sarvam_moe():
     ModelCls, ArgsCls = _get_classes({"model_type": "sarvam_moe"})
     assert ModelCls is Model
     assert ArgsCls is ModelArgs
+    # ...and TurboQuant's own resolver agrees.
+    from turboquant_mlx.compat import get_model_classes
+
+    assert get_model_classes({"model_type": "sarvam_moe"}) == (Model, ModelArgs)
 
 
 def test_fused_qkv_split_matches_reference_semantics():

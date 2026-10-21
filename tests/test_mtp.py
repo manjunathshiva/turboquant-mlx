@@ -260,17 +260,24 @@ def test_load_mtp_is_empty_without_a_head(converted):
     assert load_mtp(converted) == {}
 
 
-def test_mlx_lm_still_keys_the_norm_shift_off_the_mtp_substring():
-    """If mlx-lm stops using `any("mtp." in k)`, the STORED_PREFIX workaround
-    may be unnecessary or actively wrong. Fail here rather than drift."""
+def test_mlx_lm_keys_the_norm_shift_off_unsanitized_conv1d_only():
+    """Pins the upstream predicate the STORED_PREFIX reasoning depends on.
+
+    mlx-lm <= 0.31 also shifted when any key contained "mtp."; 0.32 shifts only
+    when conv1d is still in the HF layout, which a converted checkpoint never
+    is. If upstream changes the predicate again, re-check STORED_PREFIX and the
+    converter's norm handling before trusting either. Fail here, not drift."""
     import inspect
 
     from mlx_lm.models import qwen3_5
 
     # TextModel, not Model: Model.sanitize only re-keys and delegates.
     src = inspect.getsource(qwen3_5.TextModel.sanitize)
-    assert 'any("mtp." in k for k in weights)' in src, (
-        "mlx-lm no longer keys the norm shift off the substring 'mtp.'"
+    assert "if has_unsanitized_conv1d and any(k.endswith(sfx)" in src, (
+        "mlx-lm changed when it shifts norm weights"
+    )
+    assert 'any("mtp." in k for k in weights)' not in src, (
+        "mlx-lm keys the norm shift off 'mtp.' again: STORED_PREFIX is load-bearing"
     )
 
 

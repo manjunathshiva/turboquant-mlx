@@ -327,7 +327,9 @@ def load_turboquant(model_path, lazy=False, fast=False, ngram_offload=False,
     Returns:
         (model, tokenizer) tuple.
     """
-    from mlx_lm.utils import load_config, load_tokenizer, _get_classes
+    from mlx_lm.utils import load_config, load_tokenizer
+
+    from turboquant_mlx.compat import get_model_classes
 
     model_path = resolve_model_path(model_path)
     config = load_config(model_path)
@@ -351,7 +353,7 @@ def load_turboquant(model_path, lazy=False, fast=False, ngram_offload=False,
         weights.update(mx.load(wf))
 
     # Create base model (with regular nn.Linear / SwitchLinear layers)
-    model_class, model_args_class = _get_classes(config=config_for_model)
+    model_class, model_args_class = get_model_classes(config_for_model)
     model_args = model_args_class.from_dict(config_for_model)
     model = model_class(model_args)
 

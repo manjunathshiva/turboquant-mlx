@@ -11,7 +11,7 @@ name = "turboquant-mlx-full"
 version = "0.28.1"
 description = "Extreme weight and KV cache compression for LLMs on Apple Silicon (MLX implementation of Google's TurboQuant)"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Manjunath Janardhan", email = "manjunath.shiva@gmail.com"}]
@@ -32,24 +32,22 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "mlx>=0.20.0",
-    # mlx-lm 0.32 changed the KV cache API (no meta_state) and ships its own
-    # kimi_k3 and laguna modules, which displace ours: 25 tests fail on 0.32.x.
-    # Lift the cap once the package is ported to 0.32.
-    "mlx-lm>=0.31.3,<0.32",
-    # transformers 5.13 dropped string keys in AutoTokenizer.register, which
-    # mlx-lm <= 0.31.3 still uses (NewlineTokenizer) at module scope — importing
-    # mlx_lm.tokenizer_utils raises AttributeError. 5.14 restored string keys,
-    # so the break is confined to the 5.13 series (verified against mlx-lm
-    # 0.31.3: 5.12 OK, 5.13 FAIL, 5.14 OK, 5.15 OK). A `<5.13` cap would now
-    # force the resolver to downgrade mlx-vlm, which needs >=5.14.
-    "transformers!=5.13.*",
+    "mlx>=0.32.2",
+    # 0.32.2 is the floor because 0.32 moved scalars into `state` (no more
+    # `meta_state`) and ships its own kimi_k3/laguna modules; this package is
+    # written against that API. Capped below 0.33 because serve.py, serve_vlm.py
+    # and compat.py patch mlx-lm internals, and each minor release so far has
+    # moved one of them — lift the cap only after the suite passes on 0.33.
+    # (0.32 registers NewlineTokenizer by class, so the transformers 5.13
+    # string-key break that needed `!=5.13.*` no longer applies.)
+    "mlx-lm>=0.32.2,<0.33",
+    "transformers",
     "numpy",
 ]
 
@@ -67,7 +65,10 @@ dev = ["pytest", "build", "twine"]
 # environment is not broken. The floor stays here because this is the layout that
 # needs no patch at all: the patch's own tests skip themselves on >= 0.6.12, so
 # the pre-hoist path is not what CI exercises.
-vlm = ["mlx-vlm>=0.6.12"]
+#
+# 0.7.9 since the mlx-lm 0.32 port: 0.7.x replaced `suppress_tool_call_content`
+# with `ToolCallStreamState`, and serve_vlm.py targets only the new layout.
+vlm = ["mlx-vlm>=0.7.9"]
 # Kimi K3 ships a tiktoken-based tokenizer that needs blobfile to load.
 kimi = ["tiktoken", "blobfile"]
 

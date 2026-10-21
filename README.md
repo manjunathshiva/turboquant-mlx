@@ -129,7 +129,7 @@ from turboquant_mlx.layers import TurboQuantKVCache, convert_cache_to_turboquant
 ### Requirements
 
 - macOS with Apple Silicon (M1/M2/M3/M4)
-- Python 3.10+
+- Python 3.11+ (mlx-lm 0.32 needs it; on 3.10, pip installs turboquant-mlx-full 0.28.x)
 - 64 GB unified memory recommended for 20B+ models
 
 The Metal kernels are JIT-compiled by MLX at first use, so no Xcode / CMake
@@ -419,6 +419,8 @@ All `mlx_vlm.server` flags forward unchanged. Two things are handled for you:
 
 It listens on `127.0.0.1` unless you pass `--host` (mlx-vlm's own server binds
 `0.0.0.0`). Add `--host 0.0.0.0` to accept connections from other machines.
+Every request must name a `model` (mlx-vlm 0.7 answers 422 without one); use
+the id `GET /v1/models` reports.
 
 #### Serve a model bigger than RAM (expert streaming)
 

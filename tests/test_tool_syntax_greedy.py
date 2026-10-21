@@ -269,6 +269,7 @@ def test_install_is_idempotent_and_appends_processor():
 
         class _Tok:
             eos_token_id = 0
+            eos_token_ids = {0}  # mlx-lm 0.32's _make_sampler reads the set
 
             def encode(self, s):
                 return [1]
