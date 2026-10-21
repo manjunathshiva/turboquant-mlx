@@ -6,6 +6,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **NVIDIA Nemotron 3.5 Super VL 120B** (`nemotron_h_omni`) through
+  `convert_vlm` / `generate_vlm` / `turboquant-serve-vlm`. mlx-vlm 0.7.9 already
+  runs the model; this release sets the quantization choices: the vision projector
+  `mlp1` and `lm_head` stay out of the polar path. The ternary build
+  (`--bits 3 -g 64 --ternary-experts --quantize-extras`) is 31.5 GB, from 249 GB
+  BF16, and runs resident on a 64 GB Mac at default settings (peak 44.7 GB with a
+  36K-token prompt).
+- `convert_vlm` gains `--ternary-experts` and `--expert-down-bits`.
+
 ### Changed
 
 - **Requires mlx-lm 0.32** (`>=0.32.2,<0.33`) and therefore **Python 3.11 or
@@ -23,6 +34,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   their experts from mlx-vlm's own `SwitchLinear` class rather than mlx-lm's,
   and this package recognised only mlx-lm's: `convert_vlm` left every expert
   unquantized, and loading swapped in none of them.
+- `--expert-down-bits` now reaches Nemotron-H experts: their `SwitchMLP` names
+  the down projection `fc2`, and the option matched only `down_proj`.
+- Loading no longer fails on an affine-quantized extra that sits in a list
+  (`'list' object has no attribute '3'`), such as Nemotron VL's projector
+  `mlp1.layers.3`.
+- `turboquant-plan` reads Nemotron 3.5 VL's nested `llm_config` and its
+  `layers_block_type` layer list: 512 experts, top-22, 8 of 88 layers holding
+  KV, where it reported "None experts" and "config lacks KV geometry".
 - Laguna and Kimi K3 TurboQuant checkpoints load through this package's own
   model code again. mlx-lm 0.32 ships its own `laguna` and `kimi_k3` modules
   with a different weight layout, which would have taken over. Plain mlx-lm
