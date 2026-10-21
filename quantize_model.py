@@ -216,6 +216,20 @@ def _dequantize_switch_linear(module) -> mx.array:
     )
 
 
+def _is_expert_down_proj(path: str) -> bool:
+    """True for an MoE block's down projection (hidden -> model width).
+
+    ``SwitchGLU`` names it ``down_proj``; ``SwitchMLP`` (Nemotron-H, in mlx-lm
+    and mlx-vlm alike) names it ``fc2``, with ``fc1`` as the up projection.
+    Matching ``down_proj`` alone made ``--expert-down-bits`` a silent no-op on
+    every Nemotron-H model.
+    """
+    parts = path.split(".")
+    if parts[-1] == "down_proj":
+        return True
+    return parts[-1] == "fc2" and len(parts) > 1 and parts[-2] == "switch_mlp"
+
+
 def _is_router(path: str) -> bool:
     """Check for a discrete-selection layer, which stays at full precision.
 
@@ -390,7 +404,7 @@ def turboquant_quantize(
             # ~1.6 bpw); bits=2 is storage/scale semantics only.
             layer_bits = 2 if use_ternary else tq_config.bits_for_path(path)
             if (tq_config.expert_down_bits is not None
-                    and path.split(".")[-1] == "down_proj"):
+                    and _is_expert_down_proj(path)):
                 # Asymmetric expert precision: the down projection carries a
                 # higher-precision Gaussian codebook than the up/gate tier.
                 # The loader needs no matching rule — per-layer bits are
@@ -410,7 +424,7 @@ def turboquant_quantize(
                     # applies to this down projection, keep the higher width.
                     matched_protected_layers.add(int(m.group(1)))
                     down_bits = (tq_config.expert_down_bits
-                                 if path.split(".")[-1] == "down_proj" else None)
+                                 if _is_expert_down_proj(path) else None)
                     use_ternary = False
                     layer_bits = max(tq_config.protect_bits, down_bits or 0)
             label = "ternary" if use_ternary else f"{layer_bits}b"

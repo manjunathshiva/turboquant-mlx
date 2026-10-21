@@ -71,10 +71,16 @@ def _require_mlx_vlm():
 # tokens takes the single-shot branch in `generate/ar.py`, which slices
 # `logits[:, -1, :]` and so DOES evaluate lm_head over the whole sequence.
 # That is an ordinary chat turn, not an edge case.
+#
+# nemotron_h_omni (Nemotron 3.5 Super VL): the same lm_head reasoning
+# (131072x4096 = 537M params). `mlp1` is the vision projector (vision tower ->
+# language model); mlx-vlm's multimodal skip list doesn't name it, so without
+# this it would be polar-quantized like a language-model linear.
 VLM_SKIP_PATTERNS: dict[str, tuple[str, ...]] = {
     "diffusion_gemma": ("router", "self_conditioning", "embed_vision", ".mlp."),
     "muse_glimmer": ("lm_head",),
     "qwen3_5": ("lm_head",),
+    "nemotron_h_omni": ("lm_head", "mlp1"),
 }
 
 

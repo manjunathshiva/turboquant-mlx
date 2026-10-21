@@ -69,6 +69,8 @@ def convert_vlm(
     extras_group_size: int = _EXTRAS_GROUP,
     protect_expert_layers: list = None,
     protect_bits: int = 3,
+    ternary_experts: bool = False,
+    expert_down_bits: int = None,
 ):
     """Convert an mlx-vlm model to TurboQuant format. See module docstring."""
     _require_mlx_vlm()
@@ -93,6 +95,8 @@ def convert_vlm(
         use_qjl=False,
         attn_bits=attn_bits,
         mlp_bits=mlp_bits,
+        ternary_experts=ternary_experts,
+        expert_down_bits=expert_down_bits,
     )
 
     if protect_expert_layers:
@@ -224,6 +228,17 @@ def main():
     parser.add_argument("--protect-bits", type=int, default=3,
                         choices=[3, 4],
                         help="Bit width for protected expert layers (default 3)")
+    parser.add_argument("--ternary-experts", action="store_true",
+                        help="Quantize MoE expert weights to the ternary "
+                             "{-c,0,+c} codebook (1.58-bit), stored in the "
+                             "2-bit slot. Attention and everything else stay "
+                             "at --attn-bits/--bits.")
+    parser.add_argument("--expert-down-bits", type=int, default=None,
+                        choices=[2, 3, 4],
+                        help="Quantize MoE expert down projections (down_proj, "
+                             "or a SwitchMLP's fc2) at this Gaussian-codebook "
+                             "width while the rest of each expert takes the "
+                             "--mlp-bits / --ternary-experts tier.")
     args = parser.parse_args()
 
     convert_vlm(
@@ -242,6 +257,8 @@ def main():
             [int(i) for i in args.protect_expert_layers.split(",")]
             if args.protect_expert_layers else None),
         protect_bits=args.protect_bits,
+        ternary_experts=args.ternary_experts,
+        expert_down_bits=args.expert_down_bits,
     )
 
 
