@@ -4,7 +4,7 @@ Extreme **weight** and **KV cache** compression for LLMs on Apple Silicon. MLX i
 
 **📖 Documentation: [manjunathshiva.github.io/turboquant-mlx](https://manjunathshiva.github.io/turboquant-mlx/)**: get started, pick a model for your Mac's memory, and guides for converting, serving, coding agents, vision models and expert streaming.
 
-Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE, Qwen3.6-35B-A3B, Qwen3-235B-A22B, DeepSeek-V2/V3, Poolside Laguna, Kimi K3 2.8T, Qwen3.8-Flash-Next 180B), **Mamba/attention hybrids** (Nemotron-3-Nano-4B, Nemotron-3-Super-120B, Nemotron 3.5 Super VL 120B), and **multimodal** models (Muse Glimmer, Qwen3.8-27B, Qwen3.8-Flash-Next, Nemotron 3.5 Super VL, and the block-diffusion DiffusionGemma). Compatible with hybrid attention architectures, attention sinks, sliding-window attention, and linear attention layers (including Gated DeltaNet).
+Supports dense models (LLaMA, Qwen, Mistral), **Mixture-of-Experts** (Qwen-MoE, GPT-OSS, Qwen3.5-MoE, Qwen3.6-35B-A3B, Qwen3-235B-A22B, DeepSeek-V2, Poolside Laguna, Kimi K3 2.8T, Qwen3.8-Flash-Next 180B), **Mamba/attention hybrids** (Nemotron-3-Nano-4B, Nemotron-3-Super-120B, Nemotron 3.5 Super VL 120B), and **multimodal** models (Muse Glimmer, Qwen3.8-27B, Qwen3.8-Flash-Next, Nemotron 3.5 Super VL, and the block-diffusion DiffusionGemma). Compatible with hybrid attention architectures, attention sinks, sliding-window attention, and linear attention layers (including Gated DeltaNet).
 
 **With both weight and KV cache compression at 3-bit, GPT-OSS-120B fits its full 131K context window in 50 GB on a 64 GB MacBook — and KV cache compression actually makes generation *faster* on the 120B (8.7 vs 6.4 tok/s) because the smaller cache cuts memory bandwidth more than dequant costs.**
 
@@ -141,7 +141,7 @@ turboquant-generate --model manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64 \
 turboquant-serve --model manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64 --port 8080
 ```
 
-**4. Convert your own** (any BF16 or FP16 model, in minutes, no calibration data):
+**4. Convert your own** (BF16 or FP16 weights of a [supported architecture](https://manjunathshiva.github.io/turboquant-mlx/reference/architectures/); minutes, no calibration data):
 
 ```bash
 turboquant-convert --hf-path meta-llama/Llama-3.2-1B --mlx-path ./llama-3.2-1b-tq3 --bits 3 --group-size 64
@@ -167,7 +167,7 @@ Fused Metal kernels decode straight from the packed form, so full-precision weig
 
 ## Supported architectures
 
-LLaMA, Qwen2/2.5, Qwen3.5/3.8 (text and vision), Mistral, Qwen1.5-MoE, GPT-OSS, Qwen3.5-MoE and Qwen3.6, Qwen3-MoE, Nemotron-H, DeepSeek-V2/V3 (MLA + MoE), and through mlx-vlm Muse Glimmer, NVIDIA Nemotron 3.5 Super VL and DiffusionGemma. Poolside Laguna, Kimi K3, Sarvam MoE and Qwen3.8-Flash-Next are ported to MLX here. Status and tested sizes for each: [Supported architectures](https://manjunathshiva.github.io/turboquant-mlx/reference/architectures/).
+LLaMA, Qwen2/2.5, Qwen3.5/3.8 (text and vision), Mistral, Qwen1.5-MoE, GPT-OSS, Qwen3.5-MoE and Qwen3.6, Qwen3-MoE, Nemotron-H, DeepSeek-V2 (MLA + MoE; V3 shares the layout but is untested), and through mlx-vlm Muse Glimmer, NVIDIA Nemotron 3.5 Super VL and DiffusionGemma. Poolside Laguna, Kimi K3 and Sarvam MoE are ported to MLX here, and Qwen3.8-Flash-Next is vendored from an open mlx-lm pull request. Status and tested sizes for each: [Supported architectures](https://manjunathshiva.github.io/turboquant-mlx/reference/architectures/).
 
 ## Contributing
 

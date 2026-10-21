@@ -96,9 +96,9 @@ The in-memory prompt cache grows with every conversation. In order of impact:
 2. **Use a smaller prefill step** on tight machines: `--prefill-step-size 256` (or 128).
 3. **Cap the prompt cache:** `--prompt-cache-max-gb 2`, or `--prompt-cache-size 1` to keep
    only one conversation. The `auto` guards above already do this when headroom is small.
-   mlx-lm's own `--prompt-cache-bytes` is applied only when the server batches requests; with
-   any `--kv-*` option, a fixed `--seed` or an image in the request, requests run one at a
-   time and only `--prompt-cache-max-gb` caps the cache.
+   mlx-lm's own `--prompt-cache-bytes` is applied only when the server batches requests. With
+   any `--kv-*` option or a `--draft-model`, or for a request that sets a `seed` or includes
+   an image, requests run one at a time and only `--prompt-cache-max-gb` caps the cache.
 4. **Close other GPU users** (browsers, Electron apps, video editors).
 
 Why the `auto` guards exist, measured on a 16 GB mini serving the 12.6 GB Qwen3.6-35B build:

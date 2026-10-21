@@ -102,10 +102,13 @@ First Metal4 / `MTLGPUFamilyApple10` data point, contributed by [@sbayer2](https
 | ~63K tok | fp16 | 124.5 | 34.5 | 30.79 GB | — |
 | ~63K tok | K8/V3 (no sink) | 123.6 | 5.2 | 28.71 GB | 2.08 GB |
 
-FP16 decodes 1.14× faster at 65 tokens, 1.35× at 2.5K, 2.75× at 14.5K and 6.6× at 63K. On the
-similar-sized Qwen3.5-122B, run resident on a 64 GB M4 Max, FP16 also wins at every context
-(1.07× at 256 tokens, 1.20× at 4096; [#19](https://github.com/manjunathshiva/turboquant-mlx/pull/19)),
-so GPT-OSS-120B's speed-up comes from its KV geometry, not its size.
+FP16 decodes 1.14× faster at 65 tokens, 1.35× at 2.5K, 2.75× at 14.5K and 6.6× at 63K, so on
+this model KV compression saves memory, not time. Of the models measured, only GPT-OSS-120B
+decodes faster with a compressed cache ([KV cache compression](#kv-cache-compression), 8.7 vs 6.4 tok/s), and not
+because of its size: Qwen3.5-122B, run resident on a 64 GB M4 Max, decodes faster with FP16 at
+every context (1.07× at 256 tokens, 1.20× at 4096;
+[#19](https://github.com/manjunathshiva/turboquant-mlx/pull/19)). The difference is
+GPT-OSS-120B's KV geometry.
 
 **122B expert streaming — parallel prefetch** (`--cache-budget-gb 30`, 256 tokens):
 
