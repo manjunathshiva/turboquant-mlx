@@ -6,6 +6,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-21
+
 ### Added
 
 - **NVIDIA Nemotron 3.5 Super VL 120B** (`nemotron_h_omni`) through
