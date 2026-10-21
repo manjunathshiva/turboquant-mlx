@@ -13,8 +13,8 @@ loader, so this server works as a drop-in replacement for
 
 TurboQuant KV-cache compression
 --------------------------------
-`mlx_lm.server` has no native KV-quantization flags, so this wrapper adds
-its own (`--kv-bits`, `--kv-k-bits`/`--kv-v-bits`, `--kv-min-tokens`,
+This wrapper replaces `mlx_lm.server`'s affine KV quantization with its own
+flags (`--kv-bits`, `--kv-k-bits`/`--kv-v-bits`, `--kv-min-tokens`,
 `--kv-group-size`) — the same set exposed by `turboquant-generate`. When
 enabled, every per-request prompt cache has its standard ``KVCache`` layers
 swapped for ``TurboQuantKVCache`` (other cache types — RotatingKVCache for
@@ -352,6 +352,16 @@ def _patch_prompt_cache_bytes(mode) -> str | float | None:
     return mode
 
 
+def _add_prompt_cache_max_args(parser):
+    parser.add_argument(
+        "--prompt-cache-max-gb", dest="limit", default="auto",
+        metavar="{GB,auto,off}",
+        help="Byte cap on the in-memory prompt cache, enforced on every insert "
+             "whether or not requests are batched. 'auto' caps it only when "
+             "memory is tight; 'off' keeps mlx-lm's behavior (default: auto)",
+    )
+
+
 def _extract_prompt_cache_max_args(argv):
     """Peel ``--prompt-cache-max-gb`` off ``argv``.
 
@@ -360,7 +370,7 @@ def _extract_prompt_cache_max_args(argv):
     Returns ``(mode | None, remaining_argv)``.
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--prompt-cache-max-gb", dest="limit", default="auto")
+    _add_prompt_cache_max_args(parser)
     ns, remaining = parser.parse_known_args(argv)
 
     limit = ns.limit.lower() if isinstance(ns.limit, str) else ns.limit
@@ -380,12 +390,31 @@ def _extract_prompt_cache_max_args(argv):
     return val, remaining
 
 
+def _add_ngram_offload_args(parser):
+    parser.add_argument(
+        "--ngram-offload", dest="ngram_offload", action="store_true",
+        help="Qwen3.8-Flash-Next only: serve its n-gram table from disk-backed "
+             "memory instead of GPU memory (about 17.9 GiB less), with "
+             "identical output",
+    )
+
+
 def _extract_ngram_offload_args(argv):
     """Peel ``--ngram-offload`` off ``argv``. Returns ``(bool, remaining_argv)``."""
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--ngram-offload", dest="ngram_offload", action="store_true")
+    _add_ngram_offload_args(parser)
     ns, remaining = parser.parse_known_args(argv)
     return ns.ngram_offload, remaining
+
+
+def _add_metal_cache_limit_args(parser):
+    parser.add_argument(
+        "--metal-cache-limit-gb", dest="limit", default="auto",
+        metavar="{GB,auto,off}",
+        help="Cap MLX's buffer-reuse cache after the model loads (0 disables "
+             "reuse). 'auto' acts only when memory is tight; 'off' leaves MLX "
+             "alone (default: auto)",
+    )
 
 
 def _extract_metal_cache_limit_args(argv):
@@ -396,7 +425,7 @@ def _extract_metal_cache_limit_args(argv):
     "auto" or a float; None means leave MLX untouched.
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--metal-cache-limit-gb", dest="limit", default="auto")
+    _add_metal_cache_limit_args(parser)
     ns, remaining = parser.parse_known_args(argv)
 
     limit = ns.limit.lower() if isinstance(ns.limit, str) else ns.limit
@@ -541,26 +570,52 @@ def _trust_operator_model(argv) -> None:
             trust_local_kimi_k3(arg.split("=", 1)[1])
 
 
+def _add_kv_args(parser):
+    parser.add_argument(
+        "--kv-bits", type=int, default=None,
+        help="Compress each request's KV cache, keys and values at the same "
+             "width. 8 is safe everywhere; on TurboQuant weights use "
+             "--kv-k-bits 8 --kv-v-bits 3 rather than a low symmetric width",
+    )
+    parser.add_argument(
+        "--kv-k-bits", type=int, default=None,
+        help="Key width for a mixed KV cache, set together with --kv-v-bits. "
+             "K8/V3 is the recommended mix",
+    )
+    parser.add_argument(
+        "--kv-v-bits", type=int, default=None,
+        help="Value width for a mixed KV cache, set together with --kv-k-bits",
+    )
+    parser.add_argument(
+        "--kv-min-tokens", type=int, default=0,
+        help="Keep the first N cached tokens in FP16 (attention sinks); 128 "
+             "is a good value (default: 0)",
+    )
+    parser.add_argument(
+        "--kv-group-size", type=int, default=64,
+        help="Rotation group size for KV quantization (default: 64)",
+    )
+    parser.add_argument(
+        "--kv-fused", action="store_true",
+        help="Experimental fused decode+attend kernel; needs --kv-min-tokens 0",
+    )
+
+
 def _extract_kv_args(argv):
     """Peel TurboQuant KV-cache flags off ``argv`` before mlx_lm.server sees it.
 
-    `mlx_lm.server`'s argparse would reject these as unknown, so we parse
-    them here with a permissive pre-parser and hand the *remaining* args back
-    to the server unchanged.
+    `mlx_lm.server`'s own ``--kv-bits``/``--kv-group-size`` would select its
+    affine KV quantization, so we parse these here with a permissive
+    pre-parser and hand the *remaining* args back to the server unchanged.
 
     Returns ``(kv_config | None, remaining_argv)``. ``kv_config`` is ``None``
     when no KV flag was given (KV quantization stays off), otherwise a kwargs
     dict for ``convert_cache_to_turboquant``.
     """
-    # add_help=False: let -h/--help fall through to mlx_lm.server's parser.
+    # add_help=False: -h/--help is handled by _print_help() in main().
     # allow_abbrev=False: never consume a server flag via prefix matching.
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--kv-bits", type=int, default=None)
-    parser.add_argument("--kv-k-bits", type=int, default=None)
-    parser.add_argument("--kv-v-bits", type=int, default=None)
-    parser.add_argument("--kv-min-tokens", type=int, default=0)
-    parser.add_argument("--kv-group-size", type=int, default=64)
-    parser.add_argument("--kv-fused", action="store_true")
+    _add_kv_args(parser)
     ns, remaining = parser.parse_known_args(argv)
 
     if ns.kv_bits is not None and (
@@ -607,6 +662,63 @@ def _extract_kv_args(argv):
     return kv_config, remaining
 
 
+def _add_stream_args(parser):
+    # str, not float: accepts 'auto' (machine-sized budget); load_streaming
+    # parses numeric strings itself.
+    parser.add_argument(
+        "--cache-budget-gb", type=str, default=None, metavar="{GB,auto}",
+        help="Serve a Mixture-of-Experts model bigger than RAM: keep this much "
+             "memory for experts and read the rest from disk as tokens route "
+             "to them. 'auto' sizes it from the machine. The options below "
+             "apply only with it",
+    )
+    parser.add_argument(
+        "--wire-memory", action="store_true",
+        help="Wire weights and the expert cache against memory pressure",
+    )
+    parser.add_argument(
+        "--max-active-experts", type=int, default=4,
+        help="Read at most K experts per token (the router's top-K, "
+             "renormalized). 0 keeps the model's full routing: use it for "
+             "quality-sensitive or agent work (default: 4)",
+    )
+    parser.add_argument(
+        "--prefetch-workers", type=int, default=8,
+        help="Parallel reads of a layer's missing experts (default: 8)",
+    )
+    parser.add_argument(
+        "--prefetch-ahead", type=int, default=0,
+        help="Speculatively read the next N layers' experts; switches itself "
+             "off when the drive is saturated (default: 0)",
+    )
+    parser.add_argument(
+        "--fanout", action="store_true", default=False,
+        help="Submit a layer's known expert misses to the read pool at layer "
+             "start. Wins on a fast internal SSD, loses on bandwidth-bound "
+             "external storage, and does not switch itself off",
+    )
+    parser.add_argument(
+        "--pin-file", default=None,
+        help="Experimental: JSON of experts to keep resident (from "
+             "calibrate_experts.py)",
+    )
+    parser.add_argument(
+        "--no-hotlist", dest="use_hotlist", action="store_false", default=True,
+        help="Ignore a hot_experts.json in the model folder (its experts are "
+             "otherwise pinned and preloaded at start)",
+    )
+    parser.add_argument(
+        "--use-page-cache", dest="use_page_cache", action="store_true",
+        default=None,
+        help="Read experts through the macOS page cache (default: on only "
+             "when the model files are under 0.6x of RAM)",
+    )
+    parser.add_argument(
+        "--no-page-cache", dest="use_page_cache", action="store_false",
+        help="Bypass the page cache for expert reads",
+    )
+
+
 def _extract_stream_args(argv):
     """Peel expert-streaming flags off ``argv`` before mlx_lm.server sees them.
 
@@ -616,21 +728,7 @@ def _extract_stream_args(argv):
     flags are no-ops without a budget (and are documented as such).
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    # str, not float: accepts 'auto' (machine-sized budget); load_streaming
-    # parses numeric strings itself.
-    parser.add_argument("--cache-budget-gb", type=str, default=None)
-    parser.add_argument("--wire-memory", action="store_true")
-    parser.add_argument("--max-active-experts", type=int, default=4)
-    parser.add_argument("--prefetch-workers", type=int, default=8)
-    parser.add_argument("--prefetch-ahead", type=int, default=0)
-    parser.add_argument("--fanout", action="store_true", default=False)
-    parser.add_argument("--pin-file", default=None)
-    parser.add_argument("--no-hotlist", dest="use_hotlist", action="store_false",
-                        default=True)
-    parser.add_argument("--use-page-cache", dest="use_page_cache",
-                        action="store_true", default=None)
-    parser.add_argument("--no-page-cache", dest="use_page_cache",
-                        action="store_false")
+    _add_stream_args(parser)
     ns, remaining = parser.parse_known_args(argv)
 
     if ns.cache_budget_gb is None:
@@ -662,6 +760,21 @@ def _extract_stream_args(argv):
     return stream_config, remaining
 
 
+def _add_prefill_stats_args(parser):
+    parser.add_argument(
+        "--prefill-stats", dest="prefill_stats", action="store_true",
+        default=False,
+        help="Diagnostic: log how much of each prompt is reused or "
+             "re-prefilled, with a summary at exit",
+    )
+    parser.add_argument(
+        "--prefill-stats-file", dest="prefill_stats_file", default=None,
+        metavar="FILE",
+        help="Also write those stats to FILE as JSON lines (implies "
+             "--prefill-stats)",
+    )
+
+
 def _extract_prefill_stats_args(argv):
     """Peel the prefill-redundancy diagnostic flags off ``argv``.
 
@@ -673,16 +786,44 @@ def _extract_prefill_stats_args(argv):
     Returns ``(stats_config | None, remaining_argv)``.
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--prefill-stats", dest="prefill_stats",
-                        action="store_true", default=False)
-    parser.add_argument("--prefill-stats-file", dest="prefill_stats_file",
-                        default=None)
+    _add_prefill_stats_args(parser)
     ns, remaining = parser.parse_known_args(argv)
 
     if not ns.prefill_stats and ns.prefill_stats_file is None:
         return None, remaining
 
     return dict(stats_file=ns.prefill_stats_file), remaining
+
+
+def _add_disk_cache_args(parser):
+    parser.add_argument(
+        "--disk-cache", dest="disk_cache", nargs="?", const="auto",
+        default=None, metavar="DIR",
+        help="Save prompt-cache checkpoints to disk, so a later request or a "
+             "restart resumes instead of re-prefilling. DIR defaults to a "
+             "per-model folder under ~/.cache/turboquant/prompt-cache",
+    )
+    parser.add_argument(
+        "--disk-cache-budget-gb", dest="budget_gb", type=float, default=10.0,
+        metavar="GB",
+        help="Disk space for checkpoints, oldest evicted first (default: 10)",
+    )
+    parser.add_argument(
+        "--disk-cache-min-tokens", dest="min_tokens", type=int, default=512,
+        metavar="N",
+        help="Don't checkpoint shorter prompts (default: 512)",
+    )
+    parser.add_argument(
+        "--disk-cache-save-every", dest="save_every", type=int, default=1024,
+        metavar="N",
+        help="Tokens between checkpoints, including mid-prefill ones "
+             "(default: 1024)",
+    )
+    parser.add_argument(
+        "--disk-cache-no-prefill-checkpoints", dest="no_prefill_ckpt",
+        action="store_true", default=False,
+        help="Only checkpoint at the end of a request",
+    )
 
 
 def _extract_disk_cache_args(argv):
@@ -696,17 +837,7 @@ def _extract_disk_cache_args(argv):
     Returns ``(config | None, remaining_argv)``.
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--disk-cache", dest="disk_cache", nargs="?",
-                        const="auto", default=None)
-    parser.add_argument("--disk-cache-budget-gb", dest="budget_gb",
-                        type=float, default=10.0)
-    parser.add_argument("--disk-cache-min-tokens", dest="min_tokens",
-                        type=int, default=512)
-    parser.add_argument("--disk-cache-save-every", dest="save_every",
-                        type=int, default=1024)
-    parser.add_argument("--disk-cache-no-prefill-checkpoints",
-                        dest="no_prefill_ckpt", action="store_true",
-                        default=False)
+    _add_disk_cache_args(parser)
     ns, remaining = parser.parse_known_args(argv)
 
     if ns.disk_cache is None:
@@ -743,6 +874,20 @@ def _extract_disk_cache_args(argv):
     ), remaining
 
 
+def _add_prefill_keepalive_args(parser):
+    parser.add_argument(
+        "--prefill-keepalive", dest="prefill_keepalive", action="store_true",
+        default=False,
+        help="Send real SSE chunks during a long prefill, so a proxy (for "
+             "example claude-code-router) doesn't time the client out",
+    )
+    parser.add_argument(
+        "--prefill-keepalive-interval", dest="interval", type=float,
+        default=10.0, metavar="SECONDS",
+        help="Seconds between keepalive chunks (default: 10)",
+    )
+
+
 def _extract_prefill_keepalive_args(argv):
     """Peel the prefill-keepalive flags off ``argv``.
 
@@ -753,10 +898,7 @@ def _extract_prefill_keepalive_args(argv):
     them (seconds; default 10). Returns ``(config | None, remaining_argv)``.
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--prefill-keepalive", dest="prefill_keepalive",
-                        action="store_true", default=False)
-    parser.add_argument("--prefill-keepalive-interval", dest="interval",
-                        type=float, default=10.0)
+    _add_prefill_keepalive_args(parser)
     ns, remaining = parser.parse_known_args(argv)
 
     if not ns.prefill_keepalive:
@@ -841,6 +983,19 @@ class _KeepaliveSSEWriter:
         return getattr(self._wfile, name)
 
 
+def _add_rep_penalty_args(parser):
+    parser.add_argument(
+        "--rep-penalty", type=float, default=None,
+        help="Default repetition penalty for requests that don't set one "
+             "(default: the model's generation_config.json; 0 or 1 turns it "
+             "off)",
+    )
+    parser.add_argument(
+        "--rep-ctx", type=int, default=256,
+        help="Context window for that default penalty (default: 256)",
+    )
+
+
 def _extract_rep_penalty_args(argv):
     """Peel the server-side repetition-penalty default flags off ``argv``.
 
@@ -854,8 +1009,7 @@ def _extract_rep_penalty_args(argv):
     Returns ``(rep_config | None, remaining_argv)``.
     """
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--rep-penalty", type=float, default=None)
-    parser.add_argument("--rep-ctx", type=int, default=256)
+    _add_rep_penalty_args(parser)
     ns, remaining = parser.parse_known_args(argv)
     if ns.rep_penalty is not None and ns.rep_penalty in (0.0, 1.0):
         return None, remaining
@@ -924,6 +1078,20 @@ def _patch_default_rep_penalty(rep_config) -> None:
     APIHandler.validate_model_parameters = validate_model_parameters
 
 
+def _add_tool_syntax_greedy_args(parser):
+    parser.add_argument(
+        "--tool-syntax-greedy", action="store_true",
+        help="Inside a <tool_call> block, pick the most likely token, so "
+             "low-bit builds don't garble tool-call JSON; values are still "
+             "sampled",
+    )
+    parser.add_argument(
+        "--tool-syntax-tags", type=str, default=None, metavar="OPEN,CLOSE",
+        help="Tool-call tags for chat templates that don't use <tool_call>, "
+             "as \"<open>,</close>\"; needs --tool-syntax-greedy",
+    )
+
+
 def _extract_tool_syntax_greedy_args(argv):
     """Peel ``--tool-syntax-greedy`` (and optional ``--tool-syntax-tags``).
 
@@ -933,8 +1101,7 @@ def _extract_tool_syntax_greedy_args(argv):
     Returns ``(config | None, remaining_argv)``.
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-    parser.add_argument("--tool-syntax-greedy", action="store_true")
-    parser.add_argument("--tool-syntax-tags", type=str, default=None)
+    _add_tool_syntax_greedy_args(parser)
     ns, remaining = parser.parse_known_args(argv)
     if not ns.tool_syntax_greedy:
         if ns.tool_syntax_tags is not None:
@@ -985,8 +1152,84 @@ def _patch_prefill_keepalive(interval: float = 10.0) -> None:
     APIHandler.handle_completion = _handle_completion
 
 
+# (title, description, adder): TurboQuant's own options, as --help groups them.
+# The _extract_* parsers call the same adders, so help and parsing can't drift.
+_OPTION_GROUPS = (
+    ("TurboQuant KV cache",
+     "Any of these serves one request at a time: TurboQuant KV caches can't be "
+     "merged into a batch.",
+     _add_kv_args),
+    ("Expert streaming (a Mixture-of-Experts model bigger than RAM)", None,
+     _add_stream_args),
+    ("Disk prompt cache", None, _add_disk_cache_args),
+    ("Memory guards", None,
+     lambda p: (_add_metal_cache_limit_args(p), _add_prompt_cache_max_args(p))),
+    ("Generation defaults", None,
+     lambda p: (_add_rep_penalty_args(p), _add_tool_syntax_greedy_args(p))),
+    ("Clients and diagnostics", None,
+     lambda p: (_add_prefill_keepalive_args(p), _add_prefill_stats_args(p))),
+    ("Model-specific", None, _add_ngram_offload_args),
+)
+
+
+class _ParserCaptured(Exception):
+    """Stops mlx_lm.server.main once its argument parser is built."""
+
+
+def _mlx_lm_server_parser():
+    """Return the installed mlx_lm.server's argument parser, or None.
+
+    ``mlx_lm.server.main`` builds its parser and parses ``sys.argv`` in one
+    function, so intercept ``parse_args`` to take the parser and stop there:
+    ``--help`` then lists that mlx-lm version's real options.
+    """
+    import mlx_lm.server as _server_mod
+
+    captured = []
+
+    def _capture(self, *args, **kwargs):
+        captured.append(self)
+        raise _ParserCaptured
+
+    original = argparse.ArgumentParser.parse_args
+    argparse.ArgumentParser.parse_args = _capture
+    try:
+        _server_mod.main()
+    except _ParserCaptured:
+        pass
+    finally:
+        argparse.ArgumentParser.parse_args = original
+    return captured[0] if captured else None
+
+
+def _print_help() -> None:
+    """Print mlx_lm.server's options followed by TurboQuant's own."""
+    parser = _mlx_lm_server_parser() or argparse.ArgumentParser()
+    parser.prog = "turboquant-serve"
+    parser.description = (
+        "OpenAI-compatible HTTP server: mlx_lm.server with a loader that "
+        "understands TurboQuant models. Other models pass through unchanged."
+    )
+    for action in parser._actions:
+        if "--quantized-kv-start" in action.option_strings:
+            action.help = ("Not used: TurboQuant's --kv-* options replace "
+                           "mlx-lm's KV quantization (see --kv-min-tokens)")
+        elif "--prompt-cache-bytes" in action.option_strings:
+            action.help = ("Maximum size in bytes of the KV caches, applied "
+                           "only when requests are batched; "
+                           "--prompt-cache-max-gb caps both paths")
+    # TurboQuant's --kv-bits/--kv-group-size replace mlx-lm's entries.
+    parser.conflict_handler = "resolve"
+    for title, description, add_args in _OPTION_GROUPS:
+        add_args(parser.add_argument_group(title, description))
+    parser.print_help()
+
+
 def main() -> None:
     _check_mlx_lm_version()
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        _print_help()
+        return
 
     kv_config, remaining = _extract_kv_args(sys.argv[1:])
     stream_config, remaining = _extract_stream_args(remaining)

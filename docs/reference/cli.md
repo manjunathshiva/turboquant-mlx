@@ -218,10 +218,9 @@ options:
 
 ## `turboquant-serve`
 
-OpenAI-compatible server (mlx_lm.server with a TurboQuant loader). **Most of TurboQuant's own options are not shown by `--help`** (`--disk-cache`, `--cache-budget-gb`, `--kv-k-bits`/`--kv-v-bits`/`--kv-min-tokens`, `--tool-syntax-greedy`, …). `--kv-bits` and `--kv-group-size` do appear, with mlx-lm's descriptions, but TurboQuant handles them. All are listed in [Serve an OpenAI-compatible API](../guides/serve.md#options).
+OpenAI-compatible server (mlx_lm.server with a TurboQuant loader). `--help` lists mlx-lm's options first, then TurboQuant's own in groups. TurboQuant's `--kv-bits` and `--kv-group-size` replace mlx-lm's KV quantization. Up to 0.29.0, `--help` showed only mlx-lm's options; [Serve an OpenAI-compatible API](../guides/serve.md#options) lists them all either way.
 
 ```text
-TurboQuant-MLX serve  ·  OpenAI-compatible HTTP server (backend: mlx_lm.server, TurboQuant-aware loader)
 usage: turboquant-serve [-h] [--model MODEL] [--adapter-path ADAPTER_PATH] [--host HOST]
                         [--port PORT] [--allowed-origins ALLOWED_ORIGINS]
                         [--draft-model DRAFT_MODEL] [--num-draft-tokens NUM_DRAFT_TOKENS]
@@ -233,11 +232,25 @@ usage: turboquant-serve [-h] [--model MODEL] [--adapter-path ADAPTER_PATH] [--ho
                         [--prompt-concurrency PROMPT_CONCURRENCY]
                         [--prefill-step-size PREFILL_STEP_SIZE]
                         [--prompt-cache-size PROMPT_CACHE_SIZE]
-                        [--prompt-cache-bytes PROMPT_CACHE_BYTES] [--kv-bits KV_BITS]
-                        [--kv-group-size KV_GROUP_SIZE] [--quantized-kv-start QUANTIZED_KV_START]
-                        [--pipeline]
+                        [--prompt-cache-bytes PROMPT_CACHE_BYTES]
+                        [--quantized-kv-start QUANTIZED_KV_START] [--pipeline] [--kv-bits KV_BITS]
+                        [--kv-k-bits KV_K_BITS] [--kv-v-bits KV_V_BITS]
+                        [--kv-min-tokens KV_MIN_TOKENS] [--kv-group-size KV_GROUP_SIZE]
+                        [--kv-fused] [--cache-budget-gb {GB,auto}] [--wire-memory]
+                        [--max-active-experts MAX_ACTIVE_EXPERTS]
+                        [--prefetch-workers PREFETCH_WORKERS] [--prefetch-ahead PREFETCH_AHEAD]
+                        [--fanout] [--pin-file PIN_FILE] [--no-hotlist] [--use-page-cache]
+                        [--no-page-cache] [--disk-cache [DIR]] [--disk-cache-budget-gb GB]
+                        [--disk-cache-min-tokens N] [--disk-cache-save-every N]
+                        [--disk-cache-no-prefill-checkpoints]
+                        [--metal-cache-limit-gb {GB,auto,off}]
+                        [--prompt-cache-max-gb {GB,auto,off}] [--rep-penalty REP_PENALTY]
+                        [--rep-ctx REP_CTX] [--tool-syntax-greedy] [--tool-syntax-tags OPEN,CLOSE]
+                        [--prefill-keepalive] [--prefill-keepalive-interval SECONDS]
+                        [--prefill-stats] [--prefill-stats-file FILE] [--ngram-offload]
 
-MLX Http Server.
+OpenAI-compatible HTTP server: mlx_lm.server with a loader that understands TurboQuant models.
+Other models pass through unchanged.
 
 options:
   -h, --help            show this help message and exit
@@ -277,15 +290,103 @@ options:
   --prompt-cache-size PROMPT_CACHE_SIZE
                         Maximum number of distinct KV caches to hold in the prompt cache
   --prompt-cache-bytes PROMPT_CACHE_BYTES
-                        Maximum size in bytes of the KV caches
-  --kv-bits KV_BITS     Number of bits for KV cache quantization (e.g., 4 or 8). Reduces memory
-                        usage for long contexts. Disables batching, so requests are served one at
-                        a time. Default: None (full precision)
-  --kv-group-size KV_GROUP_SIZE
-                        Group size for KV cache quantization (default: 64)
+                        Maximum size in bytes of the KV caches, applied only when requests are
+                        batched; --prompt-cache-max-gb caps both paths
   --quantized-kv-start QUANTIZED_KV_START
-                        Token position to start KV cache quantization (default: 5000)
+                        Not used: TurboQuant's --kv-* options replace mlx-lm's KV quantization
+                        (see --kv-min-tokens)
   --pipeline            Use pipelining instead of tensor parallelism
+
+TurboQuant KV cache:
+  Any of these serves one request at a time: TurboQuant KV caches can't be merged into a batch.
+
+  --kv-bits KV_BITS     Compress each request's KV cache, keys and values at the same width. 8 is
+                        safe everywhere; on TurboQuant weights use --kv-k-bits 8 --kv-v-bits 3
+                        rather than a low symmetric width
+  --kv-k-bits KV_K_BITS
+                        Key width for a mixed KV cache, set together with --kv-v-bits. K8/V3 is
+                        the recommended mix
+  --kv-v-bits KV_V_BITS
+                        Value width for a mixed KV cache, set together with --kv-k-bits
+  --kv-min-tokens KV_MIN_TOKENS
+                        Keep the first N cached tokens in FP16 (attention sinks); 128 is a good
+                        value (default: 0)
+  --kv-group-size KV_GROUP_SIZE
+                        Rotation group size for KV quantization (default: 64)
+  --kv-fused            Experimental fused decode+attend kernel; needs --kv-min-tokens 0
+
+Expert streaming (a Mixture-of-Experts model bigger than RAM):
+  --cache-budget-gb {GB,auto}
+                        Serve a Mixture-of-Experts model bigger than RAM: keep this much memory
+                        for experts and read the rest from disk as tokens route to them. 'auto'
+                        sizes it from the machine. The options below apply only with it
+  --wire-memory         Wire weights and the expert cache against memory pressure
+  --max-active-experts MAX_ACTIVE_EXPERTS
+                        Read at most K experts per token (the router's top-K, renormalized). 0
+                        keeps the model's full routing: use it for quality-sensitive or agent work
+                        (default: 4)
+  --prefetch-workers PREFETCH_WORKERS
+                        Parallel reads of a layer's missing experts (default: 8)
+  --prefetch-ahead PREFETCH_AHEAD
+                        Speculatively read the next N layers' experts; switches itself off when
+                        the drive is saturated (default: 0)
+  --fanout              Submit a layer's known expert misses to the read pool at layer start. Wins
+                        on a fast internal SSD, loses on bandwidth-bound external storage, and
+                        does not switch itself off
+  --pin-file PIN_FILE   Experimental: JSON of experts to keep resident (from calibrate_experts.py)
+  --no-hotlist          Ignore a hot_experts.json in the model folder (its experts are otherwise
+                        pinned and preloaded at start)
+  --use-page-cache      Read experts through the macOS page cache (default: on only when the model
+                        files are under 0.6x of RAM)
+  --no-page-cache       Bypass the page cache for expert reads
+
+Disk prompt cache:
+  --disk-cache [DIR]    Save prompt-cache checkpoints to disk, so a later request or a restart
+                        resumes instead of re-prefilling. DIR defaults to a per-model folder under
+                        ~/.cache/turboquant/prompt-cache
+  --disk-cache-budget-gb GB
+                        Disk space for checkpoints, oldest evicted first (default: 10)
+  --disk-cache-min-tokens N
+                        Don't checkpoint shorter prompts (default: 512)
+  --disk-cache-save-every N
+                        Tokens between checkpoints, including mid-prefill ones (default: 1024)
+  --disk-cache-no-prefill-checkpoints
+                        Only checkpoint at the end of a request
+
+Memory guards:
+  --metal-cache-limit-gb {GB,auto,off}
+                        Cap MLX's buffer-reuse cache after the model loads (0 disables reuse).
+                        'auto' acts only when memory is tight; 'off' leaves MLX alone (default:
+                        auto)
+  --prompt-cache-max-gb {GB,auto,off}
+                        Byte cap on the in-memory prompt cache, enforced on every insert whether
+                        or not requests are batched. 'auto' caps it only when memory is tight;
+                        'off' keeps mlx-lm's behavior (default: auto)
+
+Generation defaults:
+  --rep-penalty REP_PENALTY
+                        Default repetition penalty for requests that don't set one (default: the
+                        model's generation_config.json; 0 or 1 turns it off)
+  --rep-ctx REP_CTX     Context window for that default penalty (default: 256)
+  --tool-syntax-greedy  Inside a <tool_call> block, pick the most likely token, so low-bit builds
+                        don't garble tool-call JSON; values are still sampled
+  --tool-syntax-tags OPEN,CLOSE
+                        Tool-call tags for chat templates that don't use <tool_call>, as
+                        "<open>,</close>"; needs --tool-syntax-greedy
+
+Clients and diagnostics:
+  --prefill-keepalive   Send real SSE chunks during a long prefill, so a proxy (for example
+                        claude-code-router) doesn't time the client out
+  --prefill-keepalive-interval SECONDS
+                        Seconds between keepalive chunks (default: 10)
+  --prefill-stats       Diagnostic: log how much of each prompt is reused or re-prefilled, with a
+                        summary at exit
+  --prefill-stats-file FILE
+                        Also write those stats to FILE as JSON lines (implies --prefill-stats)
+
+Model-specific:
+  --ngram-offload       Qwen3.8-Flash-Next only: serve its n-gram table from disk-backed memory
+                        instead of GPU memory (about 17.9 GiB less), with identical output
 ```
 
 ## `turboquant-serve-vlm`

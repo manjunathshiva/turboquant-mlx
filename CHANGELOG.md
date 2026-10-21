@@ -6,6 +6,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `turboquant-serve --help` now lists TurboQuant's own options (KV cache,
+  expert streaming, disk prompt cache, memory guards, generation defaults,
+  keepalive and diagnostics) in groups after mlx-lm's. Before, they were
+  parsed ahead of mlx-lm and never shown, and `--kv-bits`/`--kv-group-size`
+  carried mlx-lm's descriptions although TurboQuant handles them.
+
 ## [0.29.0] - 2026-10-21
 
 ### Added

@@ -30,11 +30,12 @@ For vision models, use [`turboquant-serve-vlm`](vision.md#serve-it).
 
 ## Options
 
-All `mlx_lm.server` options work unchanged: `--host`, `--port`, `--temp`, `--top-p`,
+All `mlx_lm.server` options work as usual: `--host`, `--port`, `--temp`, `--top-p`,
 `--top-k`, `--max-tokens`, `--chat-template-args`, `--prefill-step-size`,
-`--prompt-concurrency`, `--prompt-cache-size`, `--prompt-cache-bytes` and so on (see
-`turboquant-serve --help`). TurboQuant adds the options below. They're handled before the
-rest are passed on, so `--help` doesn't list them.
+`--prompt-concurrency`, `--prompt-cache-size`, `--prompt-cache-bytes` and so on. The exception
+is KV quantization: TurboQuant's `--kv-bits` and `--kv-group-size` replace mlx-lm's, so
+`--quantized-kv-start` has no effect. TurboQuant adds the options below.
+`turboquant-serve --help` lists both sets (up to 0.29.0 it showed only mlx-lm's).
 
 | Option | Default | What it does |
 |---|---|---|
