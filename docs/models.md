@@ -77,8 +77,9 @@ Measured on a 64 GB M4 Max unless noted; these fit a 24–36 GB Mac by size. Che
 - **`tq3a-tq2e`** keeps attention at 3-bit and drops experts to 2-bit: smaller, faster, but long
   generations can drift on some models.
 - **`tqTe`** uses **ternary (1.58-bit) experts**: the smallest build. It needs a model with many
-  wide experts (128+). Since 0.30.0 it decodes close to 3-bit speed (measured on Nemotron 3.5 VL);
-  before, it was about 1.9× slower.
+  wide experts (128+). Since 0.30.0 it decodes close to 3-bit speed (measured on NVIDIA Nemotron
+  3.5 Super VL); before, it was clearly slower (Qwen3.6-35B: ~33 tok/s ternary against ~60 for
+  3-bit on an M4 Max).
 - **`down4`** adds a 4-bit expert down projection to a ternary build: a few GB more, and it is
   what made Qwen3.6-35B work in agent harnesses.
 - **`g32` / `g64`** is the group size: 32 is more accurate, 64 is smaller.
