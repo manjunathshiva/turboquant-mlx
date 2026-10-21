@@ -30,14 +30,16 @@ turboquant-serve --model manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-g64 --port 808
 
 | On a… | Runs | How |
 |---|---|---|
-| **16 GB Mac mini** | Qwen3.6-35B-A3B, **fully in memory** (9.4 GB, ~10 tok/s) | [ternary experts](model-pages/qwen36-35b.md) |
+| **16 GB Mac mini** | Qwen3.6-35B-A3B, **fully in memory** (9.4 GB, ~17 tok/s\*) | [ternary experts](model-pages/qwen36-35b.md) |
 | **16 GB Mac mini** | Qwen3.8-27B vision model (11.55 GiB, vision passes) | [3-bit](model-pages/qwen38-27b.md) |
 | **16 GB Mac mini** | Qwen3.5-122B (~2 tok/s) and Qwen3-235B (~0.2 tok/s), streaming experts from disk | [expert streaming](guides/streaming.md) |
-| **48 GB Mac** | Qwen3.5-122B, fully in memory (30.9 GB, ~13 tok/s) | [ternary experts](model-pages/qwen35-122b.md) |
+| **48 GB Mac** | Qwen3.5-122B, fully in memory (30.9 GB, ~25 tok/s\*) | [ternary experts](model-pages/qwen35-122b.md) |
 | **64 GB Mac** | NVIDIA Nemotron 3.5 Super VL 120B, a vision model, **at default settings** | [ternary experts](model-pages/nemotron-35-vl.md) |
 | **64 GB Mac** | Poolside Laguna S-2.1 118B coding agent (~27 GB, passes Opencode) | [ternary experts](model-pages/laguna.md) |
 | **64 GB Mac** | Qwen3.8-Flash-Next 180B, fully in memory (16–18 tok/s) | [mixed 4/2-bit](model-pages/qwen38-flash-next.md) |
 | **64 GB Mac** | GPT-OSS-120B with its full 131K context, in 50 GB | [weights + KV cache at 3-bit](guides/kv-cache.md) |
+
+\* Estimated for 0.30.0, not measured; see [Benchmarks](benchmarks.md).
 
 ## Find a guide
 
