@@ -10,6 +10,8 @@ x layout: (k, input_dims) — k separate input vectors, one per expert.
 
 import mlx.core as mx
 
+from turboquant_mlx.kernels.polar_gather_qmv import _trit_group_loop
+
 _kernel_cache: dict[tuple[int, int, bool], object] = {}
 
 THREADS_PER_ROW = 32
@@ -25,21 +27,21 @@ def _build_kernel_source(bits: int, group_size: int, trit: bool = False) -> str:
         n_codes = 3
         pow3_init = ", ".join(f"{3 ** i}u" for i in range(20))
         pow3_decl = f"    const uint pw3[20] = {{{pow3_init}}};\n"
-        extract = """
-            uint packed_col = col / 20u;
-            uint slot = col % 20u;
-            uint packed_val = packed_weight[pw_base + packed_col];
-            uint code_idx = (packed_val / pw3[slot]) % 3u;"""
+        inner = _trit_group_loop(group_size, "x[x_base + base_col + j]")
     else:
         n_codes = 1 << bits
         elems_per_u32 = 32 // bits
         mask = (1 << bits) - 1
         pow3_decl = ""
-        extract = f"""
+        inner = f"""
+        for (uint e = 0; e < {group_size}u; e++) {{
+            uint col = base_col + e;
             uint packed_col = col / {elems_per_u32}u;
             uint bit_pos = (col % {elems_per_u32}u) * {bits}u;
             uint packed_val = packed_weight[pw_base + packed_col];
-            uint code_idx = (packed_val >> bit_pos) & {mask}u;"""
+            uint code_idx = (packed_val >> bit_pos) & {mask}u;
+            group_accum += cb[code_idx] * float(x[x_base + col]);
+        }}"""
 
     return f"""
     uint lane = thread_position_in_threadgroup.x;
@@ -75,11 +77,7 @@ def _build_kernel_source(bits: int, group_size: int, trit: bool = False) -> str:
         float scale = float(scales[sc_base + g]);
         uint base_col = g * {group_size}u;
         float group_accum = 0.0f;
-
-        for (uint e = 0; e < {group_size}u; e++) {{
-            uint col = base_col + e;{extract}
-            group_accum += cb[code_idx] * float(x[x_base + col]);
-        }}
+{inner}
 
         accum += group_accum * scale;
     }}

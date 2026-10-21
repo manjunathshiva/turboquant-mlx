@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Ternary expert layers decode much faster, with bit-identical output.** The
+  kernels decoded each trit with a division by a place value looked up per
+  weight, and Apple GPUs have no integer-divide instruction. They now divide
+  once where a group starts and step by a constant `/ 3` per weight. Kernel
+  time at real expert shapes: 2.5–3.1× faster for decode gate/up
+  (`polar_gather_qmv`), 4.8–5.2× for decode down (`polar_multi_gather_qmv`)
+  and 4.7–5.3× for dequantizing all experts. Every published ternary build
+  benefits without re-conversion. Bit-packed 2/3/4-bit kernels and the sorted
+  prefill kernel (`polar_gather_qmm`, already fast) are unchanged.
+
 ### Fixed
 
 - `turboquant-serve --help` now lists TurboQuant's own options (KV cache,

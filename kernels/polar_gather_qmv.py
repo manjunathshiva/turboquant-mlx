@@ -28,6 +28,43 @@ _kernel_cache: dict[tuple[int, int, bool], object] = {}
 THREADS_PER_ROW = 32
 
 
+def _trit_group_loop(group_size: int, x_expr: str) -> str:
+    """Metal loop that adds one group's trit-decoded weights times ``x_expr``.
+
+    Apple GPUs have no integer-divide instruction, so the per-weight
+    ``(word / 3**slot) % 3`` this replaces cost a software division for every
+    weight. Instead: one division by the place value where the group starts
+    (groups need not align with the 20-trit words), then ``% 3`` and ``/ 3``
+    per weight, which compile to a multiply and shift. The digits and the
+    order of the adds are unchanged, so the output is bit-identical.
+
+    Shared by polar_gather_qmv, polar_multi_gather_qmv and
+    polar_dequant_experts (which passes no ``x_expr`` and writes instead).
+    Expects ``base_col``, ``pw_base``, ``packed_weight``, ``pw3`` and ``cb`` in
+    scope, plus ``group_accum`` (with ``x_expr``) or ``out``, ``out_base`` and
+    ``scale`` (without).
+    """
+    if x_expr:
+        body = f"group_accum += cb[code_idx] * float({x_expr});"
+    else:
+        body = "out[out_base + j] = T(cb[code_idx] * scale);"
+    return f"""
+        uint packed_col = base_col / 20u;
+        uint slot = base_col % 20u;
+        uint trits = packed_weight[pw_base + packed_col] / pw3[slot];
+        for (uint j = 0; j < {group_size}u; j++) {{
+            uint code_idx = trits % 3u;
+            {body}
+            trits /= 3u;
+            // The next word, unless this was the group's last weight: a
+            // group ending on a word boundary must not read past the row.
+            if (++slot == 20u && j + 1u < {group_size}u) {{
+                slot = 0u;
+                trits = packed_weight[pw_base + ++packed_col];
+            }}
+        }}"""
+
+
 def _build_kernel_source(bits: int, group_size: int, trit: bool = False) -> str:
     """Generate Metal shader for fused expert-routed polar QMV with
     threadgroup parallel reduction.
@@ -41,22 +78,21 @@ def _build_kernel_source(bits: int, group_size: int, trit: bool = False) -> str:
         # base-3 place values, declared once per threadgroup (hoisted out of
         # the inner element loop) so the array is not rebuilt per weight.
         pow3_decl = f"    const uint pw3[20] = {{{pow3_init}}};\n"
-        # base-3 digit at position (col % 20): (word / 3**slot) % 3
-        extract = """
-            uint packed_col = col / 20u;
-            uint slot = col % 20u;
-            uint packed_val = packed_weight[pw_base + packed_col];
-            uint code_idx = (packed_val / pw3[slot]) % 3u;"""
+        inner = _trit_group_loop(group_size, "x[base_col + j]")
     else:
         n_codes = 1 << bits
         elems_per_u32 = 32 // bits
         mask = (1 << bits) - 1
         pow3_decl = ""
-        extract = f"""
+        inner = f"""
+        for (uint e = 0; e < {group_size}u; e++) {{
+            uint col = base_col + e;
             uint packed_col = col / {elems_per_u32}u;
             uint bit_pos = (col % {elems_per_u32}u) * {bits}u;
             uint packed_val = packed_weight[pw_base + packed_col];
-            uint code_idx = (packed_val >> bit_pos) & {mask}u;"""
+            uint code_idx = (packed_val >> bit_pos) & {mask}u;
+            group_accum += cb[code_idx] * float(x[col]);
+        }}"""
 
     return f"""
     // Each threadgroup handles one (expert_local, row) pair.
@@ -97,11 +133,7 @@ def _build_kernel_source(bits: int, group_size: int, trit: bool = False) -> str:
         float scale = float(scales[sc_base + g]);
         uint base_col = g * {group_size}u;
         float group_accum = 0.0f;
-
-        for (uint e = 0; e < {group_size}u; e++) {{
-            uint col = base_col + e;{extract}
-            group_accum += cb[code_idx] * float(x[col]);
-        }}
+{inner}
 
         accum += group_accum * scale;
     }}

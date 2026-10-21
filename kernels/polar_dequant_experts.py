@@ -12,6 +12,8 @@ per call beats per-row gather kernels that re-read activations per output row.
 
 import mlx.core as mx
 
+from turboquant_mlx.kernels.polar_gather_qmv import _trit_group_loop
+
 _kernel_cache: dict[tuple[int, int, bool], object] = {}
 
 
@@ -24,18 +26,20 @@ def _get_kernel(bits: int, group_size: int, trit: bool = False):
         n_codes = 3
         pow3_init = ", ".join(f"{3 ** i}u" for i in range(20))
         pow3_decl = f"    const uint pw3[20] = {{{pow3_init}}};\n"
-        # base-3 digit at position (col % 20): (word / 3**slot) % 3
-        decode = """
-        uint word = packed_weight[pw_base + col / 20u];
-        uint code = (word / pw3[col % 20u]) % 3u;"""
+        loop = f"""
+    uint base_col = g * {group_size}u;{_trit_group_loop(group_size, "")}"""
     else:
         n_codes = 1 << bits
         elems_per_u32 = 32 // bits
         mask = (1 << bits) - 1
         pow3_decl = ""
-        decode = f"""
+        loop = f"""
+    for (uint t = 0; t < {group_size}u; t++) {{
+        uint col = g * {group_size}u + t;
         uint word = packed_weight[pw_base + col / {elems_per_u32}u];
-        uint code = (word >> ((col % {elems_per_u32}u) * {bits}u)) & {mask}u;"""
+        uint code = (word >> ((col % {elems_per_u32}u) * {bits}u)) & {mask}u;
+        out[out_base + t] = T(cb[code] * scale);
+    }}"""
 
     source = f"""
     uint gid = thread_position_in_grid.x;
@@ -56,11 +60,7 @@ def _get_kernel(bits: int, group_size: int, trit: bool = False):
     float scale = float(scales[gid]);
     uint pw_base = (e * out_rows + row) * pw_cols;
     uint out_base = (e * out_rows + row) * in_dims + g * {group_size}u;
-
-    for (uint t = 0; t < {group_size}u; t++) {{
-        uint col = g * {group_size}u + t;{decode}
-        out[out_base + t] = T(cb[code] * scale);
-    }}
+{loop}
     """
     name = (
         f"polar_dequant_experts_trit_gs{group_size}"
