@@ -19,7 +19,8 @@ settings it needs. See [Get started](../getting-started.md#1-check-that-it-fits-
 sudo sysctl -w iogpu.wired_limit_mb=60416    # example for a 64 GB Mac
 ```
 
-It takes effect at once and lasts until a reboot. To go back to the default:
+It takes effect at once and lasts until a reboot (to keep it, add the line
+`iogpu.wired_limit_mb=60416` to `/etc/sysctl.conf`). To go back to the default:
 
 ```bash
 sudo sysctl -w iogpu.wired_limit_mb=0

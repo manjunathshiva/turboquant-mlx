@@ -89,6 +89,24 @@ First Metal4 / `MTLGPUFamilyApple10` data point, contributed by [@sbayer2](https
 | K8 / V3 + sink128 | **76.1** | 45.7 | 18.124 GB |
 | K3 / V3 | 75.6 | 45.2 | 18.122 GB |
 
+**KV cache against context on the 35B** (256 generated tokens; 128 at 63K):
+
+| Context | KV config | Prompt t/s | Decode t/s | Peak Metal | Memory saved |
+|---------|-----------|-----------|-----------|------------|--------------|
+| ~65 tok | fp16 | 47.8 | 52.0 | 18.13 GB | — |
+| ~65 tok | K8/V3 | 76.1 | 45.7 | 18.12 GB | 0.01 GB |
+| ~2.5K tok | fp16 | 131.9 | 51.5 | 20.50 GB | — |
+| ~2.5K tok | K8/V3 | 133.4 | 38.2 | 20.55 GB | -0.05 GB |
+| ~14.5K tok | fp16 | 132.8 | 46.0 | 22.50 GB | — |
+| ~14.5K tok | K8/V3 | 132.6 | 16.7 | 21.94 GB | 0.56 GB |
+| ~63K tok | fp16 | 124.5 | 34.5 | 30.79 GB | — |
+| ~63K tok | K8/V3 (no sink) | 123.6 | 5.2 | 28.71 GB | 2.08 GB |
+
+FP16 decodes 1.14× faster at 65 tokens, 1.35× at 2.5K, 2.75× at 14.5K and 6.6× at 63K. On the
+similar-sized Qwen3.5-122B, run resident on a 64 GB M4 Max, FP16 also wins at every context
+(1.07× at 256 tokens, 1.20× at 4096; [#19](https://github.com/manjunathshiva/turboquant-mlx/pull/19)),
+so GPT-OSS-120B's speed-up comes from its KV geometry, not its size.
+
 **122B expert streaming — parallel prefetch** (`--cache-budget-gb 30`, 256 tokens):
 
 | `--prefetch-workers` | Gen t/s | E2E t/s | Disk read | Hit rate |

@@ -38,6 +38,19 @@ generation speed and peak memory.
 | `--ngram-offload` | Qwen3.8-Flash-Next only: serves its n-gram table from memory-mapped files, ~17.9 GiB less GPU memory, identical output. |
 | `--fast` | Skips the QJL correction on builds that have it (about 25% faster). |
 
+## Reproducible greedy output
+
+Changing `--prefill-step-size` can change a greedy answer by a token. On a ~3.9K-token prompt,
+a step of 2048 produced "…which *explains why* the sky reads blue" where 512, 256 and 128
+produced "…which *is why* the sky reads blue". Both are valid: the chunk size changes the order
+the GPU adds numbers in, and FP16 rounding sometimes tips a near-tie the other way.
+
+This comes from chunked prefill on Metal, not from TurboQuant: stock
+`mlx-community/Llama-3.2-1B-Instruct-4bit` on plain mlx-lm forks the same way. TurboQuant's
+decode and prefill expert kernels give bit-identical results to each other
+(`tests/test_kernel_determinism.py`), which is what keeps `--disk-cache` restores consistent.
+For byte-for-byte repeatable greedy output, keep `--prefill-step-size` the same across runs.
+
 ## Models bigger than your RAM
 
 `turboquant-generate` loads the whole model. For a Mixture-of-Experts model that doesn't fit,

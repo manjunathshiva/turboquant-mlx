@@ -253,7 +253,7 @@ def main():
         print("VISION: no passing result" + ("" if vision else " (never ran)")
               + " — a text-only sweep is not a full verification of this build.")
 
-    # Write the artifact the README cites, not a private copy under the image
+    # Write the artifact the docs cite, not a private copy under the image
     # directory: a reproduction that leaves the published record untouched is
     # not a reproduction. Same schema for generated and checked-in results.
     dest = Path(__file__).parent / "bench_mini_qwen38_results.json"

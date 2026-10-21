@@ -44,7 +44,7 @@ model fits in memory, running it in memory is always faster: for the 9.4 GB tern
 | `--prefetch-workers` | 8 | Parallel reads of a layer's missing experts (about 1.9× faster than one at a time). |
 | `--prefetch-ahead N` | 0 | Speculatively reads the next N layers' experts. About +6% on fast NVMe; switches itself off on a saturated drive. |
 | `--wire-memory` | off | Wires weights and the expert cache against memory pressure. |
-| `--no-hotlist` | — | Ignore a `hot_experts.json` shipped with the model (those experts are otherwise pinned and preloaded at start). |
+| `--no-hotlist` | — | Ignore a `hot_experts.json` shipped with the model (those experts are otherwise pinned and preloaded at start). On the 35B ternary build, a 1.1 GB hotlist of 1,500 experts preloaded in 0.3 s and lifted the hit rate from 74% to 82%; the gain is smaller when the cache is a small part of a much larger expert set. |
 | `--no-learn-experts`, `--usage-file` | learning on | The cache records which experts your traffic uses and warm-starts from that profile next time. |
 | `--pin-file` | — | Experimental: keep a fixed set of experts resident. It measured worse than plain LRU on a 122B. |
 

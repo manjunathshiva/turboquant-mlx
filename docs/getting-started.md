@@ -67,6 +67,10 @@ Recommended:
   --kv-bits 8
 ```
 
+That is the 16 GB Mac mini recipe, worked out rather than found by trial and error. The
+projection is calibrated against that machine: it predicts 10.44 GB where the 9.4 GB ternary
+build measures 10.42 GB, and its wired limit is within 1% of the one that works.
+
 `turboquant-doctor` runs the same projection plus a read-only readiness check (model files,
 tokenizer, quantization block, MLX imports, machine limits). Both commands take `--json`.
 
