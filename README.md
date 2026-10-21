@@ -1806,7 +1806,7 @@ Three things to know:
   this pack. What this build offers instead: a calibration-free recipe, a vision
   tower, and with `--ngram-offload`, a 34 GiB resident footprint.
 
-### NVIDIA Nemotron 3.5 Super VL (124B VLM, 512 experts)
+### NVIDIA Nemotron 3.5 Super VL (120B VLM, 512 experts)
 
 **Hardware:** a 64 GB Mac (M4 Max, measured). NVIDIA's vision-language model mixes Mamba-2,
 attention (8 of 88 layers) and a latent MoE (512 experts, 22 active per token), with a RADIO
@@ -1895,7 +1895,7 @@ Options:
 | Sarvam MoE (Megatron-style fused QKV, DeepSeek-V3 routing) | `sarvam_moe` | Yes | Port tested against fp32 (7122/7122 tensors, layer-1 parity 5.4e-7). Custom arch — MLX port shipped here. **No quantized build published**: 4-bit degenerates on long generations (53% of trials; mlx-lm affine 4-bit 100%) |
 | Muse Glimmer (dense VLM: gated attention, sandwich norms, sliding/NoPE mix, ViT-G/14) | `muse_glimmer` | No | Tested (29.8B: `tq4-g64` beats affine 4-bit on PPL — 4.3315 vs 4.3798 — in 25% less space; `tq3-g64` = 12.53 GiB). Structural match verified against the checkpoint, 1436/1436 tensors. Needs **mlx-vlm >= 0.6.12** ([#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838), merged) — see [Muse Glimmer](#muse-glimmer-30b-dense-vlm) |
 | Qwen3.8-Flash-Next (Gated DeltaNet + Qwen Sparse Attention, n-gram/PLE embedding, hyper-connections; Qwen3-VL tower) | `qwen4_exp` | Yes (512 experts, top-10, 640 wide) | Tested (180B: `tq4a-tq2e-g64` = 52.00 GiB, fully resident on a 64 GB Mac at 16–18 tok/s; vision through mlx-vlm's Qwen3-VL tower). Architecture vendored from the open mlx-lm PR [#1788](https://github.com/ml-explore/mlx-lm/pull/1788) until it merges. `--kv-bits` has no effect on it — see [Qwen3.8-Flash-Next](#qwen38-flash-next-180b-moe-512-experts) |
-| NVIDIA Nemotron 3.5 Super VL (Mamba-2 + attention + latent MoE, RADIO vision tower, via **mlx-vlm**) | `nemotron_h_omni` | Yes (512 experts, top-22, latent MoE) | Tested (124B: ternary `tq3a-tqTe-g64` = 29.29 GiB, resident on a 64 GB Mac at default settings, text 6/6 and vision 3/3; `tq3-g64` = 50.22 GiB at ~20 tok/s with `sysctl` + `--prefill-step-size 256`). mlx-vlm >= 0.7.9 runs the model; `lm_head` and the vision projector `mlp1` stay off the polar path. Needs turboquant-mlx-full >= 0.29.0 |
+| NVIDIA Nemotron 3.5 Super VL (Mamba-2 + attention + latent MoE, RADIO vision tower, via **mlx-vlm**) | `nemotron_h_omni` | Yes (512 experts, top-22, latent MoE) | Tested (120B total, 12B active: ternary `tq3a-tqTe-g64` = 29.29 GiB, resident on a 64 GB Mac at default settings, text 6/6 and vision 3/3; `tq3-g64` = 50.22 GiB at ~20 tok/s with `sysctl` + `--prefill-step-size 256`). mlx-vlm >= 0.7.9 runs the model; `lm_head` and the vision projector `mlp1` stay off the polar path. Needs turboquant-mlx-full >= 0.29.0 |
 | DiffusionGemma (block-diffusion MoE, via **mlx-vlm**) | `diffusion_gemma` | Yes (128 experts, top-8) | Tested (26B-A4B: convert + block-diffusion sampler, coherent at 3-bit — [HF](https://huggingface.co/manjunathshiva/diffusiongemma-26B-A4B-it-tq3-g32)). **Experimental**: decode is much slower than native 4-bit until a batched codebook gather-GEMM kernel lands |
 
 ### mlx-vlm architectures (multimodal / diffusion)
