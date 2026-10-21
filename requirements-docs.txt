@@ -1,0 +1,2 @@
+# Documentation build only; not a runtime dependency of the turboquant-mlx-full package.
+zensical==0.0.67

@@ -31,3 +31,6 @@ venv/
 
 # Design notes — local working documents, deliberately untracked
 docs/design/
+
+# Documentation build output (zensical build)
+site/

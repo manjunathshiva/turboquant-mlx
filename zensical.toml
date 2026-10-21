@@ -1,0 +1,94 @@
+# Documentation site, built with Zensical (https://zensical.org) and published to GitHub Pages by
+# .github/workflows/docs.yml. Preview locally:
+#   pip install -r requirements-docs.txt && zensical serve
+
+[project]
+site_name = "TurboQuant-MLX"
+site_description = "Data-free weight and KV cache compression for big models on Apple Silicon: 120B-235B MoEs on a 16-64 GB Mac"
+site_url = "https://manjunathshiva.github.io/turboquant-mlx/"
+site_author = "Manjunath Janardhan"
+repo_url = "https://github.com/manjunathshiva/turboquant-mlx"
+repo_name = "manjunathshiva/turboquant-mlx"
+edit_uri = "edit/main/docs/"
+copyright = "Apache 2.0 · Manjunath Janardhan"
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = "getting-started.md" },
+  { "Choose a model" = "models.md" },
+  { "Guides" = [
+    { "Convert a model" = "guides/convert.md" },
+    { "Generate text" = "guides/generate.md" },
+    { "Serve an OpenAI-compatible API" = "guides/serve.md" },
+    { "Local coding agents" = "guides/coding-agents.md" },
+    { "Vision models" = "guides/vision.md" },
+    { "Models bigger than RAM (expert streaming)" = "guides/streaming.md" },
+    { "KV cache compression" = "guides/kv-cache.md" },
+    { "Memory and macOS settings" = "guides/memory.md" },
+  ] },
+  { "Models" = [
+    { "Overview" = "model-pages/index.md" },
+    { "GPT-OSS" = "model-pages/gpt-oss.md" },
+    { "Qwen3.5-122B-A10B" = "model-pages/qwen35-122b.md" },
+    { "Qwen3.6-35B-A3B" = "model-pages/qwen36-35b.md" },
+    { "Qwen3.6-27B" = "model-pages/qwen36-27b.md" },
+    { "Qwen3-235B-A22B" = "model-pages/qwen3-235b.md" },
+    { "Nemotron-3" = "model-pages/nemotron-3.md" },
+    { "Nemotron 3.5 Super VL" = "model-pages/nemotron-35-vl.md" },
+    { "Poolside Laguna" = "model-pages/laguna.md" },
+    { "Kimi K3" = "model-pages/kimi-k3.md" },
+    { "Sarvam MoE" = "model-pages/sarvam.md" },
+    { "Muse Glimmer" = "model-pages/muse-glimmer.md" },
+    { "Qwen3.8-27B" = "model-pages/qwen38-27b.md" },
+    { "Qwen3.8-Flash-Next" = "model-pages/qwen38-flash-next.md" },
+    { "DiffusionGemma" = "model-pages/diffusiongemma.md" },
+  ] },
+  { "How it works" = "how-it-works.md" },
+  { "Benchmarks" = [
+    { "Weight and KV compression" = "benchmarks.md" },
+    { "Muse Glimmer results" = "RESULTS_MUSE.md" },
+  ] },
+  { "Reference" = [
+    { "Command line" = "reference/cli.md" },
+    { "Python API" = "reference/python-api.md" },
+    { "Supported architectures" = "reference/architectures.md" },
+  ] },
+  { "Changelog" = "https://github.com/manjunathshiva/turboquant-mlx/blob/main/CHANGELOG.md" },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.inlinehilite = {}
+pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true
