@@ -53,7 +53,9 @@ turboquant-serve \
 
 Measured on the mini, with the model on an external SSD: 15.2–15.6 tok/s at a 13.6 GB peak, and
 a 21K-token cold prefill in about 234 s. The Opencode fix-the-failing-test task passed 3/3,
-faster each run as the disk cache warmed. Point the harness at `http://localhost:8080/v1` with
+faster each run as the disk cache warmed. At the default GPU limit the practical context
+ceiling is about 16–18K tokens; the 128-token prefill step and the 14 GiB limit above are what
+carry 21K and more. Point the harness at `http://localhost:8080/v1` with
 the model id `default_model` (mlx-lm's name for the `--model` you started with), and turn off
 auto-discovered skills. If the harness runs on another machine, add `--host 0.0.0.0`, but only
 on a network you trust: the server has no authentication.

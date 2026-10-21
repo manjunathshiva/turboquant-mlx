@@ -72,7 +72,8 @@ is KV quantization: TurboQuant's `--kv-bits` and `--kv-group-size` replace mlx-l
 With `--disk-cache`, KV-cache checkpoints are written per conversation by a background writer,
 and any later request, including the first after a restart or crash, resumes from the longest
 saved prefix. Measured: the first turn of a 16.3K-token conversation after a restart dropped
-from **21.1 s to 3.0 s** on a 64 GB Mac, with identical output.
+from **21.1 s to 3.0 s** on a 64 GB Mac (6.9×), with identical output. On a 16 GB mini, a
+21K-token prefill that crashed resumed from token 18,432 (a 249 MB checkpoint, loaded in 2.3 s).
 
 Hybrid models with a recurrent state (Qwen3.6, Qwen3.8, Nemotron) can't trim a checkpoint
 back to an earlier point, so they rely on **mid-prefill checkpoints** taken every
@@ -94,9 +95,19 @@ The in-memory prompt cache grows with every conversation. In order of impact:
 1. **Raise the GPU memory limit**, once per boot: `sudo sysctl -w iogpu.wired_limit_mb=57344`
    on a 64 GB Mac, `43008` on 48 GB. See [Memory and macOS settings](memory.md).
 2. **Use a smaller prefill step** on tight machines: `--prefill-step-size 256` (or 128).
-3. **Cap the prompt cache:** `--prompt-cache-bytes 2147483648` (2 GB), or
-   `--prompt-cache-size 1`. The `auto` guards above already do this when headroom is small.
+3. **Cap the prompt cache:** `--prompt-cache-max-gb 2`, or `--prompt-cache-size 1` to keep
+   only one conversation. The `auto` guards above already do this when headroom is small.
+   mlx-lm's own `--prompt-cache-bytes` is applied only when the server batches requests. With
+   any `--kv-*` option or a `--draft-model`, or for a request that sets a `seed` or includes
+   an image, requests run one at a time and only `--prompt-cache-max-gb` caps the cache.
 4. **Close other GPU users** (browsers, Electron apps, video editors).
+
+Why the `auto` guards exist, measured on a 16 GB mini serving the 12.6 GB Qwen3.6-35B build:
+during a long prefill, MLX's buffer cache grew about 80 MB per 1K prompt tokens and crashed a
+21K-token prefill at 14K while active memory stayed flat (`--metal-cache-limit-gb` caps it);
+and an agent conversation kept 8 cached states (1.14 GB) until the system paged and the GPU
+watchdog killed the server (`--prompt-cache-max-gb` caps it). With `--disk-cache` on, an
+evicted state is restored from disk, so a small cap costs little.
 
 ## A model bigger than RAM
 
@@ -123,5 +134,5 @@ turboquant-serve \
     ```bash
     sudo sysctl -w iogpu.wired_limit_mb=57344
     turboquant-serve --model manjunathshiva/Nemotron-3-Super-120B-A12B-tq3 \
-        --port 8080 --prompt-cache-bytes 2147483648
+        --port 8080 --prompt-cache-max-gb 2
     ```

@@ -14,8 +14,9 @@ pins that invariant so a kernel refactor can't quietly break it.
 
 (`polar_gather_qmm` reduces in a batch-size-dependent order and differs by
 ~1e-4..4e-3 — inherent to tiled GEMM, and NOT asserted here. The end-to-end
-consequence is documented in the README: it is a property of chunked prefill on
-Metal, reproduced on stock mlx-lm with none of our code in the loop.)
+consequence is documented in docs/guides/generate.md: it is a property of
+chunked prefill on Metal, reproduced on stock mlx-lm with none of our code in
+the loop.)
 """
 
 import mlx.core as mx

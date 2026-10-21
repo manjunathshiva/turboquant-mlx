@@ -19,7 +19,8 @@ settings it needs. See [Get started](../getting-started.md#1-check-that-it-fits-
 sudo sysctl -w iogpu.wired_limit_mb=60416    # example for a 64 GB Mac
 ```
 
-It takes effect at once and lasts until a reboot. To go back to the default:
+It takes effect at once and lasts until a reboot (to keep it, add the line
+`iogpu.wired_limit_mb=60416` to `/etc/sysctl.conf`). To go back to the default:
 
 ```bash
 sudo sysctl -w iogpu.wired_limit_mb=0
@@ -75,8 +76,9 @@ In order:
 1. Smaller prefill steps: `--prefill-step-size 256`, then 128.
 2. Raise the GPU limit with `sysctl` (above).
 3. Compress the KV cache: `--kv-k-bits 8 --kv-v-bits 3`.
-4. When serving, cap the prompt cache: `--prompt-cache-bytes`, or `--prompt-cache-size 1`.
-   See [Serve](serve.md#near-the-memory-limit).
+4. When serving, cap the prompt cache: `--prompt-cache-max-gb 2`, or `--prompt-cache-size 1`.
+   (mlx-lm's `--prompt-cache-bytes` applies only when requests are batched.) See
+   [Serve](serve.md#near-the-memory-limit).
 5. Pick a smaller build, or [stream the experts](streaming.md).
 
 ## Long prompts close to the limit

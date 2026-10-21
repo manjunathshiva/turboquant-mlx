@@ -70,8 +70,13 @@ turboquant-serve --model ./model-tq3 --kv-k-bits 8 --kv-v-bits 3 \
 | Qwen3.6-35B-A3B (hybrid, 10/40 full-attention) | 2.1K | 40.2 tok/s | 43.9 tok/s | 1.09× |
 
 Output is identical. It covers decode only, batch 1, with no FP16 sink
-(`--kv-min-tokens 0`). Any step it can't handle (prefill, sink or sliding-window layers) falls
-back to the standard path, so it is safe to turn on.
+(`--kv-min-tokens 0`), bit-packed keys and values, and equal K/V head sizes that are a multiple
+of 32. Any step it can't handle (prefill, sink or sliding-window layers) falls back to the
+standard path, so it is safe to turn on.
+
+The gain grows with context: a single attention layer is about 10× faster than the standard
+path at 32K tokens. End to end, it scales with the share of full-attention layers, which is why
+the hybrid Qwen3.6 gains less than the dense Llama.
 
 ## From Python
 
