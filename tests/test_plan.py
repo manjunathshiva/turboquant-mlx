@@ -185,15 +185,17 @@ class TestKV:
         and "config lacks KV geometry"."""
         from turboquant_mlx.plan import _moe_geometry
 
+        # 88 layers, as in the real config: 8 attention + 40 Mamba/MoE pairs.
         blocks = (["mamba", "moe"] * 4 + ["attention"]) * 8
-        blocks += ["mamba", "moe"] * (44 - 4 * 8)
+        blocks += ["mamba", "moe"] * (40 - 4 * 8)
+        assert len(blocks) == 88
         cfg = {"model_type": "nemotron_h_omni", "llm_config": {
             "layers_block_type": blocks, "num_key_value_heads": 2,
             "head_dim": 128, "n_routed_experts": 512, "num_experts_per_tok": 22,
             "hidden_size": 4096, "moe_intermediate_size": 2688,
         }}
         n_full, _, n_layers, note = _attention_layers(cfg)
-        assert (n_full, n_layers) == (8, len(blocks))
+        assert (n_full, n_layers) == (8, 88)
         assert "Mamba" in note
         _, per_tok, _ = kv_bytes(cfg, 4096)
         assert per_tok == 2 * 2 * 128 * 8 * 2
