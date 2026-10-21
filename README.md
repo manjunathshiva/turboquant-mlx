@@ -151,10 +151,11 @@ pip install "turboquant-mlx-full[vlm]"    # multimodal / diffusion models via ml
 pip install "turboquant-mlx-full[kimi]"   # Kimi K3's tiktoken-based tokenizer
 ```
 
-> **Muse Glimmer needs mlx-vlm >= 0.6.12**, the first release carrying its MLX
-> model classes ([Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838),
-> merged 2026-08-10). `[vlm]` pins that floor, so the one-liner above is all you
-> need — the git pin previously documented here is obsolete.
+> **`[vlm]` installs mlx-vlm >= 0.7.9**, which `turboquant-serve-vlm` needs since
+> the mlx-lm 0.32 port. That also covers Muse Glimmer, whose embedding layout
+> settled in 0.6.12 ([Blaizzy/mlx-vlm#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838),
+> merged 2026-08-10), so the one-liner above is all you need — the git pin
+> previously documented here is obsolete.
 
 > **Qwen3.8-Flash-Next needs `turboquant-mlx-full >= 0.26.0`**, and `>= 0.27.0` for
 > `--ngram-offload` (0 swapouts inside requests on a 64 GB Mac, measured). Text runs on the

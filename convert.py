@@ -139,9 +139,10 @@ def convert(
         protect_bits: Codebook width for protected expert layers.
         expert_layer_tiers: ``{layer: "ternary" | "2" | "3" | "4"}``, a hand-chosen
             tier per MoE layer. See TurboQuantConfig.expert_layer_tiers.
-        trust_remote_code: Let the source's own tokenizer code run. A local
-            ``kimi_k3`` directory gets this without asking; a Hub repo id never
-            does.
+        trust_remote_code: Let the source's own code run: its tokenizer code,
+            and any model code its config names (``model_file``). A local
+            ``kimi_k3`` directory gets the tokenizer part without asking; a Hub
+            repo id never does.
     """
     from mlx_lm.utils import save
 
@@ -182,8 +183,10 @@ def convert(
             {"trust_remote_code": True}
             if trust_remote_code or is_local_kimi_k3(hf_path) else {}
         ),
-        return_config=True,
         lazy=True,
+        # Only the user's own flag opens mlx-lm 0.32's gate on a source's
+        # model code (`model_file`); the local-K3 rule covers the tokenizer.
+        trust_remote_code=trust_remote_code,
     )
 
     # Apply dtype if specified
@@ -261,9 +264,10 @@ def configure_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trust-remote-code",
         action="store_true",
-        help="Allow the source's own tokenizer code (tokenization_*.py) to "
-             "run. Needed for Kimi K3 by Hub repo id; a local K3 directory "
-             "is trusted without it.",
+        help="Allow the source's own code to run: its tokenizer code "
+             "(tokenization_*.py) and any model code its config names "
+             "(model_file). Needed for Kimi K3 by Hub repo id; a local K3 "
+             "directory's tokenizer is trusted without it.",
     )
     parser.add_argument(
         "--mlx-path",

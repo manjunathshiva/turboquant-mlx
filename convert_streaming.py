@@ -160,8 +160,10 @@ def convert_streaming(
             {"trust_remote_code": True}
             if trust_remote_code or is_local_kimi_k3(hf_path) else {}
         ),
-        return_config=True,
         lazy=True,
+        # Only the user's own flag opens mlx-lm 0.32's gate on a source's
+        # model code (`model_file`); the local-K3 rule covers the tokenizer.
+        trust_remote_code=trust_remote_code,
     )
     arch = config.get("model_type", "unknown")
     print(f"[INFO] Streaming TurboQuant convert: {bits}-bit, gs={group_size}, "

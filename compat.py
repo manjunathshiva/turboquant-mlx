@@ -130,13 +130,15 @@ def get_model_classes(config: dict):
 
 
 def load_source(path_or_hf_repo, tokenizer_config=None, lazy=False,
-                return_config=False, trust_remote_code=False):
+                trust_remote_code=False):
     """``mlx_lm.utils.load`` for conversion sources, built via our ports.
 
     Same steps as upstream's ``load`` (download, ``load_model``,
     ``load_tokenizer``) with :func:`get_model_classes` as the class resolver.
-    ``trust_remote_code`` is mlx-lm 0.32's gate on a checkpoint's own model code
-    (``model_file``); the tokenizer's trust travels in ``tokenizer_config``.
+    Always returns ``(model, tokenizer, config)``: every converter needs the
+    config. ``trust_remote_code`` is mlx-lm 0.32's gate on a checkpoint's own
+    model code (``model_file``); the tokenizer's trust travels in
+    ``tokenizer_config``.
     """
     from mlx_lm.utils import _download, load_model, load_tokenizer
 
@@ -149,9 +151,7 @@ def load_source(path_or_hf_repo, tokenizer_config=None, lazy=False,
         model_path, tokenizer_config,
         eos_token_ids=config.get("eos_token_id", None),
     )
-    if return_config:
-        return model, tokenizer, config
-    return model, tokenizer
+    return model, tokenizer, config
 
 
 def _register_local_model(model_type: str, module_name: str = None):
