@@ -38,7 +38,7 @@ model fits in memory, running it in memory is always faster: for the 9.4 GB tern
 
 | Option | Default | What it does |
 |---|---|---|
-| `--cache-budget-gb N\|auto` | — | Memory for cached experts. `auto` sizes it from the Mac's GPU working set, minus the resident weights and a reserve. 8 is the sweet spot on a 16 GB mini; 2 if memory is tight. |
+| `--cache-budget-gb N\|auto` | 3 | Memory for cached experts. `auto` sizes it from the Mac's GPU working set, minus the resident weights and a reserve. 8 is the sweet spot on a 16 GB mini; 2 if memory is tight. |
 | `--max-active-experts K` | 4 | Reads at most K experts per token (the router's top-K, renormalized). On Qwen3.6-35B, 8→4 matched full routing on the stress tests and halved disk reads; K=2 broke JSON output. **`0` keeps the model's own routing**: use it for quality tests and agents. |
 | `--use-page-cache` / `--no-page-cache` | auto | Whether expert reads go through the macOS page cache. Auto turns it on only when the model files are under 0.6× of RAM; then decoding was 2.4× faster on the 35B. |
 | `--prefetch-workers` | 8 | Parallel reads of a layer's missing experts (about 1.9× faster than one at a time). |

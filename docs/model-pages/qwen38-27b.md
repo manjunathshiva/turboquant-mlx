@@ -19,8 +19,8 @@ Two builds are published, and they target different machines.
 ¹ the agentic run was done on the 8-bit-extras `tq3`; the published `tq3-mini`
 differs only in the extras tier, at an identical 8.0052-vs-8.0551 perplexity.
 
-Both fix a planted off-by-one end to end: run the given pytest command, read the
-file, make the minimal edit, re-run to green, explain with `file:line`. Vision
+Both fix a planted off-by-one end to end: given the task's pytest command, each build
+runs it, reads the file, makes the minimal edit, re-runs to green and explains with `file:line`. Vision
 works on both — shapes, colours, positions and grounded bounding boxes.
 
 **Take `tq4` if it fits; take `tq3-mini` if it does not.** At 4-bit, `tq4` is

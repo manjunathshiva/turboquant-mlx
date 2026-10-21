@@ -25,7 +25,7 @@ The converter automatically:
 ### Step 2: Generate text
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./gpt-oss-20b-tq3 \
     --prompt "Explain quantum entanglement to a 10-year-old." \
     --max-tokens 256
@@ -82,7 +82,7 @@ python -m turboquant_mlx.convert \
 ### Step 2: Generate text
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./gpt-oss-120b-tq3 \
     --prompt "Explain quantum computing in simple terms." \
     --max-tokens 200

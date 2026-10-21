@@ -28,7 +28,7 @@ python -m turboquant_mlx.convert \
 Nemotron-3's chat template ends in a `<think>\n` scaffold that primes EOS as the top-1 logit at the start of the assistant turn. Pass `--min-tokens` to mask EOS for the first N tokens so the model enters the think phase:
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./nemotron-3-super-120b-tq3 \
     --prompt "Why is the sky blue?" \
     --max-tokens 200 --min-tokens 50
@@ -77,7 +77,7 @@ avoid degenerate tail loops at >1500 tokens. The recommended decode config
 recall clean):
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./nemotron-3-super-120b-tq3a-tq2e-g32 \
     --prompt "Why is the sky blue?" \
     --max-tokens 4096 --min-tokens 50 \

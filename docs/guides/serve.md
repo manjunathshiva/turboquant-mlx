@@ -21,7 +21,8 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-The `model` field must match the string you passed to `--model`. Reasoning models return their
+The `model` field is the string you passed to `--model`, or `default_model`, mlx-lm's name for it.
+A request that names a different model makes the server load that one instead. Reasoning models return their
 thinking in `message.reasoning` and the answer in `message.content`; give them
 `max_tokens >= 2048` so both fit.
 
@@ -37,7 +38,7 @@ rest are passed on, so `--help` doesn't list them.
 
 | Option | Default | What it does |
 |---|---|---|
-| `--kv-k-bits N --kv-v-bits M` | off | Compress each request's KV cache. K8/V3 is the recommended mix. [More](kv-cache.md). |
+| `--kv-k-bits N --kv-v-bits M` | off | Compress each request's KV cache. K8/V3 is the recommended mix. See [KV cache compression](kv-cache.md). |
 | `--kv-bits N` | off | The same width for K and V (legacy). |
 | `--kv-min-tokens N` | 0 | Keep the first N cached tokens in FP16 (attention sinks). 128 is a good value. |
 | `--kv-group-size G` | 64 | Rotation group size for KV quantization. |

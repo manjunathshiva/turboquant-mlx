@@ -218,7 +218,7 @@ options:
 
 ## `turboquant-serve`
 
-OpenAI-compatible server (mlx_lm.server with a TurboQuant loader). **Its own options (`--disk-cache`, `--kv-*`, `--cache-budget-gb`, …) are not shown by `--help`;** they're listed in [Serve an OpenAI-compatible API](../guides/serve.md#options).
+OpenAI-compatible server (mlx_lm.server with a TurboQuant loader). **Most of TurboQuant's own options are not shown by `--help`** (`--disk-cache`, `--cache-budget-gb`, `--kv-k-bits`/`--kv-v-bits`/`--kv-min-tokens`, `--tool-syntax-greedy`, …). `--kv-bits` and `--kv-group-size` do appear, with mlx-lm's descriptions, but TurboQuant handles them. All are listed in [Serve an OpenAI-compatible API](../guides/serve.md#options).
 
 ```text
 TurboQuant-MLX serve  ·  OpenAI-compatible HTTP server (backend: mlx_lm.server, TurboQuant-aware loader)

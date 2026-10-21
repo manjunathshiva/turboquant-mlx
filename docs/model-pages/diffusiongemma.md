@@ -4,8 +4,8 @@
     DiffusionGemma generates by denoising and runs through mlx-vlm's diffusion sampler.
     TurboQuant builds work, but decode is much slower than MLX's native 4-bit build. On the
     current release stack (mlx-lm 0.32, mlx-vlm 0.7.9) some short prompts return an empty
-    answer, where the stack these builds were made on answered correctly. That is being
-    investigated. Prose prompts generate normally.
+    answer, while the stack they were built on (0.28.1 with mlx-vlm 0.6.3) answered correctly.
+    That is being investigated. Prose prompts generate normally.
 
 Google's [DiffusionGemma-26B-A4B](https://huggingface.co/google/diffusiongemma-26B-A4B-it) is
 a block-diffusion Mixture-of-Experts model: 30 layers, 128 routed experts (top-8), ~25.2B total
@@ -65,5 +65,7 @@ python -m turboquant_mlx.convert_vlm \
     --quantize-extras
 ```
 
-The routers, the self-conditioning MLP, the vision embedding and the dense per-layer MLP stay
-at full precision automatically.
+The routers and the self-conditioning MLP always stay at full precision. The dense per-layer
+MLP, the embeddings and the vision tower stay out of the polar path: in BF16 without
+`--quantize-extras`, and 8-bit affine with it (layers whose width doesn't fit the group size
+stay BF16).

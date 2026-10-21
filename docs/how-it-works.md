@@ -12,7 +12,8 @@ Every quantized layer goes through the same steps, and none of them looks at any
    spreads every weight's value across the whole group, so whatever shape the weights had, the
    result is close to a Gaussian.
 2. **Group and scale.** Weights are split into groups along the input dimension (the group
-   size: 32, 64 or 128), and each group is divided by its root-mean-square.
+   size: 32, 64 or 128, and also 16 for MLP and expert layers via `--mlp-group-size`), and
+   each group is divided by its root-mean-square.
 3. **Snap to a codebook.** Each scaled weight is replaced by the nearest centroid of a
    **Lloyd-Max codebook**, the quantizer that minimizes error for a Gaussian. Because the
    rotation made the weights Gaussian, one fixed codebook per bit width works for every layer

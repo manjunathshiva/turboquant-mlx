@@ -77,7 +77,7 @@ back to the standard path, so it is safe to turn on.
 
 ```python
 from mlx_lm.models.cache import make_prompt_cache
-from turboquant_mlx.layers import convert_cache_to_turboquant
+from turboquant_mlx.layers import convert_cache_to_turboquant, enable_fused_attend
 
 cache = make_prompt_cache(model)                 # the right cache type per layer
 cache = convert_cache_to_turboquant(
@@ -89,5 +89,5 @@ cache = convert_cache_to_turboquant(
 ```
 
 Layers that don't hold a growing KV cache (`RotatingKVCache`, `ArraysCache`) are left as they
-are. For the fused kernel, call `turboquant_mlx.layers.enable_fused_attend(cache)` after
-converting.
+are. For the fused kernel, call `enable_fused_attend(cache)` after converting (it needs
+`min_tokens_before_quant=0`).

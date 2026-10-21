@@ -41,7 +41,8 @@ jobs:
   deploy:
     needs: build
     # Pages is configured on the canonical repository only; forks still run the strict build above.
-    if: github.event_name != 'pull_request' && github.repository == 'manjunathshiva/turboquant-mlx'
+    # Only main deploys: a manual run from another branch stays build-only.
+    if: github.ref == 'refs/heads/main' && github.repository == 'manjunathshiva/turboquant-mlx'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

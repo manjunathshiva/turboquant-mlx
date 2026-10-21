@@ -34,7 +34,7 @@ generation speed and peak memory.
 | Option | Use |
 |---|---|
 | `--kv-k-bits 8 --kv-v-bits 3` | Compresses the KV cache (the recommended mix). Add `--kv-min-tokens 128` to keep the first tokens in FP16. See [KV cache compression](kv-cache.md). |
-| `--kv-bits N` | The same width for keys and values. Only safe on FP16 weights; use the K/V mix on TurboQuant weights. |
+| `--kv-bits N` | The same width for keys and values. 8 is safe everywhere; at 3 bits, symmetric KV breaks long generations on TurboQuant weights, so use the K8/V3 mix there. |
 | `--ngram-offload` | Qwen3.8-Flash-Next only: serves its n-gram table from memory-mapped files, ~17.9 GiB less GPU memory, identical output. |
 | `--fast` | Skips the QJL correction on builds that have it (about 25% faster). |
 

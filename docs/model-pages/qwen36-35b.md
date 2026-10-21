@@ -22,7 +22,7 @@ turboquant-generate \
 
 ## Run it on a 16 GB Mac mini (expert streaming)
 
-The model is ~16 GB on disk, so it won't fit fully resident in 16 GB alongside the OS (resident decode peaks ~18 GB). Expert streaming pages only the router-selected experts from disk per token (LRU-cached), keeping resident memory to a few GB. Output is **bit-identical** to the fully-resident model. (`os.pread` + macOS `F_NOCACHE` keep the OS page cache from ballooning while streaming.)
+The model is ~16 GB on disk, so it won't fit fully resident in 16 GB alongside the OS (resident decode peaks ~18 GB). Expert streaming pages only the router-selected experts from disk per token (LRU-cached), keeping resident memory to a few GB. With `--max-active-experts 0` (the model's own top-8 routing) the output is **bit-identical** to the fully-resident model; the default of 4 reads about half as many experts and matched full routing on the stress tests, but is not identical in general. (`os.pread` + macOS `F_NOCACHE` keep the OS page cache from ballooning while streaming.)
 
 Since `v0.5.0` the missing experts for each layer are read **in parallel** on a thread pool (`--prefetch-workers`, default `8`), hiding SSD latency behind compute — ~1.9× faster decode at a tight cache budget, still bit-identical. Pass `--prefetch-workers 1` for the serial baseline.
 

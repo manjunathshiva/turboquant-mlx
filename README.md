@@ -303,7 +303,7 @@ python -m turboquant_mlx.convert \
 ### 2. Generate text
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./gpt-oss-20b-tq2 \
     --prompt "Why is the sky blue? Explain in simple terms." \
     --max-tokens 200
@@ -851,7 +851,7 @@ The converter automatically:
 #### Step 2: Generate text
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./gpt-oss-20b-tq3 \
     --prompt "Explain quantum entanglement to a 10-year-old." \
     --max-tokens 256
@@ -910,7 +910,7 @@ python -m turboquant_mlx.convert \
 #### Step 2: Generate text
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./gpt-oss-120b-tq3 \
     --prompt "Explain quantum computing in simple terms." \
     --max-tokens 200
@@ -963,7 +963,7 @@ python -m turboquant_mlx.convert \
 #### Step 2: Generate text
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./qwen3.5-122b-tq3 \
     --prompt "Why is the sky blue? Explain in simple terms." \
     --max-tokens 200
@@ -1182,7 +1182,7 @@ python -m turboquant_mlx.convert \
 Nemotron-3's chat template ends in a `<think>\n` scaffold that primes EOS as the top-1 logit at the start of the assistant turn. Pass `--min-tokens` to mask EOS for the first N tokens so the model enters the think phase:
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./nemotron-3-super-120b-tq3 \
     --prompt "Why is the sky blue?" \
     --max-tokens 200 --min-tokens 50
@@ -1231,7 +1231,7 @@ avoid degenerate tail loops at >1500 tokens. The recommended decode config
 recall clean):
 
 ```bash
-turboquant-generate \\
+turboquant-generate \
     --model ./nemotron-3-super-120b-tq3a-tq2e-g32 \
     --prompt "Why is the sky blue?" \
     --max-tokens 4096 --min-tokens 50 \
@@ -1892,7 +1892,7 @@ Options:
 | Qwen3-MoE | `qwen3_moe` | Yes (128 experts, top-8) | Tested — Qwen3-235B-A22B converted to a hybrid **tq3a-tq2e** build (70.5 GB) on a 16 GB Mac mini via `--streaming`; streams and passes 5/6 quality probes on a 64 GB Mac |
 | Nemotron-H (Mamba/attention hybrid) | `nemotron_h` | Yes (512 experts w/ latent MoE on Super-120B) | Tested (Nano-4B, Super-120B) — requires mlx-lm ≥ 0.31.3 |
 | Poolside Laguna (SWA + global attn, per-head gating) | `laguna` | Yes (256 experts, top-8/top-10) | Tested (XS.2 33B at 3-bit; S-2.1 118B at ternary 1.58-bit — both convert + generate + Opencode agentic pass; expert streaming wired for both). Custom arch — MLX port + loader shipped here (mlx-lm has no native `laguna`); logit-parity 2e-7 vs transformers |
-| DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | Tested (V2-Lite: convert + resident + streaming, coherent at 3-bit); V3/V3.2 share the MLA+MoE layout and reuse the config (untested — need ~250 GB disk) |
+| DeepSeek-V2 / V3 (MLA + MoE) | `deepseek_v2` / `deepseek_v3` / `deepseek_v32` | Yes (SwitchGLU experts) | V2-Lite tested (convert + resident + streaming, coherent at 3-bit). V3/V3.2 share the MLA+MoE layout and reuse the config, but are **untested** (they need ~250 GB of disk) |
 | Kimi K3 (KDA linear-attn + gated-NoPE MLA, Stable LatentMoE) | `kimi_k3` | Yes (896 experts, top-16 + 2 shared) | Tested (2.8T: mxfp4 source → 931 GB `tq3a-tqTe-down4-g64`, streams from disk on a 512 GB Mac Studio; does **not** fit resident on any Mac). Custom arch — MLX port shipped here (mlx-lm has no native `kimi_k3`); fp32 forward parity ≤ 2.7e-6 vs transformers. Needs `[kimi]` extra |
 | Sarvam MoE (Megatron-style fused QKV, DeepSeek-V3 routing) | `sarvam_moe` | Yes | Port tested against fp32 (7122/7122 tensors, layer-1 parity 5.4e-7). Custom arch — MLX port shipped here. **No quantized build published**: 4-bit degenerates on long generations (53% of trials; mlx-lm affine 4-bit 100%) |
 | Muse Glimmer (dense VLM: gated attention, sandwich norms, sliding/NoPE mix, ViT-G/14) | `muse_glimmer` | No | Tested (29.8B: `tq4-g64` beats affine 4-bit on PPL — 4.3315 vs 4.3798 — in 25% less space; `tq3-g64` = 12.53 GiB). Structural match verified against the checkpoint, 1436/1436 tensors. Needs **mlx-vlm >= 0.6.12** ([#1838](https://github.com/Blaizzy/mlx-vlm/pull/1838), merged) — see [Muse Glimmer](#muse-glimmer-30b-dense-vlm) |

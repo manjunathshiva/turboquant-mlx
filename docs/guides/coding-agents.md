@@ -43,7 +43,7 @@ sudo sysctl -w iogpu.wired_limit_mb=14336   # 14 GiB; 13824 is enough below ~16K
 
 turboquant-serve \
     --model manjunathshiva/Qwen3.6-35B-A3B-tq3a-tqTe-down4-g64 \
-    --host 0.0.0.0 --port 8080 \
+    --port 8080 \
     --kv-bits 8 --tool-syntax-greedy --disk-cache \
     --prefill-step-size 128 \
     --temp 0.7 --top-p 0.8 --top-k 20 \
@@ -53,8 +53,13 @@ turboquant-serve \
 
 Measured on the mini, with the model on an external SSD: 15.2–15.6 tok/s at a 13.6 GB peak, and
 a 21K-token cold prefill in about 234 s. The Opencode fix-the-failing-test task passed 3/3,
-faster each run as the disk cache warmed. Point the harness at `http://<host>:8080/v1` with the
-model id `default_model`, and turn off auto-discovered skills.
+faster each run as the disk cache warmed. Point the harness at `http://localhost:8080/v1` with
+the model id `default_model` (mlx-lm's name for the `--model` you started with), and turn off
+auto-discovered skills. If the harness runs on another machine, add `--host 0.0.0.0`, but only
+on a network you trust: the server has no authentication.
+
+`--kv-bits 8` (8-bit keys and values) is what this recipe was measured with. On TurboQuant
+weights avoid low symmetric widths such as `--kv-bits 3`; see [KV cache compression](kv-cache.md).
 
 ## Laguna (32 GB and up)
 
