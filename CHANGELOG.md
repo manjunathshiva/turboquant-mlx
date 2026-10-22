@@ -6,6 +6,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docs: the request `model` id for `turboquant-serve-vlm`.** The vision guide
+  said to use the id `GET /v1/models` returns, but mlx-vlm lists every MLX
+  model in the Hugging Face cache there, and a request naming any id other
+  than the server's `--model` makes it unload that model and load (or
+  download) the named one. The guide now says to send the exact `--model`
+  value.
+- **Docs: NVIDIA Nemotron 3.5 Super VL ternary speed.** The published
+  16–21 tok/s was measured with the Mac cool. Decode settles at 14–15 tok/s
+  once it is hot, on every decode path, so the README and docs now give
+  ~14–21 tok/s with both figures. The 2× over 0.29.0 is unchanged.
+
 ## [0.30.0] - 2026-10-21
 
 ### Added
