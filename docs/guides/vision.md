@@ -43,9 +43,10 @@ turboquant-serve-vlm --model manjunathshiva/Muse-Glimmer-30B-tq4-g64 \
 
 - It binds `127.0.0.1` unless you pass `--host` (mlx-vlm on its own binds `0.0.0.0`).
 - **Every request must name a `model`, and it must be the exact `--model` value the server
-  started with.** mlx-vlm answers HTTP 422 without one. Any other id makes it unload your model
-  and load that one instead, downloading it from the Hub if needed; `default_model` (the
-  `turboquant-serve` convention) unloads it and then fails. Don't copy the id from
+  started with.** mlx-vlm answers HTTP 422 without one. It treats any other id as a model to
+  load, downloading it from the Hub if needed, and when that id is another chat or vision
+  model it unloads yours first; `default_model` (the `turboquant-serve` convention) unloads it
+  and then fails. Don't copy the id from
   `GET /v1/models`: it lists every MLX model in your Hugging Face cache, sorted by name, not
   only the loaded one.
 - Reasoning is separated from the answer: the right thinking delimiters are set per model, so
