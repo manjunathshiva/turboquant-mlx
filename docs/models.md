@@ -61,7 +61,7 @@ Measured on a 64 GB M4 Max unless noted; these fit a 24–36 GB Mac by size. Che
 
 | Model | Build | Size | Settings | Speed (M4 Max) | Notes |
 |---|---|---|---|---|---|
-| NVIDIA Nemotron 3.5 Super VL 120B (vision) | [tq3a-tqTe-g64](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3a-tqTe-g64) | 29.29 GiB | **default** | ~16–21 tok/s | Measured on 0.30.0. 44.7 GB peak at a 36K-token prompt. Text 6/6, vision 3/3. |
+| NVIDIA Nemotron 3.5 Super VL 120B (vision) | [tq3a-tqTe-g64](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3a-tqTe-g64) | 29.29 GiB | **default** | ~14–21 tok/s | Measured on 0.30.0: ~20 while the Mac is cool, 14–15 once it is hot. 44.7 GB peak at a 36K-token prompt. Text 6/6, vision 3/3. |
 | NVIDIA Nemotron 3.5 Super VL 120B (vision) | [tq3-g64](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3-g64) | 50.22 GiB | sysctl 60416 + `--prefill-step-size 256` | ~19–21 tok/s | About as fast as the ternary build since 0.30.0, but needs both settings. |
 | Qwen3.8-Flash-Next 180B (vision) | [tq4a-tq2e-g64](https://huggingface.co/manjunathshiva/Qwen3.8-Flash-Next-tq4a-tq2e-g64) | 52.00 GiB | sysctl 60416 | 16–18 tok/s | 56.3 GB peak. `--ngram-offload` cuts the resident footprint. |
 | Qwen3-235B-A22B | [tq3a-tqTe-g64](https://huggingface.co/manjunathshiva/Qwen3-235B-A22B-Instruct-2507-tq3a-tqTe-g64) | 53 GB | sysctl 60416 | ~9–12 tok/s\* | Fully in memory, no streaming. |

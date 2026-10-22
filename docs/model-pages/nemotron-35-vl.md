@@ -8,12 +8,16 @@ resident on a 64 GB Mac. Needs `turboquant-mlx-full[vlm] >= 0.29.0`; the ternary
 
 | Build | Size | Settings on a 64 GB Mac | Decode | Notes |
 |---|---|---|---|---|
-| [`tq3a-tqTe-g64`](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3a-tqTe-g64) (ternary experts) | 29.29 GiB | **none** | ~16–21 tok/s | 44.7 GB peak at a 36K-token prompt; text 6/6, vision 3/3 |
+| [`tq3a-tqTe-g64`](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3a-tqTe-g64) (ternary experts) | 29.29 GiB | **none** | ~14–21 tok/s | 44.7 GB peak at a 36K-token prompt; text 6/6, vision 3/3 |
 | [`tq3-g64`](https://huggingface.co/manjunathshiva/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-tq3-g64) (3-bit) | 50.22 GiB | `sysctl iogpu.wired_limit_mb=60416` **and** `--prefill-step-size 256` | ~19–21 tok/s | without the smaller prefill step, a ~4,000-word prompt runs out of GPU memory |
 
-The ternary speed was measured on an M4 Max through mlx-vlm with short greedy prompts, text and
-an image: 16.5–21.0 tok/s on 0.30.0, 2× 0.29.0 on the same prompts (8.9–10.5), with
-byte-identical output. Through 0.29.0 the 3-bit build was the faster of the two.
+The ternary speed was measured on a 16-inch M4 Max through mlx-vlm with greedy prompts, text and
+an image. On 0.30.0 it decodes at about 20 tok/s while the Mac is cool and settles at 14–15
+tok/s once it is hot, after a few long prompts or about ten minutes of continuous work. That is
+2× 0.29.0 on the same prompts in the same state (8.9–10.5), with byte-identical output. Context
+length matters little: hot, an 18K-token prompt decodes at about 14 tok/s. Through 0.29.0 the
+3-bit build was the faster of the two; its figures were measured on 0.29.0, not re-measured
+hot.
 
 ```bash
 pip install "turboquant-mlx-full[vlm]>=0.29.0"
